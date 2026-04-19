@@ -64,14 +64,58 @@ detect_singbox_binary() {
   if command -v sing-box >/dev/null 2>&1; then
     SB_BIN="$(command -v sing-box)"; return
   fi
-  fail "未找到 sing-box 可执行文件，请先安装 sing-box"
+  install_singbox
+  if [ -x "/usr/local/bin/sing-box" ]; then
+    SB_BIN="/usr/local/bin/sing-box"; return
+  fi
+  command -v sing-box >/dev/null 2>&1 && SB_BIN="$(command -v sing-box)" && return
+  fail "sing-box 安装失败，请手动安装后重试"
+}
+
+install_singbox() {
+  if [ "${SKIP_SINGBOX:-0}" = "1" ]; then
+    fail "未找到 sing-box。请手动安装或去掉 SKIP_SINGBOX=1 让脚本自动安装。"
+  fi
+  note ""
+  note "未检测到 sing-box。是否自动安装 sing-box 官方稳定版？[Y/n]"
+  if [ "${YES:-0}" = "1" ]; then
+    ANS="y"
+  else
+    read -r ANS || ANS="y"
+  fi
+  case "${ANS:-y}" in
+    n|N|no|NO) fail "已取消，请手动安装 sing-box 后重试" ;;
+  esac
+  note "从官方脚本安装 sing-box..."
+  bash -c "$(curl -fsSL https://sing-box.app/deb-install.sh)" \
+    || bash -c "$(curl -fsSL https://sing-box.app/install.sh)" \
+    || fail "sing-box 官方脚本安装失败"
 }
 
 detect_singbox_config() {
   for candidate in /etc/sing-box/config.json /usr/local/etc/sing-box/config.json; do
     if [ -f "$candidate" ]; then SB_CONFIG="$candidate"; return; fi
   done
-  fail "未找到 sing-box 配置文件，请先准备 config.json"
+  # 无配置则生成最小骨架并启用 v2ray_api（流量统计所需）
+  note "未找到 sing-box 配置，生成最小 /etc/sing-box/config.json"
+  install -d /etc/sing-box
+  cat > /etc/sing-box/config.json <<'JSON'
+{
+  "log": { "level": "info", "timestamp": true },
+  "inbounds": [],
+  "outbounds": [
+    { "type": "direct",  "tag": "direct"  },
+    { "type": "block",   "tag": "block"   }
+  ],
+  "experimental": {
+    "v2ray_api": {
+      "listen": "127.0.0.1:18080",
+      "stats": { "enabled": true, "users": [] }
+    }
+  }
+}
+JSON
+  SB_CONFIG="/etc/sing-box/config.json"
 }
 
 install_files() {
@@ -128,9 +172,16 @@ validate_singbox() {
 reload_systemd() {
   systemctl daemon-reload
   systemctl enable sb-manager.service
-  note "安装完成。启动服务："
+  # 保险：有些发行版 sudo secure_path 或 root shell 尚未刷新 hash，做一个 /usr/bin 软链
+  ln -sf "$BIN_PATH" /usr/bin/sb 2>/dev/null || true
+  hash -r 2>/dev/null || true
+  note ""
+  note "安装完成。可执行以下命令启动服务："
   note "  systemctl start sb-manager.service"
   note "  systemctl status sb-manager.service"
+  note "  journalctl -u sb-manager -f"
+  note ""
+  note "命令未找到时请执行：hash -r  或重新登录 shell；也可使用绝对路径 $BIN_PATH"
 }
 
 require_root
