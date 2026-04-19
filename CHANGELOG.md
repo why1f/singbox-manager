@@ -1,17 +1,31 @@
 # CHANGELOG
 
-## v0.1.3（未发布）
+## v0.1.3
 
 ### Fixed
 
-- `install-release.sh` 丢失关键的 `install -m 0755` 命令，导致 sb 二进制未实际拷贝到目标路径（仅留符号链接指向空）
-- `build-singbox` workflow：sha256 文件命名改为 `<asset>.sha256`，与 Rust 内核安装侧一致
+- **gRPC 流量统计完全不通**：proto 包名从 `experimental.v2rayapi` 改为 `v2ray.core.app.stats.command`。sing-box 在 `init()` 里把 ServiceDesc.ServiceName 覆写成 v2ray 兼容路径，所以无论 build tag 对不对，旧 proto 都永远返回 Unimplemented
+- 添加/删除节点时 `sing-box check` 失败会让 TUI 显示"No such file or directory"但节点其实已写入 config.json，需要退出重进 —— 现在不管 check/reload 结果都发 NodesRefreshed
+- `install-release.sh` 丢失 `install -m 0755` 命令，下载解压但没拷到 `/usr/local/bin/sb`
+- `build-singbox` workflow sha256 文件命名改为 `<asset>.sha256`，与 Rust 内核安装侧期望一致
+- 嵌套 `if let` 触发 `clippy::collapsible_match` 致 CI 失败
+
+### Added
+
+- **用户-节点分配** (schema v2)：新增 `users.allowed_nodes` JSON 字段
+  - `sb grant/revoke/grant-all/allowed <user> <tag>` CLI
+  - 用户页按 `[n]` 打开节点选择弹窗（Space 勾选，`a` 切换全部模式）
+  - `sync_users` 按 `can_use_node(tag)` 过滤
+- **reality 节点密钥自动生成**：`add-node vless-reality` 时自动调用 `sing-box generate reality-keypair`，写入 private_key + short_id + handshake；public_key 作为非标字段保留供订阅生成读取，TUI 状态条回显给用户
+- **仪表盘 Top5 用量展示**：用户摘要块增加按总流量排序的前 5 名
+- **状态条 5s 自动清除**
+- **内核页操作后轮询 3×500ms 刷新状态**（避开 systemctl 返回 vs pgrep 可见性竞态）
 
 ### Changed
 
-- `build-singbox` workflow 读 upstream `release/DEFAULT_BUILD_TAGS` + `release/LDFLAGS`，与官方 release 保持 tag 一致；追加 `with_v2ray_api` + `with_purego`
-- 产物体积对齐 ~55MB（之前手写 tag 列表遗漏 naive/cloudflared 等，仅 50MB）
-- 添加 `force` 开关到 `build-singbox` workflow，可重建同 tag
+- `install_v2rayapi` 成功后自动 `systemctl enable + restart`，无需手动启动
+- `build-singbox` workflow 读 upstream `release/DEFAULT_BUILD_TAGS` + `release/LDFLAGS` 与官方 release 一致（含 naive 等）；追加 `with_v2ray_api` + `with_purego`，体积对齐 ~55MB
+- `build-singbox` 增加 `force` 开关，可重建同 tag 的 release
 
 ## v0.1.2
 
