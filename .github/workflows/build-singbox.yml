@@ -32,7 +32,8 @@ jobs:
           echo "tag=singbox-$V"      >> "$GITHUB_OUTPUT"
 
       - id: check
-        env: { GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} }
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if gh release view "${{ steps.pick.outputs.tag }}" -R "${{ github.repository }}" >/dev/null 2>&1; then
             echo "skip=true"  >> "$GITHUB_OUTPUT"
