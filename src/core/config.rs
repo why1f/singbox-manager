@@ -29,6 +29,14 @@ pub fn add_node(cfg: &mut Value, req: &AddNodeRequest) -> Result<()> {
     Ok(())
 }
 
+/// 按 tag 移除 inbound。返回是否确实移除了节点。
+pub fn remove_node(cfg: &mut Value, tag: &str) -> bool {
+    let Some(inbounds) = cfg.get_mut("inbounds").and_then(|v| v.as_array_mut()) else { return false; };
+    let before = inbounds.len();
+    inbounds.retain(|ib| ib.get("tag").and_then(Value::as_str) != Some(tag));
+    inbounds.len() < before
+}
+
 /// 将 managed 用户同步到所有用户型 inbound 的 users 数组。
 /// 安全边界：仅移除 name 命中 managed 集合的用户条目，不触碰未托管的默认/旧账号。
 pub fn sync_users(cfg: &mut Value, users: &[User], grpc_addr: &str) -> usize {

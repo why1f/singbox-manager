@@ -33,6 +33,6 @@ pub fn render(f: &mut Frame, area: Rect, s: &AppState) {
         .unwrap_or("  (无用户)".into());
     f.render_widget(Paragraph::new(vec![
         Line::from(sel),
-        Line::from(Span::styled("  [t]启/禁  [r]重置流量  [s]导出订阅  [R]刷新  复杂编辑仍使用 CLI",Style::default().fg(Color::DarkGray))),
+        Line::from(Span::styled("  [a]添加  [d]删除  [t]启/禁  [r]重置流量  [s]导出订阅  [R]刷新",Style::default().fg(Color::DarkGray))),
     ]).block(Block::default().borders(Borders::ALL).title(" 操作 ")).wrap(Wrap{trim:true}), c[1]);
 }

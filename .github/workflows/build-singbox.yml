@@ -1,0 +1,128 @@
+name: build-singbox
+
+on:
+  schedule:
+    - cron: "17 8 * * *"      # 每天 UTC 08:17 检查一次
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "强制构建指定 sing-box tag (例如 v1.10.3；留空则取 upstream latest)"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      version:  ${{ steps.pick.outputs.version }}
+      tag:      ${{ steps.pick.outputs.tag }}
+      skip:     ${{ steps.check.outputs.skip }}
+    steps:
+      - id: pick
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            V="${{ github.event.inputs.version }}"
+          else
+            V=$(curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name)
+          fi
+          case "$V" in v*) ;; *) V="v$V";; esac
+          echo "version=$V"          >> "$GITHUB_OUTPUT"
+          echo "tag=singbox-$V"      >> "$GITHUB_OUTPUT"
+
+      - id: check
+        env: { GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} }
+        run: |
+          if gh release view "${{ steps.pick.outputs.tag }}" -R "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "skip=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.skip == 'false'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            target: linux-amd64
+            runner: ubuntu-latest
+          - goos: linux
+            goarch: arm64
+            target: linux-arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Clone sing-box source
+        run: |
+          git clone --depth 1 --branch "$VERSION" https://github.com/SagerNet/sing-box.git sb-src
+
+      - name: Build (with_v2ray_api)
+        working-directory: sb-src
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          TAGS="with_quic,with_grpc,with_dhcp,with_wireguard,with_utls,with_reality_server,with_acme,with_clash_api,with_gvisor,with_v2ray_api,with_ech,with_tailscale"
+          VER=${VERSION#v}
+          go build -v -trimpath \
+            -tags "$TAGS" \
+            -ldflags "-s -w -X github.com/sagernet/sing-box/constant.Version=$VER" \
+            -o sing-box ./cmd/sing-box
+          ./sing-box version || true
+
+      - name: Package
+        id: pkg
+        run: |
+          NAME="sing-box-${VERSION}-${{ matrix.target }}-v2rayapi"
+          mkdir -p dist/$NAME
+          cp sb-src/sing-box dist/$NAME/sing-box
+          cp sb-src/release/config/sing-box.service dist/$NAME/ 2>/dev/null || true
+          cp sb-src/LICENSE                          dist/$NAME/ 2>/dev/null || true
+          (
+            cd dist
+            tar czf $NAME.tar.gz $NAME
+            sha256sum $NAME.tar.gz > $NAME.tar.gz.sha256
+          )
+          echo "tarball=dist/$NAME.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+
+  release:
+    needs: [resolve, build]
+    if: needs.resolve.outputs.skip == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve.outputs.tag }}
+          name: "sing-box ${{ needs.resolve.outputs.version }} (with v2ray_api)"
+          body: |
+            基于官方 [SagerNet/sing-box ${{ needs.resolve.outputs.version }}](https://github.com/SagerNet/sing-box/releases/tag/${{ needs.resolve.outputs.version }}) 源码，追加 `with_v2ray_api` build tag 构建。
+
+            与官方 release 的区别：启用了 `experimental.v2ray_api`，供本仓库的流量统计使用。
+
+            构建 tags:
+            `with_quic, with_grpc, with_dhcp, with_wireguard, with_utls, with_reality_server, with_acme, with_clash_api, with_gvisor, with_v2ray_api, with_ech, with_tailscale`
+          files: dist/*
+          make_latest: "false"

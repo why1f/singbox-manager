@@ -64,58 +64,15 @@ detect_singbox_binary() {
   if command -v sing-box >/dev/null 2>&1; then
     SB_BIN="$(command -v sing-box)"; return
   fi
-  install_singbox
-  if [ -x "/usr/local/bin/sing-box" ]; then
-    SB_BIN="/usr/local/bin/sing-box"; return
-  fi
-  command -v sing-box >/dev/null 2>&1 && SB_BIN="$(command -v sing-box)" && return
-  fail "sing-box 安装失败，请手动安装后重试"
-}
-
-install_singbox() {
-  if [ "${SKIP_SINGBOX:-0}" = "1" ]; then
-    fail "未找到 sing-box。请手动安装或去掉 SKIP_SINGBOX=1 让脚本自动安装。"
-  fi
-  note ""
-  note "未检测到 sing-box。是否自动安装 sing-box 官方稳定版？[Y/n]"
-  if [ "${YES:-0}" = "1" ]; then
-    ANS="y"
-  else
-    read -r ANS || ANS="y"
-  fi
-  case "${ANS:-y}" in
-    n|N|no|NO) fail "已取消，请手动安装 sing-box 后重试" ;;
-  esac
-  note "从官方脚本安装 sing-box..."
-  bash -c "$(curl -fsSL https://sing-box.app/deb-install.sh)" \
-    || bash -c "$(curl -fsSL https://sing-box.app/install.sh)" \
-    || fail "sing-box 官方脚本安装失败"
+  note "提示: 未检测到 sing-box。装完 sb-manager 后可进 TUI 的「内核」页一键安装。"
+  SB_BIN=""
 }
 
 detect_singbox_config() {
   for candidate in /etc/sing-box/config.json /usr/local/etc/sing-box/config.json; do
     if [ -f "$candidate" ]; then SB_CONFIG="$candidate"; return; fi
   done
-  # 无配置则生成最小骨架并启用 v2ray_api（流量统计所需）
-  note "未找到 sing-box 配置，生成最小 /etc/sing-box/config.json"
-  install -d /etc/sing-box
-  cat > /etc/sing-box/config.json <<'JSON'
-{
-  "log": { "level": "info", "timestamp": true },
-  "inbounds": [],
-  "outbounds": [
-    { "type": "direct",  "tag": "direct"  },
-    { "type": "block",   "tag": "block"   }
-  ],
-  "experimental": {
-    "v2ray_api": {
-      "listen": "127.0.0.1:18080",
-      "stats": { "enabled": true, "users": [] }
-    }
-  }
-}
-JSON
-  SB_CONFIG="/etc/sing-box/config.json"
+  SB_CONFIG=""
 }
 
 install_files() {
@@ -129,6 +86,8 @@ install_files() {
 
 # 用 sb 自身的原子重写代替 sed：生成最小覆盖配置，让下次启动采用新路径
 patch_config() {
+  [ -n "$SB_BIN" ] || return 0
+  [ -n "$SB_CONFIG" ] || return 0
   python3 - "$CONFIG_PATH" "$SB_BIN" "$SB_CONFIG" <<'PY' 2>/dev/null || patch_config_sed
 import sys, re, pathlib
 path, binp, cfgp = sys.argv[1:]
@@ -162,6 +121,8 @@ patch_config_sed() {
 }
 
 validate_singbox() {
+  [ -n "$SB_BIN" ]    || { note "跳过 sing-box 二进制校验（未安装）"; return 0; }
+  [ -n "$SB_CONFIG" ] || { note "跳过 sing-box 配置校验（未找到）"; return 0; }
   "$SB_BIN" version >/dev/null
   "$SB_BIN" check -c "$SB_CONFIG" >/dev/null
   if ! grep -q '"v2ray_api"' "$SB_CONFIG"; then
@@ -169,10 +130,21 @@ validate_singbox() {
   fi
 }
 
+install_shell_profile() {
+  cat > /etc/profile.d/sb-manager.sh <<'EOF'
+# sb-manager: 清除可能的 stale alias，确保 sb / sing-box 解析到真实二进制
+unalias sb 2>/dev/null || true
+unalias sing-box 2>/dev/null || true
+EOF
+  chmod 644 /etc/profile.d/sb-manager.sh
+  for rc in /root/.bashrc /root/.bash_aliases; do
+    [ -f "$rc" ] && sed -i '/^[[:space:]]*alias[[:space:]]\+\(sb\|sing-box\)=/d' "$rc" 2>/dev/null || true
+  done
+}
+
 reload_systemd() {
   systemctl daemon-reload
   systemctl enable sb-manager.service
-  # 保险：有些发行版 sudo secure_path 或 root shell 尚未刷新 hash，做一个 /usr/bin 软链
   ln -sf "$BIN_PATH" /usr/bin/sb 2>/dev/null || true
   hash -r 2>/dev/null || true
   note ""
@@ -181,7 +153,10 @@ reload_systemd() {
   note "  systemctl status sb-manager.service"
   note "  journalctl -u sb-manager -f"
   note ""
-  note "命令未找到时请执行：hash -r  或重新登录 shell；也可使用绝对路径 $BIN_PATH"
+  note "若当前 shell 报 'sb 找不到命令' 或指向错误路径："
+  note "  unalias sb sing-box 2>/dev/null; hash -r       # 当前 shell 立即生效"
+  note "  或重新登录（/etc/profile.d/sb-manager.sh 会自动清理）"
+  [ -z "${SB_BIN:-}" ] && note "sing-box 未安装 — 进 TUI（sb）后到「内核[5]」页一键安装。"
 }
 
 require_root
@@ -195,4 +170,5 @@ build_project
 install_files
 patch_config
 validate_singbox
+install_shell_profile
 reload_systemd

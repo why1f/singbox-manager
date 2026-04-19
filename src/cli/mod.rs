@@ -1,3 +1,4 @@
+pub mod kernel;
 pub mod node;
 pub mod user;
 use clap::{Parser, Subcommand};
@@ -30,6 +31,7 @@ pub enum Commands {
     #[command(about="查看服务状态")]     Status,
     #[command(about="后台守护模式")]     Daemon,
     #[command(about="启动 TUI（默认）")] Tui,
+    #[command(about="sing-box 内核管理")] Kernel(kernel::KernelArgs),
     #[command(about="兼容旧用户命令")]   User(user::UserArgs),
     #[command(about="兼容旧节点命令")]   Node(node::NodeArgs),
 }

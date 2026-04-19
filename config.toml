@@ -9,3 +9,7 @@ path = "/var/lib/sing-box-manager/manager.db"
 [stats]
 sync_interval_secs   = 30
 quota_alert_percent  = 80
+
+[kernel]
+# 从此仓库拉取带 with_v2ray_api 的自编译 sing-box（tag 形如 singbox-v1.10.x）
+update_repo = "why1f/singbox-manager"

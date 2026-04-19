@@ -50,6 +50,7 @@ async fn main() -> Result<()> {
         Commands::Status         => run_status(&cfg).await,
         Commands::User(a)        => run_user(a.command, &pool, &cfg).await,
         Commands::Node(a)        => run_node(a.command, &cfg).await,
+        Commands::Kernel(a)      => run_kernel(a.command, &cfg).await,
         Commands::Daemon         => run_daemon(pool, cfg).await,
         Commands::Tui            => run_tui(pool, cfg).await,
     }
@@ -388,6 +389,34 @@ fn run_reload(cfg: &AppConfig) -> Result<()> {
     proc.check_config()?;
     proc.reload()?;
     println!("✓ sing-box 已重载");
+    Ok(())
+}
+
+async fn run_kernel(cmd: cli::kernel::KernelCommands, cfg: &AppConfig) -> Result<()> {
+    use cli::kernel::KernelCommands as K;
+    match cmd {
+        K::Status => {
+            let s = core::singbox::status();
+            println!("安装:   {}", if s.installed {"是"} else {"否"});
+            println!("路径:   {}", s.binary_path.as_deref().unwrap_or("—"));
+            println!("版本:   {}", s.version.as_deref().unwrap_or("—"));
+            println!("运行:   {}", match s.running {
+                Some(true) => "运行中", Some(false) => "未运行", None => "未知",
+            });
+            println!("自启:   {}", if s.enabled {"已启用"} else {"未启用"});
+        }
+        K::Install          => { core::singbox::install_latest()?; println!("✓ 官方版 sing-box 已安装"); }
+        K::InstallV2rayApi  => {
+            core::singbox::install_v2rayapi(&cfg.kernel.update_repo).await?;
+            println!("✓ v2ray_api 版 sing-box 已安装");
+        }
+        K::Uninstall => { core::singbox::uninstall()?; println!("✓ sing-box 已卸载"); }
+        K::Start     => { core::singbox::start()?;     println!("✓ sing-box 已启动"); }
+        K::Stop      => { core::singbox::stop()?;      println!("✓ sing-box 已停止"); }
+        K::Restart   => { core::singbox::restart()?;   println!("✓ sing-box 已重启"); }
+        K::Enable    => { core::singbox::enable()?;    println!("✓ sing-box 已设为开机自启"); }
+        K::Disable   => { core::singbox::disable()?;   println!("✓ sing-box 已关闭开机自启"); }
+    }
     Ok(())
 }
 

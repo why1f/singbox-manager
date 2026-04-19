@@ -11,10 +11,13 @@ use tokio::sync::mpsc;
 use crate::{
     model::{config::AppConfig, node::InboundNode, user::User},
     service::traffic_service::TrafficEvent,
-    tui::{app::{AppState, Page, StatusLevel}, pages, widgets},
+    tui::{
+        app::{AppState, Page, StatusLevel},
+        forms::{Modal, ModalAction, NodeForm, UserForm},
+        pages, widgets,
+    },
 };
 
-/// UI 线程以外产生的异步结果，回传给主循环刷新状态。
 #[derive(Debug)]
 pub enum UiEvent {
     UsersRefreshed(Vec<User>),
@@ -24,6 +27,8 @@ pub enum UiEvent {
     TrafficReset { name: String },
     SubscriptionExported { name: String, text: String },
     Status { msg: String, level: StatusLevel },
+    KernelStatus(crate::core::singbox::KernelStatus),
+    KernelBusy(Option<&'static str>),
 }
 
 pub async fn run(
@@ -55,6 +60,7 @@ async fn event_loop(
     cfg: Arc<AppConfig>,
 ) -> Result<()> {
     let (ui_tx, mut ui_rx) = mpsc::channel::<UiEvent>(64);
+    spawn_kernel_refresh(ui_tx.clone());
 
     loop {
         term.draw(|f| {
@@ -68,8 +74,12 @@ async fn event_loop(
                 Page::Users     => pages::users::render(f, c[1], s),
                 Page::Nodes     => pages::nodes::render(f, c[1], s),
                 Page::Logs      => pages::logs::render(f, c[1], s),
+                Page::Kernel    => pages::kernel::render(f, c[1], s),
             }
             widgets::status_bar::render(f, c[2], s);
+            if let Some(modal) = &s.modal {
+                crate::tui::forms::render(f, area, modal);
+            }
         })?;
 
         tokio::select! {
@@ -78,8 +88,14 @@ async fn event_loop(
                 if event::poll(Duration::from_millis(0))? {
                     if let CE::Key(k) = event::read()? {
                         if k.kind == KeyEventKind::Press {
-                            if is_quit(&k) { return Ok(()); }
-                            handle_key(s, k, pool.clone(), cfg.clone(), ui_tx.clone());
+                            if s.modal.is_some() {
+                                if handle_modal_key(s, k, pool.clone(), cfg.clone(), ui_tx.clone()) {
+                                    return Ok(());
+                                }
+                            } else {
+                                if is_quit(&k) { return Ok(()); }
+                                handle_page_key(s, k, pool.clone(), cfg.clone(), ui_tx.clone());
+                            }
                         }
                     }
                 }
@@ -98,8 +114,8 @@ fn is_quit(k: &KeyEvent) -> bool {
 
 fn apply_ui_event(s: &mut AppState, ev: UiEvent) {
     match ev {
-        UiEvent::UsersRefreshed(u) => s.users = u,
-        UiEvent::NodesRefreshed(n) => s.nodes = n,
+        UiEvent::UsersRefreshed(u) => { s.users = u; s.user_table.clamp(s.users.len()); }
+        UiEvent::NodesRefreshed(n) => { s.nodes = n; s.node_table.clamp(s.nodes.len()); }
         UiEvent::SingboxRunning(v) => s.singbox_running = v,
         UiEvent::UserEnabled { name, enabled } => {
             if let Some(u) = s.users.iter_mut().find(|u| u.name == name) { u.enabled = enabled; }
@@ -118,6 +134,11 @@ fn apply_ui_event(s: &mut AppState, ev: UiEvent) {
             s.page = Page::Logs;
         }
         UiEvent::Status { msg, level } => s.set_status(msg, level),
+        UiEvent::KernelStatus(k) => {
+            s.singbox_running = k.running;
+            s.kernel = Some(k);
+        }
+        UiEvent::KernelBusy(op) => s.kernel_busy = op,
     }
 }
 
@@ -156,42 +177,190 @@ fn apply_traffic_event(s: &mut AppState, ev: TrafficEvent) {
     }
 }
 
-fn handle_key(
+fn handle_modal_key(
+    s: &mut AppState,
+    k: KeyEvent,
+    pool: Arc<sqlx::SqlitePool>,
+    cfg: Arc<AppConfig>,
+    ui_tx: mpsc::Sender<UiEvent>,
+) -> bool {
+    use crossterm::event::KeyModifiers;
+    if matches!(k.code, KeyCode::Char('c')) && k.modifiers == KeyModifiers::CONTROL {
+        return true;
+    }
+    let Some(modal) = s.modal.as_mut() else { return false; };
+    match modal.handle(k) {
+        ModalAction::None => {}
+        ModalAction::Close => s.modal = None,
+        ModalAction::SubmitUser { name, quota, reset_day, expire } => {
+            s.modal = None;
+            spawn_add_user(pool, cfg, ui_tx, name, quota, reset_day, expire);
+        }
+        ModalAction::SubmitNode { tag, protocol, port, server_name, path } => {
+            s.modal = None;
+            spawn_add_node(cfg, ui_tx, tag, protocol, port, server_name, path);
+        }
+        ModalAction::DeleteUser(name) => {
+            s.modal = None;
+            spawn_delete_user(pool, cfg, ui_tx, name);
+        }
+        ModalAction::DeleteNode(tag) => {
+            s.modal = None;
+            spawn_delete_node(cfg, ui_tx, tag);
+        }
+    }
+    false
+}
+
+fn handle_page_key(
     s: &mut AppState,
     k: KeyEvent,
     pool: Arc<sqlx::SqlitePool>,
     cfg: Arc<AppConfig>,
     ui_tx: mpsc::Sender<UiEvent>,
 ) {
-    let len = s.users.len();
+    // 内核页优先处理，避免与用户/节点页的 r/t/s 等按键冲突
+    if s.page == Page::Kernel {
+        handle_kernel_key(s, k, ui_tx, cfg);
+        return;
+    }
     match k.code {
-        KeyCode::Tab       => s.next_page(),
+        KeyCode::Tab       => { s.next_page(); maybe_refresh_kernel(s, &ui_tx); }
         KeyCode::Char('1') => s.page = Page::Dashboard,
         KeyCode::Char('2') => s.page = Page::Users,
         KeyCode::Char('3') => s.page = Page::Nodes,
         KeyCode::Char('4') => s.page = Page::Logs,
-        KeyCode::Up   | KeyCode::Char('k') => s.user_table.prev(len),
-        KeyCode::Down | KeyCode::Char('j') => s.user_table.next(len),
+        KeyCode::Char('5') => { s.page = Page::Kernel; maybe_refresh_kernel(s, &ui_tx); }
         KeyCode::Esc       => s.status_msg = None,
-        KeyCode::Char('t') => {
-            if let Some(name) = s.selected_user().map(|u| u.name.clone()) {
-                spawn_toggle(pool, cfg, ui_tx, name);
-            }
-        }
-        KeyCode::Char('r') => {
-            if let Some(name) = s.selected_user().map(|u| u.name.clone()) {
-                spawn_reset(pool, cfg, ui_tx, name);
-            }
-        }
-        KeyCode::Char('s') => {
-            if let Some(name) = s.selected_user().map(|u| u.name.clone()) {
-                spawn_export(cfg, ui_tx, name);
-            }
-        }
+        KeyCode::Up   | KeyCode::Char('k') => match s.page {
+            Page::Users => s.user_table.prev(s.users.len()),
+            Page::Nodes => s.node_table.prev(s.nodes.len()),
+            _ => {}
+        },
+        KeyCode::Down | KeyCode::Char('j') => match s.page {
+            Page::Users => s.user_table.next(s.users.len()),
+            Page::Nodes => s.node_table.next(s.nodes.len()),
+            _ => {}
+        },
+        KeyCode::Char('a') => match s.page {
+            Page::Users => s.modal = Some(Modal::AddUser(UserForm::default())),
+            Page::Nodes => s.modal = Some(Modal::AddNode(NodeForm {
+                port: "443".into(),
+                ..NodeForm::default()
+            })),
+            _ => {}
+        },
+        KeyCode::Char('d') => match s.page {
+            Page::Users => if let Some(name) = s.selected_user().map(|u| u.name.clone()) {
+                s.modal = Some(Modal::ConfirmDeleteUser(name));
+            },
+            Page::Nodes => if let Some(tag) = s.selected_node().map(|n| n.tag.clone()) {
+                s.modal = Some(Modal::ConfirmDeleteNode(tag));
+            },
+            _ => {}
+        },
+        KeyCode::Char('t') => if let Some(name) = s.selected_user().map(|u| u.name.clone()) {
+            spawn_toggle(pool, cfg, ui_tx, name);
+        },
+        KeyCode::Char('r') => if let Some(name) = s.selected_user().map(|u| u.name.clone()) {
+            spawn_reset(pool, cfg, ui_tx, name);
+        },
+        KeyCode::Char('s') => if let Some(name) = s.selected_user().map(|u| u.name.clone()) {
+            spawn_export(cfg, ui_tx, name);
+        },
         KeyCode::Char('R') => spawn_refresh(pool, cfg, ui_tx),
         KeyCode::Char('c') => spawn_check(cfg, ui_tx),
         _ => {}
     }
+}
+
+fn handle_kernel_key(s: &mut AppState, k: KeyEvent, ui_tx: mpsc::Sender<UiEvent>, cfg: Arc<AppConfig>) {
+    match k.code {
+        KeyCode::Tab       => { s.next_page(); maybe_refresh_kernel(s, &ui_tx); }
+        KeyCode::Char('1') => s.page = Page::Dashboard,
+        KeyCode::Char('2') => s.page = Page::Users,
+        KeyCode::Char('3') => s.page = Page::Nodes,
+        KeyCode::Char('4') => s.page = Page::Logs,
+        KeyCode::Char('5') => { /* 已在本页 */ }
+        KeyCode::Esc       => s.status_msg = None,
+        KeyCode::Char('R') => spawn_kernel_refresh(ui_tx),
+        _ if s.kernel_busy.is_some() => {
+            s.set_status("正在执行上一操作，请稍候", StatusLevel::Warn);
+        }
+        KeyCode::Char('i') => spawn_kernel_op(ui_tx, "安装官方版 sing-box", crate::core::singbox::install_latest),
+        KeyCode::Char('v') => spawn_kernel_install_v2rayapi(ui_tx, cfg.kernel.update_repo.clone()),
+        KeyCode::Char('u') => spawn_kernel_op(ui_tx, "卸载 sing-box",       crate::core::singbox::uninstall),
+        KeyCode::Char('s') => spawn_kernel_op(ui_tx, "启动 sing-box",       crate::core::singbox::start),
+        KeyCode::Char('S') => spawn_kernel_op(ui_tx, "停止 sing-box",       crate::core::singbox::stop),
+        KeyCode::Char('x') => spawn_kernel_op(ui_tx, "重启 sing-box",       crate::core::singbox::restart),
+        KeyCode::Char('e') => spawn_kernel_op(ui_tx, "启用开机自启",        crate::core::singbox::enable),
+        KeyCode::Char('d') => spawn_kernel_op(ui_tx, "关闭开机自启",        crate::core::singbox::disable),
+        _ => {}
+    }
+}
+
+fn maybe_refresh_kernel(s: &AppState, ui_tx: &mpsc::Sender<UiEvent>) {
+    if s.page == Page::Kernel {
+        spawn_kernel_refresh(ui_tx.clone());
+    }
+}
+
+fn spawn_kernel_refresh(tx: mpsc::Sender<UiEvent>) {
+    tokio::spawn(async move {
+        let status = tokio::task::spawn_blocking(crate::core::singbox::status).await
+            .unwrap_or(crate::core::singbox::KernelStatus {
+                installed: false, running: None, enabled: false, version: None, binary_path: None,
+            });
+        let _ = tx.send(UiEvent::KernelStatus(status)).await;
+    });
+}
+
+fn spawn_kernel_op<F>(tx: mpsc::Sender<UiEvent>, label: &'static str, op: F)
+where F: FnOnce() -> anyhow::Result<()> + Send + 'static {
+    tokio::spawn(async move {
+        let _ = tx.send(UiEvent::KernelBusy(Some(label))).await;
+        let result = tokio::task::spawn_blocking(op).await;
+        let _ = tx.send(UiEvent::KernelBusy(None)).await;
+        match result {
+            Ok(Ok(())) => {
+                let _ = tx.send(UiEvent::Status { msg: format!("{} 成功", label), level: StatusLevel::Warn }).await;
+            }
+            Ok(Err(e)) => {
+                let _ = tx.send(UiEvent::Status { msg: format!("{} 失败: {}", label, e), level: StatusLevel::Error }).await;
+            }
+            Err(e) => {
+                let _ = tx.send(UiEvent::Status { msg: format!("{} 中断: {}", label, e), level: StatusLevel::Error }).await;
+            }
+        }
+        // 自动刷新状态
+        let status = tokio::task::spawn_blocking(crate::core::singbox::status).await
+            .unwrap_or(crate::core::singbox::KernelStatus {
+                installed: false, running: None, enabled: false, version: None, binary_path: None,
+            });
+        let _ = tx.send(UiEvent::KernelStatus(status)).await;
+    });
+}
+
+fn spawn_kernel_install_v2rayapi(tx: mpsc::Sender<UiEvent>, repo: String) {
+    tokio::spawn(async move {
+        let label = "安装 v2ray_api 版 sing-box";
+        let _ = tx.send(UiEvent::KernelBusy(Some(label))).await;
+        let result = crate::core::singbox::install_v2rayapi(&repo).await;
+        let _ = tx.send(UiEvent::KernelBusy(None)).await;
+        match result {
+            Ok(()) => {
+                let _ = tx.send(UiEvent::Status { msg: format!("{} 成功", label), level: StatusLevel::Warn }).await;
+            }
+            Err(e) => {
+                let _ = tx.send(UiEvent::Status { msg: format!("{} 失败: {}", label, e), level: StatusLevel::Error }).await;
+            }
+        }
+        let status = tokio::task::spawn_blocking(crate::core::singbox::status).await
+            .unwrap_or(crate::core::singbox::KernelStatus {
+                installed: false, running: None, enabled: false, version: None, binary_path: None,
+            });
+        let _ = tx.send(UiEvent::KernelStatus(status)).await;
+    });
 }
 
 fn spawn_toggle(pool: Arc<sqlx::SqlitePool>, cfg: Arc<AppConfig>, tx: mpsc::Sender<UiEvent>, name: String) {
@@ -199,19 +368,13 @@ fn spawn_toggle(pool: Arc<sqlx::SqlitePool>, cfg: Arc<AppConfig>, tx: mpsc::Send
         match crate::service::user_service::toggle_user(&pool, &name).await {
             Ok(enabled) => {
                 if let Err(e) = crate::apply_runtime_changes(&pool, &cfg).await {
-                    let _ = tx.send(UiEvent::Status {
-                        msg: format!("配置同步失败: {}", e),
-                        level: StatusLevel::Error,
-                    }).await;
+                    let _ = tx.send(UiEvent::Status { msg: format!("配置同步失败: {}", e), level: StatusLevel::Error }).await;
                     return;
                 }
                 let _ = tx.send(UiEvent::UserEnabled { name, enabled }).await;
             }
             Err(e) => {
-                let _ = tx.send(UiEvent::Status {
-                    msg: format!("切换失败: {}", e),
-                    level: StatusLevel::Error,
-                }).await;
+                let _ = tx.send(UiEvent::Status { msg: format!("切换失败: {}", e), level: StatusLevel::Error }).await;
             }
         }
     });
@@ -220,17 +383,11 @@ fn spawn_toggle(pool: Arc<sqlx::SqlitePool>, cfg: Arc<AppConfig>, tx: mpsc::Send
 fn spawn_reset(pool: Arc<sqlx::SqlitePool>, cfg: Arc<AppConfig>, tx: mpsc::Sender<UiEvent>, name: String) {
     tokio::spawn(async move {
         if let Err(e) = crate::service::user_service::reset_traffic(&pool, &name).await {
-            let _ = tx.send(UiEvent::Status {
-                msg: format!("重置失败: {}", e),
-                level: StatusLevel::Error,
-            }).await;
+            let _ = tx.send(UiEvent::Status { msg: format!("重置失败: {}", e), level: StatusLevel::Error }).await;
             return;
         }
         if let Err(e) = crate::apply_runtime_changes(&pool, &cfg).await {
-            let _ = tx.send(UiEvent::Status {
-                msg: format!("配置同步失败: {}", e),
-                level: StatusLevel::Error,
-            }).await;
+            let _ = tx.send(UiEvent::Status { msg: format!("配置同步失败: {}", e), level: StatusLevel::Error }).await;
             return;
         }
         let _ = tx.send(UiEvent::TrafficReset { name }).await;
@@ -284,5 +441,118 @@ fn spawn_check(cfg: Arc<AppConfig>, tx: mpsc::Sender<UiEvent>) {
             Err(e) => (format!("配置校验失败: {}", e), StatusLevel::Error),
         };
         let _ = tx.send(UiEvent::Status { msg, level }).await;
+    });
+}
+
+fn spawn_add_user(
+    pool: Arc<sqlx::SqlitePool>, cfg: Arc<AppConfig>, tx: mpsc::Sender<UiEvent>,
+    name: String, quota: f64, reset_day: i64, expire: String,
+) {
+    tokio::spawn(async move {
+        match crate::service::user_service::add_user(&pool, &name, quota, reset_day, &expire).await {
+            Ok(_) => {
+                if let Err(e) = crate::apply_runtime_changes(&pool, &cfg).await {
+                    let _ = tx.send(UiEvent::Status { msg: format!("配置同步失败: {}", e), level: StatusLevel::Error }).await;
+                }
+                if let Ok(users) = crate::service::user_service::list_users(&pool).await {
+                    let _ = tx.send(UiEvent::UsersRefreshed(users)).await;
+                }
+                let _ = tx.send(UiEvent::Status { msg: format!("已添加用户 {}", name), level: StatusLevel::Warn }).await;
+            }
+            Err(e) => {
+                let _ = tx.send(UiEvent::Status { msg: format!("添加失败: {}", e), level: StatusLevel::Error }).await;
+            }
+        }
+    });
+}
+
+fn spawn_delete_user(
+    pool: Arc<sqlx::SqlitePool>, cfg: Arc<AppConfig>, tx: mpsc::Sender<UiEvent>, name: String,
+) {
+    tokio::spawn(async move {
+        if let Err(e) = crate::service::user_service::delete_user(&pool, &name).await {
+            let _ = tx.send(UiEvent::Status { msg: format!("删除失败: {}", e), level: StatusLevel::Error }).await;
+            return;
+        }
+        if let Err(e) = crate::apply_runtime_changes(&pool, &cfg).await {
+            let _ = tx.send(UiEvent::Status { msg: format!("配置同步失败: {}", e), level: StatusLevel::Error }).await;
+        }
+        if let Ok(users) = crate::service::user_service::list_users(&pool).await {
+            let _ = tx.send(UiEvent::UsersRefreshed(users)).await;
+        }
+        let _ = tx.send(UiEvent::Status { msg: format!("已删除用户 {}", name), level: StatusLevel::Warn }).await;
+    });
+}
+
+fn spawn_add_node(
+    cfg: Arc<AppConfig>, tx: mpsc::Sender<UiEvent>,
+    tag: String, protocol: String, port: u16,
+    server_name: Option<String>, path: Option<String>,
+) {
+    tokio::spawn(async move {
+        let p = match crate::model::node::Protocol::try_from(protocol.as_str()) {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = tx.send(UiEvent::Status { msg: format!("{}", e), level: StatusLevel::Error }).await;
+                return;
+            }
+        };
+        let req = crate::model::node::AddNodeRequest {
+            tag: tag.clone(), protocol: p, listen_port: port, server_name, path,
+        };
+        let mut cfg_json = match crate::core::config::load(&cfg.singbox.config_path) {
+            Ok(v) => v,
+            Err(_) => serde_json::json!({ "inbounds": [], "outbounds": [] }),
+        };
+        if let Err(e) = crate::core::config::add_node(&mut cfg_json, &req) {
+            let _ = tx.send(UiEvent::Status { msg: format!("添加节点失败: {}", e), level: StatusLevel::Error }).await;
+            return;
+        }
+        if let Err(e) = crate::core::config::save(&cfg.singbox.config_path, &cfg_json) {
+            let _ = tx.send(UiEvent::Status { msg: format!("保存配置失败: {}", e), level: StatusLevel::Error }).await;
+            return;
+        }
+        let proc = crate::core::singbox::SingboxProcess::new(&cfg.singbox.binary_path, &cfg.singbox.config_path);
+        if let Err(e) = proc.check_config() {
+            let _ = tx.send(UiEvent::Status { msg: format!("sing-box 校验失败: {}", e), level: StatusLevel::Error }).await;
+            return;
+        }
+        if matches!(proc.is_running(), Some(true)) { let _ = proc.reload(); }
+        if let Ok(v) = crate::core::config::load(&cfg.singbox.config_path) {
+            let _ = tx.send(UiEvent::NodesRefreshed(crate::service::node_service::list_nodes(&v))).await;
+        }
+        let _ = tx.send(UiEvent::Status { msg: format!("已添加节点 {}", tag), level: StatusLevel::Warn }).await;
+    });
+}
+
+fn spawn_delete_node(
+    cfg: Arc<AppConfig>, tx: mpsc::Sender<UiEvent>, tag: String,
+) {
+    tokio::spawn(async move {
+        let mut cfg_json = match crate::core::config::load(&cfg.singbox.config_path) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = tx.send(UiEvent::Status { msg: format!("读取配置失败: {}", e), level: StatusLevel::Error }).await;
+                return;
+            }
+        };
+        if !crate::core::config::remove_node(&mut cfg_json, &tag) {
+            let _ = tx.send(UiEvent::Status { msg: format!("未找到节点 {}", tag), level: StatusLevel::Warn }).await;
+            return;
+        }
+        if let Err(e) = crate::core::config::save(&cfg.singbox.config_path, &cfg_json) {
+            let _ = tx.send(UiEvent::Status { msg: format!("保存失败: {}", e), level: StatusLevel::Error }).await;
+            return;
+        }
+        let proc = crate::core::singbox::SingboxProcess::new(&cfg.singbox.binary_path, &cfg.singbox.config_path);
+        if let Err(e) = proc.check_config() {
+            let _ = tx.send(UiEvent::Status { msg: format!("sing-box 校验失败: {}", e), level: StatusLevel::Error }).await;
+            return;
+        }
+        if matches!(proc.is_running(), Some(true)) { let _ = proc.reload(); }
+        if let Ok(v) = crate::core::config::load(&cfg.singbox.config_path) {
+            let _ = tx.send(UiEvent::NodesRefreshed(crate::service::node_service::list_nodes(&v))).await;
+        }
+        let _ = tx.send(UiEvent::Status { msg: format!("已删除节点 {}", tag), level: StatusLevel::Warn }).await;
     });
 }

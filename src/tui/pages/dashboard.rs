@@ -44,6 +44,6 @@ pub fn render(f: &mut Frame, area: Rect, s: &AppState) {
         Line::from(""),
         Line::from(format!("  累计 ↑{} ↓{}",User::format_bytes(up_b),User::format_bytes(dn_b))),
         Line::from(""),
-        Line::from(Span::styled("  [Tab/1-4]切换  [q]退出  [↑↓/jk]选择  [t]启禁  [r]重置  [R]刷新  [c]检查配置",Style::default().fg(Color::DarkGray))),
+        Line::from(Span::styled("  [Tab/1-4]切换  [q]退出  [↑↓/jk]选择  [a]添加  [d]删除  [t]启禁  [r]重置  [R]刷新  [c]检查配置",Style::default().fg(Color::DarkGray))),
     ]).block(Block::default().borders(Borders::ALL).title(" 用户摘要 ")).wrap(Wrap{trim:true}), c[2]);
 }
