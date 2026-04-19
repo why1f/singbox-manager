@@ -35,6 +35,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # 只检查 singbox-* 前缀的 tag，避免误判到 sb-manager 本体的 v* tag
           if gh release view "${{ steps.pick.outputs.tag }}" -R "${{ github.repository }}" >/dev/null 2>&1; then
             echo "skip=true"  >> "$GITHUB_OUTPUT"
           else
@@ -69,41 +70,77 @@ jobs:
           go-version: stable
           cache-dependency-path: sb-src/go.sum
 
-      - name: Build (with_v2ray_api)
+      - name: Resolve tags & ldflags from upstream release config
+        id: meta
+        working-directory: sb-src
+        run: |
+          # 使用 upstream release/DEFAULT_BUILD_TAGS —— 与官方 release 一致
+          if [ -f release/DEFAULT_BUILD_TAGS ]; then
+            default_tags=$(tr '\n' ',' < release/DEFAULT_BUILD_TAGS | sed 's/,$//')
+          else
+            # fallback（旧版本可能没这个文件）
+            default_tags="with_quic,with_grpc,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,with_gvisor,with_tailscale"
+          fi
+          # 追加我们自己的 tag；with_purego 让 naive 免 CGO
+          final_tags=$(printf '%s\nwith_v2ray_api\nwith_purego\n' "$default_tags" \
+            | tr ',' '\n' | awk 'NF && !seen[$0]++' | paste -sd',' -)
+
+          # upstream ldflags + 写入版本号
+          if [ -f release/LDFLAGS ]; then
+            base_ldflags=$(tr '\n' ' ' < release/LDFLAGS | sed 's/  */ /g')
+          else
+            base_ldflags="-s -w -buildid="
+          fi
+          VER="${VERSION#v}"
+          final_ldflags="-X 'github.com/sagernet/sing-box/constant.Version=$VER' $base_ldflags"
+
+          echo "tags=$final_tags" >> "$GITHUB_OUTPUT"
+          echo "ldflags=$final_ldflags" >> "$GITHUB_OUTPUT"
+          echo "===== tags ====="; echo "$final_tags"
+          echo "===== ldflags ====="; echo "$final_ldflags"
+
+      - name: Build
         working-directory: sb-src
         env:
           CGO_ENABLED: "0"
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
-          TAGS="with_quic,with_grpc,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,with_gvisor,with_v2ray_api,with_tailscale"
-          VER=${VERSION#v}
           go build -v -trimpath \
-            -tags "$TAGS" \
-            -ldflags "-s -w -X github.com/sagernet/sing-box/constant.Version=$VER" \
+            -tags "${{ steps.meta.outputs.tags }}" \
+            -ldflags "${{ steps.meta.outputs.ldflags }}" \
             -o sing-box ./cmd/sing-box
-          ./sing-box version || true
+          ls -lh sing-box
+
+      - name: Verify binary (only on native arch)
+        if: matrix.target == 'linux-amd64' || matrix.target == 'linux-arm64'
+        working-directory: sb-src
+        run: |
+          chmod +x sing-box
+          ./sing-box version
+          ./sing-box version | grep -q "${VERSION#v}" || { echo "version 字串不匹配"; exit 1; }
+          ./sing-box version | grep -q "with_v2ray_api" || { echo "缺 with_v2ray_api tag"; exit 1; }
 
       - name: Package
-        id: pkg
         run: |
           NAME="sing-box-${VERSION}-${{ matrix.target }}-v2rayapi"
           mkdir -p dist/$NAME
           cp sb-src/sing-box dist/$NAME/sing-box
           cp sb-src/release/config/sing-box.service dist/$NAME/ 2>/dev/null || true
           cp sb-src/LICENSE                          dist/$NAME/ 2>/dev/null || true
-          (
-            cd dist
-            tar czf $NAME.tar.gz $NAME
-            sha256sum $NAME.tar.gz > $NAME.tar.gz.sha256
-          )
-          echo "tarball=dist/$NAME.tar.gz" >> "$GITHUB_OUTPUT"
+          # 打包
+          tar -C dist -czf dist/$NAME.tar.gz $NAME
+          # 也输出裸 binary，方便 wget + chmod 直接用
+          cp sb-src/sing-box dist/sing-box-${VERSION}-${{ matrix.target }}
+          ( cd dist && sha256sum $NAME.tar.gz sing-box-${VERSION}-${{ matrix.target }} > $NAME.sha256 )
+          ls -lh dist/
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
           path: |
             dist/*.tar.gz
+            dist/sing-box-*
             dist/*.sha256
 
   release:
@@ -115,16 +152,19 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - run: ls -lh dist/
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.resolve.outputs.tag }}
           name: "sing-box ${{ needs.resolve.outputs.version }} (with v2ray_api)"
           body: |
-            基于官方 [SagerNet/sing-box ${{ needs.resolve.outputs.version }}](https://github.com/SagerNet/sing-box/releases/tag/${{ needs.resolve.outputs.version }}) 源码，追加 `with_v2ray_api` build tag 构建。
+            基于官方 [SagerNet/sing-box ${{ needs.resolve.outputs.version }}](https://github.com/SagerNet/sing-box/releases/tag/${{ needs.resolve.outputs.version }}) 源码，使用 upstream `release/DEFAULT_BUILD_TAGS` + `release/LDFLAGS`，追加 `with_v2ray_api` 与 `with_purego` 构建。
 
-            与官方 release 的区别：启用了 `experimental.v2ray_api`，供本仓库的流量统计使用。
+            与官方 release 的主要区别：启用了 `experimental.v2ray_api`，供 [singbox-manager](https://github.com/${{ github.repository }}) 的流量统计使用。其余 tag 与 `with_naive_outbound` 等保持 upstream 默认。
 
-            构建 tags:
-            `with_quic, with_grpc, with_dhcp, with_wireguard, with_utls, with_acme, with_clash_api, with_gvisor, with_v2ray_api, with_tailscale`
+            **产物**
+            - `sing-box-<version>-linux-<arch>-v2rayapi.tar.gz` — 打包含 service/LICENSE
+            - `sing-box-<version>-linux-<arch>` — 裸 binary，可直接 `chmod +x` 运行
+            - `<...>.sha256` — 校验
           files: dist/*
           make_latest: "false"
