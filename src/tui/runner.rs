@@ -264,7 +264,7 @@ fn handle_page_key(
             },
             _ => {}
         },
-        KeyCode::Char('n') => if s.page == Page::Users {
+        KeyCode::Char('n') if s.page == Page::Users => {
             if let Some(u) = s.selected_user() {
                 let name = u.name.clone();
                 let all = u.allow_all_nodes;
