@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use tonic::transport::Channel;
 use crate::model::traffic::LiveTrafficSnapshot;
 
-pub mod proto { tonic::include_proto!("experimental.v2rayapi"); }
+pub mod proto { tonic::include_proto!("v2ray.core.app.stats.command"); }
 use proto::stats_service_client::StatsServiceClient;
 use proto::QueryStatsRequest;
 pub type StatsClient = StatsServiceClient<Channel>;

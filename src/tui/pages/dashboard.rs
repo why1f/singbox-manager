@@ -30,20 +30,64 @@ pub fn render(f: &mut Frame, area: Rect, s: &AppState) {
         .data(&up).style(Style::default().fg(Color::Cyan)).bar_set(symbols::bar::NINE_LEVELS), cc[0]);
     f.render_widget(Sparkline::default().block(Block::default().borders(Borders::ALL).title(" ↓ 下行 "))
         .data(&down).style(Style::default().fg(Color::Magenta)).bar_set(symbols::bar::NINE_LEVELS), cc[1]);
-    // 摘要
-    let total=s.users.len(); let en=s.users.iter().filter(|u|u.enabled).count();
-    let over=s.users.iter().filter(|u|u.is_over_quota()).count();
-    let exp=s.users.iter().filter(|u|u.is_expired()).count();
-    let up_b:i64=s.users.iter().map(|u|u.used_up_bytes).sum();
-    let dn_b:i64=s.users.iter().map(|u|u.used_down_bytes).sum();
-    f.render_widget(Paragraph::new(vec![
-        Line::from(vec![Span::raw(format!("  用户:{} ",total)),
-            Span::styled(format!("启用:{} ",en),Style::default().fg(Color::Green)),
-            Span::styled(format!("超额:{} ",over),Style::default().fg(Color::Red)),
-            Span::styled(format!("到期:{} ",exp),Style::default().fg(Color::Yellow))]),
+    // 摘要 + top5 用户用量
+    let total = s.users.len();
+    let en = s.users.iter().filter(|u| u.enabled).count();
+    let over = s.users.iter().filter(|u| u.is_over_quota()).count();
+    let exp = s.users.iter().filter(|u| u.is_expired()).count();
+    let up_b: i64 = s.users.iter().map(|u| u.used_up_bytes).sum();
+    let dn_b: i64 = s.users.iter().map(|u| u.used_down_bytes).sum();
+
+    let mut top: Vec<&crate::model::user::User> = s.users.iter().collect();
+    top.sort_by_key(|u| -(u.used_total_bytes()));
+    let top: Vec<&crate::model::user::User> = top.into_iter().take(5).collect();
+
+    let mut lines: Vec<Line> = vec![
+        Line::from(vec![
+            Span::raw(format!("  用户:{} ", total)),
+            Span::styled(format!("启用:{} ", en),   Style::default().fg(Color::Green)),
+            Span::styled(format!("超额:{} ", over), Style::default().fg(Color::Red)),
+            Span::styled(format!("到期:{} ", exp),  Style::default().fg(Color::Yellow)),
+        ]),
+        Line::from(format!("  累计 ↑{} ↓{}", User::format_bytes(up_b), User::format_bytes(dn_b))),
         Line::from(""),
-        Line::from(format!("  累计 ↑{} ↓{}",User::format_bytes(up_b),User::format_bytes(dn_b))),
-        Line::from(""),
-        Line::from(Span::styled("  [Tab/1-4]切换  [q]退出  [↑↓/jk]选择  [a]添加  [d]删除  [t]启禁  [r]重置  [R]刷新  [c]检查配置",Style::default().fg(Color::DarkGray))),
-    ]).block(Block::default().borders(Borders::ALL).title(" 用户摘要 ")).wrap(Wrap{trim:true}), c[2]);
+    ];
+    if top.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  （无用户，进用户页按 [a] 添加）",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "  用量前 5",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )));
+        for u in &top {
+            let total = u.used_total_bytes();
+            let pct = u.quota_used_percent();
+            let quota = if u.quota_gb <= 0.0 { "不限".to_string() } else { format!("{:.0}G", u.quota_gb) };
+            let c = if !u.enabled { Color::Red }
+                else if u.is_over_quota() || u.is_expired() { Color::Yellow }
+                else { Color::Green };
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(format!("{:<14}", u.name), Style::default().fg(c)),
+                Span::raw(format!(" {:<10}", User::format_bytes(total))),
+                Span::raw(format!(" {:<6}", quota)),
+                Span::raw(format!(" {:>5.1}%", pct)),
+            ]));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  [Tab/1-5]切换  [q]退出  [↑↓/jk]选择  [a]添加  [d]删除  [t]启禁  [r]重置  [R]刷新",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(" 用户摘要 "))
+            .wrap(Wrap { trim: true }),
+        c[2],
+    );
 }

@@ -226,6 +226,10 @@ pub async fn install_v2rayapi(repo: &str) -> Result<()> {
         std::fs::write(&cfg_file, DEFAULT_CONFIG_WITH_V2RAY_API)?;
     }
 
+    // 自动设为开机自启 + 启动（失败不致命，用户可在内核页重试）
+    let _ = Command::new("systemctl").args(["enable", "sing-box"]).status();
+    let _ = Command::new("systemctl").args(["restart", "sing-box"]).status();
+
     // 清理临时目录（忽略失败）
     let _ = std::fs::remove_dir_all(&tmp_dir);
     Ok(())

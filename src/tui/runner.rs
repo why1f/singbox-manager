@@ -63,6 +63,7 @@ async fn event_loop(
     spawn_kernel_refresh(ui_tx.clone());
 
     loop {
+        s.tick_status();
         term.draw(|f| {
             let area = f.area();
             let c = Layout::default().direction(Direction::Vertical)
@@ -332,12 +333,8 @@ where F: FnOnce() -> anyhow::Result<()> + Send + 'static {
                 let _ = tx.send(UiEvent::Status { msg: format!("{} 中断: {}", label, e), level: StatusLevel::Error }).await;
             }
         }
-        // 自动刷新状态
-        let status = tokio::task::spawn_blocking(crate::core::singbox::status).await
-            .unwrap_or(crate::core::singbox::KernelStatus {
-                installed: false, running: None, enabled: false, version: None, binary_path: None,
-            });
-        let _ = tx.send(UiEvent::KernelStatus(status)).await;
+        // systemctl 返回后进程可能还没被 pgrep 看到，延迟 + 轮询
+        refresh_kernel_status_stable(&tx).await;
     });
 }
 
@@ -349,18 +346,26 @@ fn spawn_kernel_install_v2rayapi(tx: mpsc::Sender<UiEvent>, repo: String) {
         let _ = tx.send(UiEvent::KernelBusy(None)).await;
         match result {
             Ok(()) => {
-                let _ = tx.send(UiEvent::Status { msg: format!("{} 成功", label), level: StatusLevel::Warn }).await;
+                let _ = tx.send(UiEvent::Status { msg: format!("{} 成功（已自动 enable + restart）", label), level: StatusLevel::Warn }).await;
             }
             Err(e) => {
                 let _ = tx.send(UiEvent::Status { msg: format!("{} 失败: {}", label, e), level: StatusLevel::Error }).await;
             }
         }
+        refresh_kernel_status_stable(&tx).await;
+    });
+}
+
+/// 轮询 3 次，每次间隔 500ms，取最后一次结果（避开 systemd 启动竞态）
+async fn refresh_kernel_status_stable(tx: &mpsc::Sender<UiEvent>) {
+    for i in 0..3 {
+        if i > 0 { tokio::time::sleep(std::time::Duration::from_millis(500)).await; }
         let status = tokio::task::spawn_blocking(crate::core::singbox::status).await
             .unwrap_or(crate::core::singbox::KernelStatus {
                 installed: false, running: None, enabled: false, version: None, binary_path: None,
             });
         let _ = tx.send(UiEvent::KernelStatus(status)).await;
-    });
+    }
 }
 
 fn spawn_toggle(pool: Arc<sqlx::SqlitePool>, cfg: Arc<AppConfig>, tx: mpsc::Sender<UiEvent>, name: String) {
@@ -504,24 +509,42 @@ fn spawn_add_node(
             Ok(v) => v,
             Err(_) => serde_json::json!({ "inbounds": [], "outbounds": [] }),
         };
-        if let Err(e) = crate::core::config::add_node(&mut cfg_json, &req) {
-            let _ = tx.send(UiEvent::Status { msg: format!("添加节点失败: {}", e), level: StatusLevel::Error }).await;
-            return;
-        }
+        let add_result = crate::core::config::add_node(&mut cfg_json, &req);
+        let meta = match add_result {
+            Ok(m) => m,
+            Err(e) => {
+                let _ = tx.send(UiEvent::Status { msg: format!("添加节点失败: {}", e), level: StatusLevel::Error }).await;
+                return;
+            }
+        };
         if let Err(e) = crate::core::config::save(&cfg.singbox.config_path, &cfg_json) {
             let _ = tx.send(UiEvent::Status { msg: format!("保存配置失败: {}", e), level: StatusLevel::Error }).await;
             return;
         }
+        // 无论校验/reload 是否失败，都刷新节点列表（节点已经写入 config）
         let proc = crate::core::singbox::SingboxProcess::new(&cfg.singbox.binary_path, &cfg.singbox.config_path);
-        if let Err(e) = proc.check_config() {
-            let _ = tx.send(UiEvent::Status { msg: format!("sing-box 校验失败: {}", e), level: StatusLevel::Error }).await;
-            return;
-        }
-        if matches!(proc.is_running(), Some(true)) { let _ = proc.reload(); }
+        let check_msg = match proc.check_config() {
+            Ok(()) => {
+                if matches!(proc.is_running(), Some(true)) { let _ = proc.reload(); }
+                None
+            }
+            Err(e) => Some(format!("sing-box 校验/reload 失败: {}（节点已保存到 config.json）", e)),
+        };
         if let Ok(v) = crate::core::config::load(&cfg.singbox.config_path) {
             let _ = tx.send(UiEvent::NodesRefreshed(crate::service::node_service::list_nodes(&v))).await;
         }
-        let _ = tx.send(UiEvent::Status { msg: format!("已添加节点 {}", tag), level: StatusLevel::Warn }).await;
+        let done_msg = match meta {
+            crate::core::config::AddNodeMeta::RealityKeys { public_key, short_id } => format!(
+                "已添加节点 {}  |  reality 公钥: {}  short_id: {}",
+                tag, public_key, short_id,
+            ),
+            crate::core::config::AddNodeMeta::Plain => format!("已添加节点 {}", tag),
+        };
+        let (msg, level) = match check_msg {
+            Some(w) => (w, StatusLevel::Error),
+            None    => (done_msg, StatusLevel::Warn),
+        };
+        let _ = tx.send(UiEvent::Status { msg, level }).await;
     });
 }
 
@@ -545,14 +568,20 @@ fn spawn_delete_node(
             return;
         }
         let proc = crate::core::singbox::SingboxProcess::new(&cfg.singbox.binary_path, &cfg.singbox.config_path);
-        if let Err(e) = proc.check_config() {
-            let _ = tx.send(UiEvent::Status { msg: format!("sing-box 校验失败: {}", e), level: StatusLevel::Error }).await;
-            return;
-        }
-        if matches!(proc.is_running(), Some(true)) { let _ = proc.reload(); }
+        let check_msg = match proc.check_config() {
+            Ok(()) => {
+                if matches!(proc.is_running(), Some(true)) { let _ = proc.reload(); }
+                None
+            }
+            Err(e) => Some(format!("sing-box 校验/reload 失败: {}（节点已从 config.json 移除）", e)),
+        };
         if let Ok(v) = crate::core::config::load(&cfg.singbox.config_path) {
             let _ = tx.send(UiEvent::NodesRefreshed(crate::service::node_service::list_nodes(&v))).await;
         }
-        let _ = tx.send(UiEvent::Status { msg: format!("已删除节点 {}", tag), level: StatusLevel::Warn }).await;
+        let (msg, level) = match check_msg {
+            Some(w) => (w, StatusLevel::Error),
+            None    => (format!("已删除节点 {}", tag), StatusLevel::Warn),
+        };
+        let _ = tx.send(UiEvent::Status { msg, level }).await;
     });
 }

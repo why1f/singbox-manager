@@ -313,12 +313,20 @@ async fn run_node(cmd: cli::node::NodeCommands, cfg: &AppConfig) -> Result<()> {
                 server_name: args.server_name,
                 path: args.path,
             };
-            core::config::add_node(&mut config, &req)?;
+            let meta = core::config::add_node(&mut config, &req)?;
             core::config::save(&cfg.singbox.config_path, &config)?;
             let proc = core::singbox::SingboxProcess::new(&cfg.singbox.binary_path, &cfg.singbox.config_path);
             proc.check_config()?;
             if matches!(proc.is_running(), Some(true)) { proc.reload()?; }
-            println!("✓ 节点已添加并写入配置");
+            match meta {
+                core::config::AddNodeMeta::RealityKeys { public_key, short_id } => {
+                    println!("✓ 节点已添加");
+                    println!("  reality public_key: {}", public_key);
+                    println!("  reality short_id:   {}", short_id);
+                    println!("  （已写入 config；客户端订阅链接会自动带上）");
+                }
+                core::config::AddNodeMeta::Plain => println!("✓ 节点已添加"),
+            }
         }
     }
     Ok(())

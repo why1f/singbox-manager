@@ -34,6 +34,7 @@ pub struct AppState {
     pub last_sync_time: Option<chrono::DateTime<chrono::Local>>,
     pub log_lines: Vec<String>,
     pub status_msg: Option<(String, StatusLevel)>,
+    pub status_set_at: Option<std::time::Instant>,
     pub user_table: TableState,
     pub node_table: TableState,
     pub traffic_history: Vec<(i64,i64)>,
@@ -55,6 +56,7 @@ impl AppState {
             users: vec![], nodes: vec![],
             singbox_running: None, grpc_connected: false,
             last_sync_time: None, log_lines: vec![], status_msg: None,
+            status_set_at: None,
             user_table: TableState::default(),
             node_table: TableState::default(),
             traffic_history: vec![],
@@ -76,6 +78,16 @@ impl AppState {
     }
     pub fn set_status(&mut self, msg: impl Into<String>, level: StatusLevel) {
         self.status_msg = Some((msg.into(), level));
+        self.status_set_at = Some(std::time::Instant::now());
+    }
+    /// 自动清除过期状态（5s）；调用方每次 draw 前跑一下
+    pub fn tick_status(&mut self) {
+        if let Some(t) = self.status_set_at {
+            if t.elapsed() >= std::time::Duration::from_secs(5) {
+                self.status_msg = None;
+                self.status_set_at = None;
+            }
+        }
     }
     pub fn next_page(&mut self) {
         self.page = match self.page {

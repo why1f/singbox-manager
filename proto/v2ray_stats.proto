@@ -1,5 +1,8 @@
 syntax = "proto3";
-package experimental.v2rayapi;
+// 注意：sing-box 在 init() 里把 ServiceDesc.ServiceName 改成了
+// v2ray.core.app.stats.command.StatsService（兼容 v2ray 客户端），
+// 所以这里必须用这个 package，否则 gRPC 会返回 Unimplemented。
+package v2ray.core.app.stats.command;
 
 message GetStatsRequest  { string name = 1; bool reset = 2; }
 message Stat             { string name = 1; int64 value  = 2; }
