@@ -60,13 +60,14 @@ jobs:
     env:
       VERSION: ${{ needs.resolve.outputs.version }}
     steps:
-      - uses: actions/setup-go@v5
-        with:
-          go-version: stable
-
       - name: Clone sing-box source
         run: |
           git clone --depth 1 --branch "$VERSION" https://github.com/SagerNet/sing-box.git sb-src
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache-dependency-path: sb-src/go.sum
 
       - name: Build (with_v2ray_api)
         working-directory: sb-src
@@ -75,7 +76,7 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
-          TAGS="with_quic,with_grpc,with_dhcp,with_wireguard,with_utls,with_reality_server,with_acme,with_clash_api,with_gvisor,with_v2ray_api,with_ech,with_tailscale"
+          TAGS="with_quic,with_grpc,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,with_gvisor,with_v2ray_api,with_tailscale"
           VER=${VERSION#v}
           go build -v -trimpath \
             -tags "$TAGS" \
@@ -124,6 +125,6 @@ jobs:
             与官方 release 的区别：启用了 `experimental.v2ray_api`，供本仓库的流量统计使用。
 
             构建 tags:
-            `with_quic, with_grpc, with_dhcp, with_wireguard, with_utls, with_reality_server, with_acme, with_clash_api, with_gvisor, with_v2ray_api, with_ech, with_tailscale`
+            `with_quic, with_grpc, with_dhcp, with_wireguard, with_utls, with_acme, with_clash_api, with_gvisor, with_v2ray_api, with_tailscale`
           files: dist/*
           make_latest: "false"
