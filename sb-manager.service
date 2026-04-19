@@ -1,0 +1,33 @@
+[Unit]
+Description=sing-box manager daemon
+After=network-online.target sing-box.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/etc/sing-box-manager
+Environment=RUST_LOG=info
+ExecStartPre=/usr/bin/test -f /etc/sing-box-manager/config.toml
+ExecStartPre=/usr/bin/test -x /usr/local/bin/sb
+ExecStart=/usr/local/bin/sb --config /etc/sing-box-manager/config.toml daemon
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# 安全硬化
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+ReadWritePaths=/var/lib/sing-box-manager /etc/sing-box /etc/sing-box-manager
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,28 @@
+# Rust 构建产物
+/target
+**/*.rs.bk
+*.pdb
+
+# 本地数据 / 临时文件
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.tmp
+*.bak
+*.log
+
+# 编辑器 / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 操作系统
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 本地配置（保留模板 config.toml，仅忽略实际运行时副本）
+/config.local.toml
