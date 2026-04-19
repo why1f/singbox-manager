@@ -8,6 +8,10 @@ on:
       version:
         description: "强制构建指定 sing-box tag (例如 v1.10.3；留空则取 upstream latest)"
         required: false
+      force:
+        description: "即使 release 已存在也重建（会覆盖同 tag 的 release）"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -34,12 +38,20 @@ jobs:
       - id: check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE:    ${{ github.event.inputs.force }}
         run: |
-          # 只检查 singbox-* 前缀的 tag，避免误判到 sb-manager 本体的 v* tag
-          if gh release view "${{ steps.pick.outputs.tag }}" -R "${{ github.repository }}" >/dev/null 2>&1; then
+          TAG="${{ steps.pick.outputs.tag }}"
+          if [ "$FORCE" = "true" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "force=true → 重建 $TAG"
+            exit 0
+          fi
+          if gh release view "$TAG" -R "${{ github.repository }}" >/dev/null 2>&1; then
             echo "skip=true"  >> "$GITHUB_OUTPUT"
+            echo "$TAG 已存在，跳过（用 Run workflow 勾选 force 可强制重建）"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "$TAG 不存在，执行构建"
           fi
 
   build:
@@ -147,12 +159,26 @@ jobs:
     needs: [resolve, build]
     if: needs.resolve.outputs.skip == 'false'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
       - run: ls -lh dist/
+
+      - name: Delete existing release (for force rebuild)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE:    ${{ github.event.inputs.force }}
+        run: |
+          if [ "$FORCE" = "true" ]; then
+            TAG="${{ needs.resolve.outputs.tag }}"
+            echo "force=true，删除旧 release + tag $TAG"
+            gh release delete "$TAG" -R "${{ github.repository }}" --yes --cleanup-tag || true
+          fi
+
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.resolve.outputs.tag }}
