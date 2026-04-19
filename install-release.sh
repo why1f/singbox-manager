@@ -53,6 +53,12 @@ tar xzf "$TMP/$ASSET" -C "$TMP"
 SRC_DIR="$TMP/sb-${VERSION}-${TARGET}"
 [ -x "$SRC_DIR/sb" ] || fail "包内未找到可执行 sb"
 
+# —— 真正把文件放到最终位置 ——
+install -d "$CONFIG_DIR" "$DATA_DIR" "$PREFIX/bin"
+install -m 0755 "$SRC_DIR/sb" "$BIN_PATH"
+[ -f "$CONFIG_PATH" ] || install -m 0644 "$SRC_DIR/config.toml" "$CONFIG_PATH"
+install -m 0644 "$SRC_DIR/sb-manager.service" "$SERVICE_PATH"
+
 # 探测 sing-box（不强制安装；缺失时进 TUI 内核页安装）
 SB_BIN=""
 if [ -x /usr/local/bin/sing-box ]; then SB_BIN=/usr/local/bin/sing-box
