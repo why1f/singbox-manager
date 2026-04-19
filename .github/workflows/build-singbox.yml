@@ -136,6 +136,7 @@ jobs:
       - name: Package
         run: |
           NAME="sing-box-${VERSION}-${{ matrix.target }}-v2rayapi"
+          BARE="sing-box-${VERSION}-${{ matrix.target }}"
           mkdir -p dist/$NAME
           cp sb-src/sing-box dist/$NAME/sing-box
           cp sb-src/release/config/sing-box.service dist/$NAME/ 2>/dev/null || true
@@ -143,8 +144,10 @@ jobs:
           # 打包
           tar -C dist -czf dist/$NAME.tar.gz $NAME
           # 也输出裸 binary，方便 wget + chmod 直接用
-          cp sb-src/sing-box dist/sing-box-${VERSION}-${{ matrix.target }}
-          ( cd dist && sha256sum $NAME.tar.gz sing-box-${VERSION}-${{ matrix.target }} > $NAME.sha256 )
+          cp sb-src/sing-box dist/$BARE
+          # 每个文件一个单独的 .sha256，方便 Rust 侧按 "<asset>.sha256" 下载校验
+          ( cd dist && sha256sum $NAME.tar.gz > $NAME.tar.gz.sha256 \
+                   && sha256sum $BARE        > $BARE.sha256 )
           ls -lh dist/
 
       - uses: actions/upload-artifact@v4
