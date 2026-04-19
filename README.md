@@ -1,545 +1,266 @@
-# singbox-manager 开发文档
+# singbox-manager
 
-## 当前发行建议
+面向 sing-box 的**轻量 CLI + TUI 管理工具**（Rust）。不做 Web，不做平台，只干四件事：节点搭建 / 用户管理 / 流量统计 / 订阅导出。
 
-当前建议发行版本：
-
-- `v0.1.0-beta`
-
-当前发行材料：
-
-- `README.md`
-- `ROADMAP.md`
-- `CHANGELOG.md`
-- `RELEASE_CHECKLIST.md`
+- **单机/小规模** 一台机一人管，别装一堆东西
+- **静态 musl 二进制** ~10 MB，不依赖 glibc 版本
+- **内核管理内置** 在 TUI 里一键装官方 sing-box 或带 `with_v2ray_api` 的自编译版
 
 ---
 
-## 项目定位
+## 安装（推荐：预编译二进制）
 
-`singbox-manager` 是一个面向 sing-box 的轻量管理工具，定位明确为：
-
-- **轻量**
-- **高性能**
-- **CLI + TUI**
-- **单机 / 小规模管理优先**
-- **不做 Web，不做臃肿平台**
-
-项目聚焦四个核心能力：
-
-1. **节点搭建 / 部署**
-2. **用户管理**
-3. **流量统计**
-4. **订阅导出**
-
----
-
-## 明确不做的范围
-
-当前项目目标下不做：
-
-- Web 面板
-- 浏览器控制台
-- 多管理员协作
-- 复杂权限系统
-- 大型平台化扩展
-- 与 sing-box 核心管理无关的冗杂能力
-
-即：
-
-**这是一个终端工具，不是 Web 后台。**
-
----
-
-# 一、当前已开发功能
-
-## 1. 工程基础
-
-已完成：
-
-- Rust 项目结构已恢复为真实工程
-- `cargo check` 通过
-- `cargo build --release` 通过
-- `cargo clippy -- -D warnings` 通过
-- 已内置 vendored `protoc`
-
-说明：
-
-- 当前项目已经具备稳定编译、构建和继续迭代能力
-
----
-
-## 2. 配置加载与保存
-
-已完成：
-
-- 读取 `config.toml`
-- 自动生成默认配置文件
-- 支持保存 sing-box JSON 配置文件
-- 支持基础配置项：
-  - `singbox.config_path`
-  - `singbox.binary_path`
-  - `singbox.grpc_addr`
-  - `db.path`
-  - `stats.sync_interval_secs`
-  - `stats.quota_alert_percent`
-
----
-
-## 3. SQLite 数据存储
-
-已完成：
-
-- SQLite 初始化
-- 自动建表
-- 用户表
-- 流量历史表
-- WAL 模式优化
-- 用户凭据字段支持：
-  - `uuid`
-  - `password`
-
-当前数据库用于：
-
-- 保存用户信息
-- 保存凭据
-- 保存累计流量
-- 保存手动调整流量
-- 保存到期时间
-- 保存月重置信息
-- 保存流量历史
-
----
-
-## 4. 用户管理（CLI）
-
-当前短命令已支持：
-
-- `sb users`
-- `sb add`
-- `sb del`
-- `sb on`
-- `sb off`
-- `sb reset`
-- `sb info`
-- `sb sub`
-- `sb pkg`
-- `sb add-traffic`
-
-兼容旧命令：
-
-- `sb user ...`
-
-已完成逻辑：
-
-- 用户名校验
-- 用户创建/删除
-- 启用/禁用切换
-- 套餐更新
-- 手动流量调整
-- 流量重置
-- 用户详情查询
-- 自动生成用户凭据
-
----
-
-## 5. 用户管理与 sing-box 配置联动
-
-已完成：
-
-- 用户变更后自动同步到 sing-box 配置中的 `users`
-- 自动更新 `experimental.v2ray_api.stats.users`
-- 自动保存配置
-- 自动校验配置
-- sing-box 运行中时自动 reload
-
-说明：
-
-- 这意味着用户管理不再只是改 SQLite，而是已经开始影响真实运行配置
-- 这是项目从“原型”进入“可实际使用工具”的关键一步
-
----
-
-## 6. 流量统计
-
-已完成：
-
-- 支持连接 sing-box V2Ray API
-- 支持 `QueryStats`
-- 支持解析 `user>>>...>>>traffic>>>uplink/downlink`
-- 支持按用户计算流量增量
-- 支持处理计数器回绕 / 重启清零
-- 支持累计写入数据库
-- 支持流量历史记录
-
-说明：
-
-- 当前统计链路已经成型
-- 依赖 sing-box 正确启用 `experimental.v2ray_api`
-
----
-
-## 7. 自动控制
-
-已完成：
-
-- 到期禁用
-- 超额禁用
-- 月重置
-- 自动控制事件输出
-
-说明：
-
-- 已接入 daemon 后台流程
-- 适合轻量管理工具场景的基础自动控制
-
----
-
-## 8. daemon 后台模式
-
-已完成：
-
-- `sb daemon`
-- gRPC 自动重连
-- 周期同步流量
-- 自动控制检查
-- 后台日志输出
-- 与 `systemd` 集成
-
-说明：
-
-- 这是 Linux 服务器上推荐的常驻运行模式
-
----
-
-## 9. 服务管理命令
-
-已完成：
-
-- `sb check`
-- `sb start`
-- `sb stop`
-- `sb reload`
-- `sb status`
-
-说明：
-
-- 当前已具备 sing-box 基础服务管理闭环
-- 已支持配置检查、启动、停止、重载、状态查看
-
----
-
-## 10. 节点解析
-
-已完成：
-
-- 从 sing-box 配置读取 inbound
-- 提取 tag
-- 提取监听端口
-- 提取协议类型
-- 统计节点用户数
-
-当前已识别协议：
-
-- VLESS Reality
-- VLESS WS
-- VMess WS
-- Trojan
-- Shadowsocks
-- Hysteria2
-- TUIC
-- AnyTLS
-
-说明：
-
-- 这里已经参考较完善项目中的节点配置格式做了增强
-- 当前仍属于常见场景适配，不是对所有 sing-box 写法的完全兼容
-
----
-
-## 11. 节点部署最小闭环
-
-已完成：
-
-- `sb add-node`
-- 将新节点写入 sing-box `inbounds`
-- 保存配置
-- 校验配置
-- sing-box 运行中时自动 reload
-
-说明：
-
-- 当前已具备“最小节点新增闭环”
-- 这是轻量工具方向下的最小可发行节点部署能力
-- 当前仍不是完整的节点编排系统
-
----
-
-## 12. 订阅导出
-
-已完成：
-
-- 单用户明文链接导出
-- Base64 订阅导出
-- 多协议基础链接生成
-
-当前已支持的链接类型：
-
-- VLESS Reality
-- VLESS WS
-- VMess WS
-- Trojan
-- Shadowsocks
-- Hysteria2
-- TUIC
-- AnyTLS
-
-说明：
-
-- 当前订阅导出已可以用于原型阶段和小规模实际使用
-- 仍建议结合真实配置继续增强兼容性
-
----
-
-## 13. TUI 终端界面
-
-已完成：
-
-- Dashboard 页面
-- Users 页面
-- Nodes 页面
-- Logs 页面
-- 页面切换
-- 用户选择
-- 状态栏显示
-- 同步状态显示
-- gRPC 状态显示
-- sing-box 运行状态探测
-
-当前 TUI 已支持：
-
-- 浏览用户
-- 浏览节点
-- 浏览日志
-- 查看同步状态
-- 启用/禁用当前用户
-- 重置当前用户流量
-- 刷新当前状态
-- 配置校验
-
-说明：
-
-- TUI 已经不只是浏览雏形，而是开始具备真实高频操作能力
-- 复杂编辑能力仍建议保留给 CLI
-
----
-
-## 14. Linux 部署基础
-
-已完成：
-
-- `install.sh`
-- `sb-manager.service`
-- release 构建安装
-- 配置文件安装
-- systemd 服务安装
-- 启动前检查
-- sing-box 可执行文件检查
-- sing-box 配置文件检查
-
-说明：
-
-- 当前已具备基础 Linux 部署能力
-- 更适合 Debian / Ubuntu 场景
-
----
-
-# 二、当前仍待开发功能
-
-## 1. 节点部署增强
-
-待开发：
-
-- 更多协议变种的节点生成
-- 更细的 transport / tls / reality 参数支持
-- 更完善的节点编辑能力
-- 节点删除 / 节点修改命令
-
-说明：
-
-- 当前已有最小新增闭环
-- 但还没有完整节点生命周期管理
-
----
-
-## 2. 订阅导出兼容增强
-
-待开发：
-
-- 对更多真实 sing-box 配置写法做兼容
-- 更细致处理 transport/tls/reality 参数
-- 减少不同配置风格下的导出失败情况
-
----
-
-## 3. TUI 交互继续增强
-
-待开发：
-
-- TUI 内直接导出订阅结果
-- TUI 节点页操作
-- TUI 服务页
-- 更明显的操作反馈
-
-说明：
-
-- 当前 TUI 已具备一部分真实操作能力
-- 还没完全成为全功能主面板
-
----
-
-## 4. 配置兼容性继续增强
-
-待开发：
-
-- 更多 protocol / transport 识别
-- 更稳的字段提取逻辑
-- 更多真实 sing-box 配置风格兼容
-
----
-
-## 5. 测试补强
-
-待开发：
-
-- 更多单元测试
-- 数据层测试
-- gRPC 测试
-- 订阅导出测试
-- 真实配置联调测试
-
----
-
-# 三、当前是否可以发行使用
-
-## 当前判断
-
-**已经接近可以发行使用。**
-
-如果按照你的项目目标：
-
-- 轻量
-- 高性能
-- CLI + TUI
-- 不做 Web
-- 面向单机 / 小规模管理
-
-那么当前项目已经具备：
-
-- 编译稳定性
-- 用户管理闭环
-- 配置联动能力
-- 服务管理能力
-- 基础节点新增能力
-- 流量统计能力
-- 订阅导出能力
-- 基础 TUI 操作能力
-
-## 适合的发行场景
-
-适合：
-
-- 自用
-- 单机服务器
-- 小规模节点管理
-- 内部工具
-- 继续迭代型发行版本（0.x）
-
-## 当前还不建议的场景
-
-不建议直接用于：
-
-- 大规模商用平台
-- 多管理员复杂协作环境
-- 要求极高配置兼容性的复杂生产网络
-
----
-
-# 四、当前发行建议
-
-当前更适合按如下方式发行：
-
-## 推荐发行定位
-
-- `0.x` 测试可用版
-- 轻量自用工具版
-- CLI/TUI 管理工具版
-
-## 不建议宣称
-
-- 不要宣称是成熟面板
-- 不要宣称支持所有 sing-box 配置写法
-- 不要宣称是企业级后台
-
----
-
-# 五、下一阶段优先级
-
-## P1
-
-1. 节点删除 / 编辑
-2. TUI 服务页 / 节点操作
-3. 订阅导出兼容增强
-4. 更多真实配置适配
-
-## P2
-
-5. 测试补强
-6. 更多协议支持
-7. 更细的诊断命令
-
----
-
-# 六、常用命令
+> 适用：Linux amd64 / arm64（任意发行版），只需 `curl` + `tar` + `systemd`，无需 Rust/gcc。
 
 ```bash
-cargo check
-cargo clippy -- -D warnings
-cargo build --release
+# 以 root 执行
+curl -fL https://raw.githubusercontent.com/why1f/singbox-manager/master/install-release.sh -o install-release.sh
+sudo REPO=why1f/singbox-manager bash install-release.sh
+sudo systemctl start sb-manager
 ```
 
-运行：
+脚本会：
+1. 下载最新 `sb` 二进制到 `/usr/local/bin/sb`
+2. 写 `/etc/sing-box-manager/config.toml`、`/etc/systemd/system/sb-manager.service`
+3. 建软链 `/usr/bin/sb` + 清 `/etc/profile.d/sb-manager.sh` 里的 stale alias
+4. `systemctl enable sb-manager`
+
+指定版本：
 
 ```bash
-sb
-sb tui
-sb daemon
+sudo REPO=why1f/singbox-manager VERSION=v0.1.2 bash install-release.sh
 ```
 
-用户管理：
+**装完直接敲 `sb` 进 TUI**。如果提示 command not found：
+```bash
+unalias sb sing-box 2>/dev/null; hash -r
+# 或重登 shell（/etc/profile.d/sb-manager.sh 会自动清理）
+```
+
+---
+
+## 安装（备选：源码编译）
+
+需要 root + Ubuntu/Debian/RHEL 系发行版：
 
 ```bash
-sb users
-sb add <name> --quota 100 --reset-day 1 --expire 2026-12-31
-sb del <name>
-sb on <name>
-sb off <name>
-sb reset <name>
-sb info <name>
-sb sub <name>
-sb pkg <name> --quota 200 --reset-day 1 --expire 2026-12-31
-sb add-traffic <name> 10GB
+git clone https://github.com/why1f/singbox-manager.git
+cd singbox-manager
+sudo bash install.sh
+sudo systemctl start sb-manager
 ```
 
-节点与服务：
+自动装 Rust toolchain、编译、部署。大约 5-10 分钟。
+
+---
+
+## 首次使用：装 sing-box 内核
+
+```bash
+sb      # 进 TUI
+```
+
+按 `5` 切到 **内核** 页，选其一：
+
+| 按键 | 操作 |
+|---|---|
+| `i` | 装**官方版** sing-box（走 `sing-box.app` 脚本，不含 `with_v2ray_api`，**流量统计不可用**） |
+| `v` | 装 **v2ray_api 版**（从本仓库 release 下载，**推荐**，带流量统计） |
+| `s` / `S` / `x` | 启动 / 停止 / 重启 |
+| `e` / `d` | 开启 / 关闭开机自启 |
+| `u` | 卸载（保留 `/etc/sing-box` 配置） |
+| `R` | 刷新状态 |
+
+**v2ray_api 版**是本仓库 GitHub Actions 每天基于 upstream [SagerNet/sing-box](https://github.com/SagerNet/sing-box) 自动构建的，tag 形如 `singbox-vX.Y.Z`。与官方 release 的唯一区别是启用了 `with_v2ray_api` build tag + `with_purego`（让 naive 免 CGO）。
+
+> 小知识：sing-box 官方 release 为了轻量默认**不启用** `with_v2ray_api`，而这是流量统计 gRPC 接口所必需的。所以要么用本项目构建的版本，要么自己从源码编。
+
+---
+
+## 常用命令（CLI）
+
+TUI 是主入口，CLI 做脚本集成用。
+
+### 用户
+
+```bash
+sb users                                        # 列表
+sb add alice -q 100 -r 1 -e 2026-12-31          # 100GB/月，每月 1 号重置，年底到期
+sb info alice                                   # 详情
+sb on alice / sb off alice                      # 启用 / 禁用
+sb reset alice                                  # 清零流量
+sb pkg alice -q 200                             # 改配额（只动这一项）
+sb add-traffic alice 5GB                        # 手动加 5GB 已用量；支持负数
+sb sub alice                                    # 打印该用户的订阅链接
+sb del alice
+```
+
+### 节点
 
 ```bash
 sb nodes
-sb add-node <tag> --protocol vless-ws --port 443 --server-name example.com --path /ws
-sb export <name>
-sb check
-sb start
-sb stop
-sb reload
-sb status
+sb add-node vless1 -p vless-reality --port 443 --server-name www.apple.com
+sb add-node vless2 -p vless-ws      --port 8443 --path /vless
+sb export alice                                 # Base64 订阅 + 明文链接
+```
+
+协议：`vless-reality` / `vless-ws` / `vmess-ws` / `trojan` / `shadowsocks` / `hysteria2` / `tuic` / `anytls`
+
+### sing-box 内核
+
+```bash
+sb kernel status
+sb kernel install                   # 官方版
+sb kernel install-v2ray-api         # v2ray_api 版（推荐）
+sb kernel start / stop / restart
+sb kernel enable / disable          # 开机自启
+sb kernel uninstall
+```
+
+### 服务状态
+
+```bash
+sb status                           # sing-box + gRPC + 配置路径
+sb check                            # 校验 sing-box 配置
+sb reload                           # 重载 sing-box
+```
+
+---
+
+## TUI 操作速查
+
+```
+  [1-5]       切换页：仪表盘 / 用户 / 节点 / 日志 / 内核
+  [Tab]       下一页
+  [q] / Ctrl+C 退出
+  [Esc]       清当前状态提示
+  [↑↓/jk]     在列表里选中
+  [R]         刷新
+  [Enter]     弹窗里确认提交
+```
+
+**用户页**：`[a]` 添加 `[d]` 删除 `[t]` 启禁 `[r]` 重置流量 `[s]` 导出订阅
+
+**节点页**：`[a]` 添加 `[d]` 删除（弹窗内 `←/→` 选协议）
+
+**内核页**：`[i]` 装官方 `[v]` 装 v2ray_api 版 `[u]` 卸载 `[s/S/x]` 启/停/重启 `[e/d]` 开/关自启
+
+添加节点后会自动 `sing-box check -c ... && systemctl reload sing-box`，校验不通过不会覆盖。
+
+---
+
+## 升级
+
+```bash
+sudo REPO=why1f/singbox-manager bash install-release.sh  # 拉最新 release
+sudo systemctl restart sb-manager
+```
+
+配置文件 / 数据库不会被覆盖。
+
+---
+
+## 卸载
+
+```bash
+sudo systemctl disable --now sb-manager
+sudo rm -f /usr/local/bin/sb /usr/bin/sb /etc/systemd/system/sb-manager.service /etc/profile.d/sb-manager.sh
+# 如要一并清数据：
+sudo rm -rf /etc/sing-box-manager /var/lib/sing-box-manager
+# 如要卸载 sing-box 本体，进 TUI 内核页按 u；或：
+sb kernel uninstall
+```
+
+---
+
+## 文件位置
+
+| 路径 | 用途 |
+|---|---|
+| `/usr/local/bin/sb` | sb-manager 主二进制 |
+| `/etc/sing-box-manager/config.toml` | sb-manager 配置 |
+| `/var/lib/sing-box-manager/manager.db` | SQLite 数据（用户、流量历史） |
+| `/etc/systemd/system/sb-manager.service` | systemd unit |
+| `/etc/profile.d/sb-manager.sh` | 清 stale alias |
+| `/usr/local/bin/sing-box` | sing-box 内核二进制 |
+| `/etc/sing-box/config.json` | sing-box 配置 |
+| `/etc/systemd/system/sing-box.service` | sing-box systemd unit |
+
+---
+
+## 配置 `config.toml`
+
+```toml
+[singbox]
+config_path = "/etc/sing-box/config.json"
+binary_path = "/usr/local/bin/sing-box"
+grpc_addr   = "127.0.0.1:18080"
+
+[db]
+path = "/var/lib/sing-box-manager/manager.db"
+
+[stats]
+sync_interval_secs  = 30    # 流量同步间隔
+quota_alert_percent = 80    # 用户用量到达此百分比触发告警
+
+[kernel]
+# TUI 内核页「安装 v2ray_api 版」从此仓库 release 拉取
+# 改成你自己的 fork 可用自编译版本
+update_repo = "why1f/singbox-manager"
+```
+
+---
+
+## 工作原理（极简）
+
+```
+┌──────────┐        ┌──────────┐        ┌─────────────┐
+│   TUI    │◄──────►│ sb-mgr   │◄──gRPC►│  sing-box   │
+│  (你)    │ UiEvent│ (daemon) │ 18080  │ +v2ray_api  │
+└──────────┘        └────┬─────┘        └─────────────┘
+                         │ sqlx
+                         ▼
+                   ┌──────────┐
+                   │  SQLite  │ 用户、流量历史
+                   └──────────┘
+```
+
+- TUI 是客户端，一切改动走 `service/` 层写 SQLite + 重写 `/etc/sing-box/config.json`，然后 `systemctl reload sing-box`
+- `sb daemon` 后台每 30 s 通过 gRPC 拉 sing-box 的用户流量统计，算增量写库；每分钟跑一次"到期禁用 / 月重置 / 超额禁用"
+- 掉线指数退避重连，上限 60 s
+- 订阅导出基于 `/etc/sing-box/config.json` 现有 inbound 推导 URI，不依赖额外数据库表
+
+---
+
+## 构建
+
+```bash
+cargo build --release    # 调试版 target/release/sb
+cargo test
+cargo clippy --all-targets -- -D warnings
+```
+
+Rust 1.74+，仅依赖系统 `protoc`（已内置 `protoc-bin-vendored`）。CI 用 musl 静态编译出 ~10 MB 二进制。
+
+---
+
+## 许可 / 依赖
+
+本项目 Rust 代码遵循 MIT；安装时下载的 sing-box 二进制遵循其 [GPLv3](https://github.com/SagerNet/sing-box/blob/main/LICENSE)。
+
+---
+
+## 路线图 / 变更
+
+- [ROADMAP.md](ROADMAP.md) 下一步计划
+- [CHANGELOG.md](CHANGELOG.md) 版本变更
+- [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) 发布流程
+
+## 反馈
+
+Issue / PR 欢迎。发布前跑：
+
+```bash
+cargo clippy --all-targets -- -D warnings
+cargo test
 ```
