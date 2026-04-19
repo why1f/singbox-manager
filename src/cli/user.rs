@@ -36,4 +36,12 @@ pub enum UserCommands {
               #[arg(short,long)] expire:    Option<String> },
     AddTraffic { name: String, amount: String },
     Sub    { name: String },
+    /// 授权该用户访问指定 inbound tag
+    Grant  { name: String, tag: String },
+    /// 撤销该用户对指定 inbound tag 的访问
+    Revoke { name: String, tag: String },
+    /// 恢复全部节点可用（默认）
+    GrantAll { name: String },
+    /// 显示当前允许的节点 tag 列表
+    Allowed { name: String },
 }

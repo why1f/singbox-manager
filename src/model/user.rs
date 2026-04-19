@@ -18,6 +18,8 @@ pub struct User {
     pub expire_at:       String,
     pub allow_all_nodes: bool,
     pub created_at:      String,
+    #[sqlx(default)]
+    pub allowed_nodes:   String,   // JSON 数组字符串：["tag1","tag2"]；空或 [] = 无
 }
 
 impl User {
@@ -39,6 +41,15 @@ impl User {
     pub fn is_over_quota(&self) -> bool {
         let q = self.quota_bytes();
         q > 0 && self.used_total_bytes() >= q
+    }
+    pub fn allowed_tags(&self) -> Vec<String> {
+        if self.allowed_nodes.is_empty() { return vec![]; }
+        serde_json::from_str(&self.allowed_nodes).unwrap_or_default()
+    }
+    /// 是否允许访问指定 inbound tag
+    pub fn can_use_node(&self, tag: &str) -> bool {
+        if self.allow_all_nodes { return true; }
+        self.allowed_tags().iter().any(|t| t == tag)
     }
     pub fn format_bytes(bytes: i64) -> String {
         const TB: i64 = 1_099_511_627_776;

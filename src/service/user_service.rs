@@ -24,6 +24,7 @@ pub async fn add_user(pool: &SqlitePool, name: &str, quota_gb: f64,
         expire_at: expire_at.into(),
         allow_all_nodes: true,
         created_at: Local::now().format("%Y-%m-%d").to_string(),
+        allowed_nodes: "[]".into(),
     };
     user_repo::insert(pool, &user).await?;
     Ok(user)
@@ -51,6 +52,44 @@ pub async fn update_package(pool: &SqlitePool, name: &str,
     quota_gb: Option<f64>, reset_day: Option<i64>, expire_at: Option<&str>) -> Result<()> {
     if quota_gb.is_none() && reset_day.is_none() && expire_at.is_none() { return Ok(()); }
     user_repo::update_package(pool, name, quota_gb, reset_day, expire_at).await
+}
+
+/// 允许用户访问指定节点 tag。若当前是全开状态，自动切换为按列表授权。
+pub async fn grant_node(pool: &SqlitePool, name: &str, tag: &str) -> Result<()> {
+    let user = user_repo::get(pool, name).await?
+        .ok_or_else(|| anyhow!("用户不存在: {}", name))?;
+    let mut list = user.allowed_tags();
+    if !list.iter().any(|t| t == tag) { list.push(tag.to_string()); }
+    user_repo::set_allow_all_nodes(pool, name, false, &list).await
+}
+
+/// 取消用户对指定节点 tag 的访问。若当前全开，按需计算"除此之外全部"语义。
+pub async fn revoke_node(pool: &SqlitePool, name: &str, tag: &str, all_existing_tags: &[String]) -> Result<()> {
+    let user = user_repo::get(pool, name).await?
+        .ok_or_else(|| anyhow!("用户不存在: {}", name))?;
+    let list: Vec<String> = if user.allow_all_nodes {
+        all_existing_tags.iter().filter(|t| *t != tag).cloned().collect()
+    } else {
+        user.allowed_tags().into_iter().filter(|t| t != tag).collect()
+    };
+    user_repo::set_allow_all_nodes(pool, name, false, &list).await
+}
+
+/// 恢复为全部节点可用
+pub async fn grant_all_nodes(pool: &SqlitePool, name: &str) -> Result<()> {
+    if user_repo::get(pool, name).await?.is_none() {
+        return Err(anyhow!("用户不存在: {}", name));
+    }
+    user_repo::set_allow_all_nodes(pool, name, true, &[]).await
+}
+
+/// 直接设置允许列表（覆盖式）
+#[allow(dead_code)]
+pub async fn set_allowed_tags(pool: &SqlitePool, name: &str, tags: &[String]) -> Result<()> {
+    if user_repo::get(pool, name).await?.is_none() {
+        return Err(anyhow!("用户不存在: {}", name));
+    }
+    user_repo::set_allow_all_nodes(pool, name, false, tags).await
 }
 
 pub async fn apply_automatic_controls(pool: &SqlitePool) -> Result<Vec<String>> {

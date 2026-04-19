@@ -209,6 +209,10 @@ fn handle_modal_key(
             s.modal = None;
             spawn_delete_node(cfg, ui_tx, tag);
         }
+        ModalAction::SaveNodePicker { user, all, tags } => {
+            s.modal = None;
+            spawn_save_nodes(pool, cfg, ui_tx, user, all, tags);
+        }
     }
     false
 }
@@ -259,6 +263,18 @@ fn handle_page_key(
                 s.modal = Some(Modal::ConfirmDeleteNode(tag));
             },
             _ => {}
+        },
+        KeyCode::Char('n') => if s.page == Page::Users {
+            if let Some(u) = s.selected_user() {
+                let name = u.name.clone();
+                let all = u.allow_all_nodes;
+                let allowed = u.allowed_tags();
+                let tags: Vec<String> = s.nodes.iter().map(|n| n.tag.clone()).collect();
+                let checked: Vec<bool> = tags.iter().map(|t| allowed.iter().any(|a| a == t)).collect();
+                s.modal = Some(Modal::NodePicker(crate::tui::forms::NodePicker {
+                    user: name, tags, checked, cursor: 0, all,
+                }));
+            }
         },
         KeyCode::Char('t') => if let Some(name) = s.selected_user().map(|u| u.name.clone()) {
             spawn_toggle(pool, cfg, ui_tx, name);
@@ -366,6 +382,33 @@ async fn refresh_kernel_status_stable(tx: &mpsc::Sender<UiEvent>) {
             });
         let _ = tx.send(UiEvent::KernelStatus(status)).await;
     }
+}
+
+fn spawn_save_nodes(
+    pool: Arc<sqlx::SqlitePool>, cfg: Arc<AppConfig>, tx: mpsc::Sender<UiEvent>,
+    user: String, all: bool, tags: Vec<String>,
+) {
+    tokio::spawn(async move {
+        let res = if all {
+            crate::service::user_service::grant_all_nodes(&pool, &user).await
+        } else {
+            crate::service::user_service::set_allowed_tags(&pool, &user, &tags).await
+        };
+        if let Err(e) = res {
+            let _ = tx.send(UiEvent::Status { msg: format!("保存失败: {}", e), level: StatusLevel::Error }).await;
+            return;
+        }
+        if let Err(e) = crate::apply_runtime_changes(&pool, &cfg).await {
+            let _ = tx.send(UiEvent::Status { msg: format!("配置同步失败: {}", e), level: StatusLevel::Error }).await;
+            return;
+        }
+        if let Ok(users) = crate::service::user_service::list_users(&pool).await {
+            let _ = tx.send(UiEvent::UsersRefreshed(users)).await;
+        }
+        let msg = if all { format!("{} 已恢复全部节点可用", user) }
+                  else { format!("{} 已分配 {} 个节点", user, tags.len()) };
+        let _ = tx.send(UiEvent::Status { msg, level: StatusLevel::Warn }).await;
+    });
 }
 
 fn spawn_toggle(pool: Arc<sqlx::SqlitePool>, cfg: Arc<AppConfig>, tx: mpsc::Sender<UiEvent>, name: String) {

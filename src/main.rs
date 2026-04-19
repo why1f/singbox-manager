@@ -40,6 +40,10 @@ async fn main() -> Result<()> {
         Commands::Sub { name }   => run_user(cli::user::UserCommands::Sub { name }, &pool, &cfg).await,
         Commands::Pkg(a)         => run_user(cli::user::UserCommands::Package { name: a.name, quota: a.quota, reset_day: a.reset_day, expire: a.expire }, &pool, &cfg).await,
         Commands::AddTraffic { name, amount } => run_user(cli::user::UserCommands::AddTraffic { name, amount }, &pool, &cfg).await,
+        Commands::Grant { name, tag }    => run_user(cli::user::UserCommands::Grant { name, tag }, &pool, &cfg).await,
+        Commands::Revoke { name, tag }   => run_user(cli::user::UserCommands::Revoke { name, tag }, &pool, &cfg).await,
+        Commands::GrantAll { name }      => run_user(cli::user::UserCommands::GrantAll { name }, &pool, &cfg).await,
+        Commands::Allowed { name }       => run_user(cli::user::UserCommands::Allowed { name }, &pool, &cfg).await,
         Commands::Nodes          => run_node(cli::node::NodeCommands::List, &cfg).await,
         Commands::AddNode(a)     => run_node(cli::node::NodeCommands::Add(a), &cfg).await,
         Commands::Export { name } => run_node(cli::node::NodeCommands::Export { name }, &cfg).await,
@@ -259,6 +263,39 @@ async fn run_user(cmd: cli::user::UserCommands, pool: &sqlx::SqlitePool, cfg: &A
             db::user_repo::add_manual_bytes(pool, &name, b).await?;
             apply_runtime_changes(pool, cfg).await?;
             println!("✓ '{}' 已调整 {}", name, amount);
+        }
+        UserCommands::Grant { name, tag } => {
+            user_service::grant_node(pool, &name, &tag).await?;
+            apply_runtime_changes(pool, cfg).await?;
+            println!("✓ '{}' 已获得节点 '{}' 的访问", name, tag);
+        }
+        UserCommands::Revoke { name, tag } => {
+            let existing: Vec<String> = if Path::new(&cfg.singbox.config_path).exists() {
+                core::config::load(&cfg.singbox.config_path)
+                    .map(|v| core::config::list_tags(&v)).unwrap_or_default()
+            } else { vec![] };
+            user_service::revoke_node(pool, &name, &tag, &existing).await?;
+            apply_runtime_changes(pool, cfg).await?;
+            println!("✓ '{}' 已撤销节点 '{}' 的访问", name, tag);
+        }
+        UserCommands::GrantAll { name } => {
+            user_service::grant_all_nodes(pool, &name).await?;
+            apply_runtime_changes(pool, cfg).await?;
+            println!("✓ '{}' 已恢复全部节点可用", name);
+        }
+        UserCommands::Allowed { name } => {
+            let u = db::user_repo::get(pool, &name).await?
+                .ok_or_else(|| anyhow::anyhow!("用户不存在: {}", name))?;
+            if u.allow_all_nodes {
+                println!("{} 当前全部节点可用", name);
+            } else {
+                let tags = u.allowed_tags();
+                if tags.is_empty() { println!("{} 无可用节点", name); }
+                else {
+                    println!("{} 可用节点:", name);
+                    for t in &tags { println!("  - {}", t); }
+                }
+            }
         }
         UserCommands::Sub { name } => {
             if !Path::new(&cfg.singbox.config_path).exists() {

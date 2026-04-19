@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
     Frame,
@@ -38,6 +38,15 @@ pub enum Modal {
     AddNode(NodeForm),
     ConfirmDeleteUser(String),
     ConfirmDeleteNode(String),
+    NodePicker(NodePicker),
+}
+
+pub struct NodePicker {
+    pub user: String,
+    pub tags: Vec<String>,
+    pub checked: Vec<bool>,
+    pub cursor: usize,
+    pub all: bool,      // 对应 allow_all_nodes
 }
 
 pub enum ModalAction {
@@ -47,6 +56,7 @@ pub enum ModalAction {
     SubmitNode { tag: String, protocol: String, port: u16, server_name: Option<String>, path: Option<String> },
     DeleteUser(String),
     DeleteNode(String),
+    SaveNodePicker { user: String, all: bool, tags: Vec<String> },
 }
 
 impl Modal {
@@ -65,7 +75,39 @@ impl Modal {
                 KeyCode::Char('n') | KeyCode::Char('N') => ModalAction::Close,
                 _ => ModalAction::None,
             },
+            Modal::NodePicker(p) => handle_picker(p, k),
         }
+    }
+}
+
+fn handle_picker(p: &mut NodePicker, k: KeyEvent) -> ModalAction {
+    let len = p.tags.len();
+    match k.code {
+        KeyCode::Up   | KeyCode::Char('k') => {
+            if len > 0 { p.cursor = if p.cursor == 0 { len - 1 } else { p.cursor - 1 }; }
+            ModalAction::None
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if len > 0 { p.cursor = (p.cursor + 1) % len; }
+            ModalAction::None
+        }
+        KeyCode::Char(' ') => {
+            if let Some(v) = p.checked.get_mut(p.cursor) { *v = !*v; }
+            p.all = false;
+            ModalAction::None
+        }
+        KeyCode::Char('a') => {
+            // 切换 all
+            p.all = !p.all;
+            if p.all { for v in p.checked.iter_mut() { *v = false; } }
+            ModalAction::None
+        }
+        KeyCode::Enter => {
+            let tags: Vec<String> = if p.all { vec![] }
+                else { p.tags.iter().zip(p.checked.iter()).filter_map(|(t, c)| if *c { Some(t.clone()) } else { None }).collect() };
+            ModalAction::SaveNodePicker { user: p.user.clone(), all: p.all, tags }
+        }
+        _ => ModalAction::None,
     }
 }
 
@@ -161,6 +203,7 @@ pub fn render(f: &mut Frame, area: Rect, modal: &Modal) {
         Modal::AddNode(form) => render_node(f, pop, form),
         Modal::ConfirmDeleteUser(name) => render_confirm(f, pop, " 确认删除用户 ", name),
         Modal::ConfirmDeleteNode(tag) => render_confirm(f, pop, " 确认删除节点 ", tag),
+        Modal::NodePicker(p) => render_picker(f, centered(area, 62, (p.tags.len() as u16 + 8).min(20)), p),
     }
 }
 
@@ -259,6 +302,42 @@ fn render_confirm(f: &mut Frame, area: Rect, title: &str, target: &str) {
     f.render_widget(
         Paragraph::new(text).alignment(Alignment::Left)
             .block(Block::default().borders(Borders::ALL).title(title)),
+        area,
+    );
+}
+
+fn render_picker(f: &mut Frame, area: Rect, p: &NodePicker) {
+    f.render_widget(Clear, area);
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!("  用户: {}   当前: {}", p.user, if p.all { "全部节点" } else { "按列表" }),
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+    if p.tags.is_empty() {
+        lines.push(Line::from(Span::styled("  （没有节点，先去节点页按 [a] 添加）", Style::default().fg(Color::DarkGray))));
+    } else {
+        for (i, t) in p.tags.iter().enumerate() {
+            let mark = if p.all {
+                "[*]"
+            } else if p.checked.get(i).copied().unwrap_or(false) {
+                "[x]"
+            } else {
+                "[ ]"
+            };
+            let style = if i == p.cursor {
+                Style::default().fg(Color::Black).bg(Color::Cyan)
+            } else { Style::default().fg(Color::White) };
+            lines.push(Line::from(Span::styled(format!("  {} {}", mark, t), style)));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  ↑↓/jk 选择   Space 勾选   a 切换全部   Enter 保存   Esc 取消",
+        Style::default().fg(Color::DarkGray),
+    )));
+    f.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" 分配可用节点 ")),
         area,
     );
 }

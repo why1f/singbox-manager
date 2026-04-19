@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
 
 const SCHEMA_V1: &str = include_str!("migrations/001_init.sql");
+const SCHEMA_V2: &str = include_str!("migrations/002_allowed_nodes.sql");
 
 pub async fn init_pool(db_path: &str) -> Result<SqlitePool> {
     let url = format!("sqlite://{}?mode=rwc", db_path);
@@ -30,6 +31,16 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
                 .with_context(|| format!("迁移 v1 失败: {}", stmt))?;
         }
         sqlx::query("PRAGMA user_version = 1").execute(pool).await?;
+    }
+    if version < 2 {
+        for stmt in split_sql(SCHEMA_V2) {
+            // 旧库可能已有此列（被 ALTER 加过），忽略重复列错误
+            if let Err(e) = sqlx::query(&stmt).execute(pool).await {
+                let msg = e.to_string();
+                if !msg.contains("duplicate column") { return Err(e.into()); }
+            }
+        }
+        sqlx::query("PRAGMA user_version = 2").execute(pool).await?;
     }
     Ok(())
 }

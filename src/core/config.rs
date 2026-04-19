@@ -51,6 +51,7 @@ pub fn remove_node(cfg: &mut Value, tag: &str) -> bool {
 
 /// 将 managed 用户同步到所有用户型 inbound 的 users 数组。
 /// 安全边界：仅移除 name 命中 managed 集合的用户条目，不触碰未托管的默认/旧账号。
+/// 授权：`user.can_use_node(tag)` 为 false 的组合会被排除。
 pub fn sync_users(cfg: &mut Value, users: &[User], grpc_addr: &str) -> usize {
     let managed: HashSet<&str> = users.iter().map(|u| u.name.as_str()).collect();
     let enabled: Vec<&User> = users.iter()
@@ -66,7 +67,9 @@ pub fn sync_users(cfg: &mut Value, users: &[User], grpc_addr: &str) -> usize {
             {
                 continue;
             }
+            let tag = ib.get("tag").and_then(Value::as_str).unwrap_or("").to_string();
             let additions: Vec<Value> = enabled.iter()
+                .filter(|u| u.can_use_node(&tag))
                 .filter_map(|user| build_user_value(ib, user))
                 .collect();
             let arr = ib.as_object_mut()
@@ -85,8 +88,16 @@ pub fn sync_users(cfg: &mut Value, users: &[User], grpc_addr: &str) -> usize {
         }
     }
 
+    // v2ray_api.stats.users 仍包含所有启用用户（用于统计，不影响授权）
     sync_v2ray_api_users(cfg, &enabled, grpc_addr);
     synced
+}
+
+/// 读取 config.json 中全部 inbound tag 列表
+pub fn list_tags(cfg: &Value) -> Vec<String> {
+    cfg.get("inbounds").and_then(Value::as_array).map(|arr| {
+        arr.iter().filter_map(|ib| ib.get("tag").and_then(Value::as_str).map(String::from)).collect()
+    }).unwrap_or_default()
 }
 
 fn build_user_value(ib: &Value, user: &User) -> Option<Value> {
