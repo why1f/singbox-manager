@@ -1,5 +1,7 @@
 pub mod kernel;
+pub mod nginx;
 pub mod node;
+pub mod token;
 pub mod user;
 use clap::{Parser, Subcommand};
 
@@ -36,6 +38,8 @@ pub enum Commands {
     #[command(about="后台守护模式")]     Daemon,
     #[command(about="启动 TUI（默认）")] Tui,
     #[command(about="sing-box 内核管理")] Kernel(kernel::KernelArgs),
+    #[command(about="订阅 token 管理")]   Token(token::TokenArgs),
+    #[command(about="nginx 管理")]        Nginx(nginx::NginxArgs),
     #[command(about="兼容旧用户命令")]   User(user::UserArgs),
     #[command(about="兼容旧节点命令")]   Node(node::NodeArgs),
 }

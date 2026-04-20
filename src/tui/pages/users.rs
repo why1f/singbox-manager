@@ -41,11 +41,18 @@ pub fn render(f: &mut Frame, area: Rect, s: &AppState) {
         .map(|u| {
             let tags = if u.allow_all_nodes { "全部".to_string() }
                 else { let t = u.allowed_tags(); if t.is_empty() { "无".into() } else { t.join(", ") } };
-            format!("  选中: {}  总: {}  节点: {}", u.name, User::format_bytes(u.used_total_bytes()), tags)
+            let sub_url = if u.sub_token.is_empty() {
+                "(无 token)".to_string()
+            } else if let Some(base) = &s.sub_public_base {
+                format!("{}/sub/{}", base.trim_end_matches('/'), u.sub_token)
+            } else {
+                format!("token={}", u.sub_token)
+            };
+            format!("  选中: {}  节点: {}\n  订阅: {}", u.name, tags, sub_url)
         })
         .unwrap_or("  (无用户)".into());
     f.render_widget(Paragraph::new(vec![
         Line::from(sel_text),
-        Line::from(Span::styled("  [a]添加  [E]编辑  [d]删除  [t]启/禁  [r]重置流量  [s]导出订阅  [n]分配节点  [R]刷新",Style::default().fg(Color::DarkGray))),
+        Line::from(Span::styled("  [a]添加  [E]编辑  [d]删除  [t]启/禁  [r]重置流量  [s]打印订阅  [n]分配节点  [R]刷新",Style::default().fg(Color::DarkGray))),
     ]).block(Block::default().borders(Borders::ALL).title(" 操作 ")).wrap(Wrap{trim:true}), c[1]);
 }

@@ -55,6 +55,8 @@ async fn main() -> Result<()> {
         Commands::User(a)        => run_user(a.command, &pool, &cfg).await,
         Commands::Node(a)        => run_node(a.command, &cfg).await,
         Commands::Kernel(a)      => run_kernel(a.command, &cfg).await,
+        Commands::Token(a)       => run_token(a.command, &pool, &cfg).await,
+        Commands::Nginx(a)       => run_nginx(a.command, &cfg),
         Commands::Daemon         => run_daemon(pool, cfg).await,
         Commands::Tui            => run_tui(pool, cfg).await,
     }
@@ -96,6 +98,22 @@ fn load_or_init_config(path: &Path, allow_create: bool) -> Result<AppConfig> {
 
 async fn run_daemon(pool: sqlx::SqlitePool, cfg: AppConfig) -> Result<()> {
     use service::traffic_service::{self, TrafficEvent};
+
+    // 给老库补订阅 token
+    if let Ok(n) = service::user_service::ensure_sub_tokens(&pool).await {
+        if n > 0 { tracing::info!(filled = n, "为历史用户补发订阅 token"); }
+    }
+
+    // 订阅 HTTP 服务
+    if cfg.subscription.enabled {
+        let pool_sub = pool.clone();
+        let cfg_sub = std::sync::Arc::new(cfg.clone());
+        tokio::spawn(async move {
+            if let Err(e) = service::sub_server::run(pool_sub, cfg_sub).await {
+                tracing::error!("订阅服务错误: {}", e);
+            }
+        });
+    }
 
     let (tx, mut rx) = mpsc::channel::<TrafficEvent>(128);
 
@@ -145,6 +163,20 @@ async fn run_daemon(pool: sqlx::SqlitePool, cfg: AppConfig) -> Result<()> {
 
 async fn run_tui(pool: sqlx::SqlitePool, cfg: AppConfig) -> Result<()> {
     use service::traffic_service::{self, TrafficEvent};
+
+    // 给老库补订阅 token
+    let _ = service::user_service::ensure_sub_tokens(&pool).await;
+
+    // 订阅 HTTP 服务（TUI 模式也开，方便开发测试）
+    if cfg.subscription.enabled {
+        let pool_sub = pool.clone();
+        let cfg_sub = std::sync::Arc::new(cfg.clone());
+        tokio::spawn(async move {
+            if let Err(e) = service::sub_server::run(pool_sub, cfg_sub).await {
+                tracing::warn!("订阅服务退出: {}", e);
+            }
+        });
+    }
 
     let users = service::user_service::list_users(&pool).await.unwrap_or_default();
     let nodes = if Path::new(&cfg.singbox.config_path).exists() {
@@ -232,11 +264,20 @@ async fn run_user(cmd: cli::user::UserCommands, pool: &sqlx::SqlitePool, cfg: &A
                 if u.quota_gb <= 0.0 {"不限".into()} else {format!("{} GB", u.quota_gb)},
                 u.quota_used_percent(),
                 if u.expire_at.is_empty() {"永久"} else {&u.expire_at});
+            if u.allow_all_nodes {
+                println!("节点:   全部");
+            } else {
+                let t = u.allowed_tags();
+                if t.is_empty() { println!("节点:   无"); }
+                else { println!("节点:   {}", t.join(", ")); }
+            }
+            print_sub_url(&u, &cfg.subscription.public_base);
         }
         UserCommands::Add { name, quota, reset_day, expire } => {
-            user_service::add_user(pool, &name, quota, reset_day, &expire).await?;
+            let u = user_service::add_user(pool, &name, quota, reset_day, &expire).await?;
             apply_runtime_changes(pool, cfg).await?;
             println!("✓ 用户 '{}' 已添加", name);
+            print_sub_url(&u, &cfg.subscription.public_base);
         }
         UserCommands::Del { name } => {
             user_service::delete_user(pool, &name).await?;
@@ -477,5 +518,76 @@ async fn run_status(cfg: &AppConfig) -> Result<()> {
     println!("gRPC:     {} ({})", grpc, cfg.singbox.grpc_addr);
     println!("config:   {}", cfg.singbox.config_path);
     println!("db:       {}", cfg.db.path);
+    Ok(())
+}
+
+async fn run_token(cmd: cli::token::TokenCommands, pool: &sqlx::SqlitePool, cfg: &AppConfig) -> Result<()> {
+    use cli::token::TokenCommands as T;
+    match cmd {
+        T::Show { name } => {
+            let u = db::user_repo::get(pool, &name).await?
+                .ok_or_else(|| anyhow::anyhow!("用户不存在: {}", name))?;
+            print_sub_url(&u, &cfg.subscription.public_base);
+        }
+        T::Regen { name } => {
+            let t = service::user_service::regen_sub_token(pool, &name).await?;
+            println!("✓ '{}' 的 token 已重置", name);
+            let u = db::user_repo::get(pool, &name).await?
+                .ok_or_else(|| anyhow::anyhow!("用户不存在: {}", name))?;
+            print_sub_url(&u, &cfg.subscription.public_base);
+            drop(t);
+        }
+    }
+    Ok(())
+}
+
+fn print_sub_url(u: &model::user::User, public_base: &str) {
+    if u.sub_token.is_empty() {
+        println!("(该用户无 token，运行 sb token regen {} 生成)", u.name);
+        return;
+    }
+    if public_base.is_empty() {
+        println!("Token: {}", u.sub_token);
+        println!("(未设置 [subscription].public_base，无法拼完整 URL)");
+    } else {
+        let base = public_base.trim_end_matches('/');
+        println!("sing-box: {}/sub/{}", base, u.sub_token);
+        println!("mihomo:   {}/sub/{}?type=clash", base, u.sub_token);
+    }
+}
+
+fn run_nginx(cmd: cli::nginx::NginxCommands, cfg: &AppConfig) -> Result<()> {
+    use cli::nginx::NginxCommands as N;
+    match cmd {
+        N::Status => {
+            let s = core::nginx::status(&cfg.subscription.nginx_conf);
+            println!("安装:       {}", if s.installed {"是"} else {"否"});
+            println!("路径:       {}", s.binary_path.as_deref().unwrap_or("—"));
+            println!("版本:       {}", s.version.as_deref().unwrap_or("—"));
+            println!("运行:       {}", match s.running {
+                Some(true) => "运行中", Some(false) => "未运行", None => "未知",
+            });
+            println!("自启:       {}", if s.enabled {"已启用"} else {"未启用"});
+            println!("sb-manager 配置: {} ({})", cfg.subscription.nginx_conf,
+                if s.conf_exists {"已生成"} else {"未生成"});
+        }
+        N::Install => { core::nginx::install_via_pkg()?; println!("✓ nginx 已安装"); }
+        N::Start   => { core::nginx::start()?;   println!("✓ nginx 已启动"); }
+        N::Stop    => { core::nginx::stop()?;    println!("✓ nginx 已停止"); }
+        N::Restart => { core::nginx::restart()?; println!("✓ nginx 已重启"); }
+        N::Reload  => { core::nginx::reload()?;  println!("✓ nginx 已重载"); }
+        N::Enable  => { core::nginx::enable()?;  println!("✓ nginx 已开机自启"); }
+        N::Disable => { core::nginx::disable()?; println!("✓ nginx 已关闭自启"); }
+        N::Test    => { let out = core::nginx::test_config()?; println!("{}", out); }
+        N::GenConf => {
+            core::nginx::generate_conf(
+                &cfg.subscription.nginx_conf,
+                &cfg.subscription.public_base,
+                &cfg.subscription.listen,
+            )?;
+            println!("✓ 已写入 {}", cfg.subscription.nginx_conf);
+            println!("请编辑该文件里的 ssl_certificate / ssl_certificate_key 路径，再 sb nginx test && sb nginx reload");
+        }
+    }
     Ok(())
 }

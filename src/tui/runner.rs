@@ -29,6 +29,8 @@ pub enum UiEvent {
     Status { msg: String, level: StatusLevel },
     KernelStatus(crate::core::singbox::KernelStatus),
     KernelBusy(Option<&'static str>),
+    NginxStatus(crate::core::nginx::NginxStatus),
+    NginxBusy(Option<&'static str>),
     SysMetrics { cpu: u8, rx: u64, tx: u64 },
 }
 
@@ -62,7 +64,14 @@ async fn event_loop(
 ) -> Result<()> {
     let (ui_tx, mut ui_rx) = mpsc::channel::<UiEvent>(64);
     spawn_kernel_refresh(ui_tx.clone());
+    spawn_nginx_refresh(ui_tx.clone(), cfg.clone());
     spawn_sys_sampler(ui_tx.clone());
+
+    // 记录 public_base 给 nginx 页显示
+    s.nginx_public_base = if cfg.subscription.public_base.is_empty() {
+        None
+    } else { Some(cfg.subscription.public_base.clone()) };
+    s.sub_public_base = s.nginx_public_base.clone();
 
     loop {
         s.tick_status();
@@ -78,6 +87,7 @@ async fn event_loop(
                 Page::Nodes     => pages::nodes::render(f, c[1], s),
                 Page::Logs      => pages::logs::render(f, c[1], s),
                 Page::Kernel    => pages::kernel::render(f, c[1], s),
+                Page::Nginx     => pages::nginx::render(f, c[1], s),
             }
             widgets::status_bar::render(f, c[2], s);
             if let Some(modal) = &s.modal {
@@ -142,6 +152,8 @@ fn apply_ui_event(s: &mut AppState, ev: UiEvent) {
             s.kernel = Some(k);
         }
         UiEvent::KernelBusy(op) => s.kernel_busy = op,
+        UiEvent::NginxStatus(n) => s.nginx = Some(n),
+        UiEvent::NginxBusy(op)  => s.nginx_busy = op,
         UiEvent::SysMetrics { cpu, rx, tx } => {
             s.cpu_history.push(cpu);
             if s.cpu_history.len() > 60 { s.cpu_history.remove(0); }
@@ -242,9 +254,13 @@ fn handle_page_key(
     cfg: Arc<AppConfig>,
     ui_tx: mpsc::Sender<UiEvent>,
 ) {
-    // 内核页优先处理，避免与用户/节点页的 r/t/s 等按键冲突
+    // 内核页/Nginx 页优先处理，避免与用户/节点页的 r/t/s 等按键冲突
     if s.page == Page::Kernel {
         handle_kernel_key(s, k, ui_tx, cfg);
+        return;
+    }
+    if s.page == Page::Nginx {
+        handle_nginx_key(s, k, ui_tx, cfg);
         return;
     }
     match k.code {
@@ -254,6 +270,7 @@ fn handle_page_key(
         KeyCode::Char('3') => s.page = Page::Nodes,
         KeyCode::Char('4') => s.page = Page::Logs,
         KeyCode::Char('5') => { s.page = Page::Kernel; maybe_refresh_kernel(s, &ui_tx); }
+        KeyCode::Char('6') => { s.page = Page::Nginx;  maybe_refresh_nginx(s, &ui_tx, cfg.clone()); }
         KeyCode::Esc       => s.status_msg = None,
         KeyCode::Up   | KeyCode::Char('k') => match s.page {
             Page::Users => s.user_table.prev(s.users.len()),
@@ -360,6 +377,109 @@ fn maybe_refresh_kernel(s: &AppState, ui_tx: &mpsc::Sender<UiEvent>) {
     if s.page == Page::Kernel {
         spawn_kernel_refresh(ui_tx.clone());
     }
+}
+
+fn maybe_refresh_nginx(s: &AppState, ui_tx: &mpsc::Sender<UiEvent>, cfg: Arc<AppConfig>) {
+    if s.page == Page::Nginx {
+        spawn_nginx_refresh(ui_tx.clone(), cfg);
+    }
+}
+
+fn handle_nginx_key(s: &mut AppState, k: KeyEvent, ui_tx: mpsc::Sender<UiEvent>, cfg: Arc<AppConfig>) {
+    match k.code {
+        KeyCode::Tab       => { s.next_page(); maybe_refresh_kernel(s, &ui_tx); }
+        KeyCode::Char('1') => s.page = Page::Dashboard,
+        KeyCode::Char('2') => s.page = Page::Users,
+        KeyCode::Char('3') => s.page = Page::Nodes,
+        KeyCode::Char('4') => s.page = Page::Logs,
+        KeyCode::Char('5') => { s.page = Page::Kernel; maybe_refresh_kernel(s, &ui_tx); }
+        KeyCode::Char('6') => { /* 已在本页 */ }
+        KeyCode::Esc       => s.status_msg = None,
+        KeyCode::Char('R') => spawn_nginx_refresh(ui_tx, cfg),
+        _ if s.nginx_busy.is_some() => {
+            s.set_status("正在执行上一操作，请稍候", StatusLevel::Warn);
+        }
+        KeyCode::Char('i') => spawn_nginx_op(ui_tx, cfg, "安装 nginx",        crate::core::nginx::install_via_pkg),
+        KeyCode::Char('s') => spawn_nginx_op(ui_tx, cfg, "启动 nginx",        crate::core::nginx::start),
+        KeyCode::Char('S') => spawn_nginx_op(ui_tx, cfg, "停止 nginx",        crate::core::nginx::stop),
+        KeyCode::Char('x') => spawn_nginx_op(ui_tx, cfg, "重启 nginx",        crate::core::nginx::restart),
+        KeyCode::Char('l') => spawn_nginx_op(ui_tx, cfg, "reload nginx",      crate::core::nginx::reload),
+        KeyCode::Char('e') => spawn_nginx_op(ui_tx, cfg, "nginx 开机自启",    crate::core::nginx::enable),
+        KeyCode::Char('d') => spawn_nginx_op(ui_tx, cfg, "nginx 取消自启",    crate::core::nginx::disable),
+        KeyCode::Char('t') => spawn_nginx_test(ui_tx),
+        KeyCode::Char('g') => spawn_nginx_genconf(ui_tx, cfg),
+        _ => {}
+    }
+}
+
+fn spawn_nginx_refresh(tx: mpsc::Sender<UiEvent>, cfg: Arc<AppConfig>) {
+    tokio::spawn(async move {
+        let conf_path = cfg.subscription.nginx_conf.clone();
+        let status = tokio::task::spawn_blocking(move || crate::core::nginx::status(&conf_path)).await
+            .unwrap_or(crate::core::nginx::NginxStatus {
+                installed: false, running: None, enabled: false,
+                version: None, binary_path: None, conf_exists: false,
+            });
+        let _ = tx.send(UiEvent::NginxStatus(status)).await;
+    });
+}
+
+fn spawn_nginx_op<F>(tx: mpsc::Sender<UiEvent>, cfg: Arc<AppConfig>, label: &'static str, op: F)
+where F: FnOnce() -> anyhow::Result<()> + Send + 'static {
+    tokio::spawn(async move {
+        let _ = tx.send(UiEvent::NginxBusy(Some(label))).await;
+        let result = tokio::task::spawn_blocking(op).await;
+        let _ = tx.send(UiEvent::NginxBusy(None)).await;
+        let (msg, level) = match result {
+            Ok(Ok(()))  => (format!("{} 成功", label), StatusLevel::Warn),
+            Ok(Err(e))  => (format!("{} 失败: {}", label, e), StatusLevel::Error),
+            Err(e)      => (format!("{} 中断: {}", label, e), StatusLevel::Error),
+        };
+        let _ = tx.send(UiEvent::Status { msg, level }).await;
+        // 刷新状态
+        let conf_path = cfg.subscription.nginx_conf.clone();
+        let status = tokio::task::spawn_blocking(move || crate::core::nginx::status(&conf_path)).await
+            .unwrap_or(crate::core::nginx::NginxStatus {
+                installed: false, running: None, enabled: false,
+                version: None, binary_path: None, conf_exists: false,
+            });
+        let _ = tx.send(UiEvent::NginxStatus(status)).await;
+    });
+}
+
+fn spawn_nginx_test(tx: mpsc::Sender<UiEvent>) {
+    tokio::spawn(async move {
+        let _ = tx.send(UiEvent::NginxBusy(Some("nginx -t"))).await;
+        let result = tokio::task::spawn_blocking(crate::core::nginx::test_config).await;
+        let _ = tx.send(UiEvent::NginxBusy(None)).await;
+        let (msg, level) = match result {
+            Ok(Ok(out)) => {
+                let first = out.lines().filter(|l| !l.is_empty()).take(2).collect::<Vec<_>>().join(" | ");
+                (format!("nginx -t 通过: {}", first), StatusLevel::Warn)
+            }
+            Ok(Err(e))  => (format!("nginx -t 失败: {}", e), StatusLevel::Error),
+            Err(e)      => (format!("nginx -t 中断: {}", e), StatusLevel::Error),
+        };
+        let _ = tx.send(UiEvent::Status { msg, level }).await;
+    });
+}
+
+fn spawn_nginx_genconf(tx: mpsc::Sender<UiEvent>, cfg: Arc<AppConfig>) {
+    tokio::spawn(async move {
+        let res = tokio::task::spawn_blocking(move || {
+            crate::core::nginx::generate_conf(
+                &cfg.subscription.nginx_conf,
+                &cfg.subscription.public_base,
+                &cfg.subscription.listen,
+            )
+        }).await;
+        let (msg, level) = match res {
+            Ok(Ok(())) => ("✓ 反代配置已生成；编辑证书路径后 [t] 检查 + [l] reload".into(), StatusLevel::Warn),
+            Ok(Err(e)) => (format!("生成失败: {}", e), StatusLevel::Error),
+            Err(e)     => (format!("任务中断: {}", e), StatusLevel::Error),
+        };
+        let _ = tx.send(UiEvent::Status { msg, level }).await;
+    });
 }
 
 fn spawn_kernel_refresh(tx: mpsc::Sender<UiEvent>) {

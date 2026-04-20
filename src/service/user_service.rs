@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use chrono::{Datelike, Local};
 use sqlx::SqlitePool;
 use uuid::Uuid;
@@ -6,6 +7,16 @@ use crate::db::user_repo;
 use crate::model::user::User;
 
 pub async fn list_users(pool: &SqlitePool) -> Result<Vec<User>> { user_repo::list_all(pool).await }
+
+/// 生成一个 32 字节随机 URL-safe token（43 字符）
+pub fn new_sub_token() -> String {
+    let a = Uuid::new_v4();
+    let b = Uuid::new_v4();
+    let mut buf = [0u8; 32];
+    buf[..16].copy_from_slice(a.as_bytes());
+    buf[16..].copy_from_slice(b.as_bytes());
+    URL_SAFE_NO_PAD.encode(buf)
+}
 
 pub async fn add_user(pool: &SqlitePool, name: &str, quota_gb: f64,
     reset_day: i64, expire_at: &str) -> Result<User> {
@@ -25,9 +36,32 @@ pub async fn add_user(pool: &SqlitePool, name: &str, quota_gb: f64,
         allow_all_nodes: true,
         created_at: Local::now().format("%Y-%m-%d").to_string(),
         allowed_nodes: "[]".into(),
+        sub_token: new_sub_token(),
     };
     user_repo::insert(pool, &user).await?;
     Ok(user)
+}
+
+pub async fn regen_sub_token(pool: &SqlitePool, name: &str) -> Result<String> {
+    if user_repo::get(pool, name).await?.is_none() {
+        return Err(anyhow!("用户不存在: {}", name));
+    }
+    let t = new_sub_token();
+    user_repo::set_sub_token(pool, name, &t).await?;
+    Ok(t)
+}
+
+pub async fn ensure_sub_tokens(pool: &SqlitePool) -> Result<usize> {
+    let users = user_repo::list_all(pool).await?;
+    let mut count = 0;
+    for u in &users {
+        if u.sub_token.is_empty() {
+            let t = new_sub_token();
+            user_repo::set_sub_token(pool, &u.name, &t).await?;
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 pub async fn delete_user(pool: &SqlitePool, name: &str) -> Result<()> {

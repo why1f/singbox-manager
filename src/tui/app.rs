@@ -2,12 +2,12 @@ use crate::model::{node::InboundNode, user::User};
 use crate::tui::forms::Modal;
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Page { Dashboard, Users, Nodes, Logs, Kernel }
+pub enum Page { Dashboard, Users, Nodes, Logs, Kernel, Nginx }
 impl Page {
     pub fn index(&self) -> usize {
         match self {
             Page::Dashboard => 0, Page::Users => 1, Page::Nodes => 2,
-            Page::Logs => 3, Page::Kernel => 4,
+            Page::Logs => 3, Page::Kernel => 4, Page::Nginx => 5,
         }
     }
 }
@@ -43,6 +43,10 @@ pub struct AppState {
     pub modal: Option<Modal>,
     pub kernel: Option<crate::core::singbox::KernelStatus>,
     pub kernel_busy: Option<&'static str>,
+    pub nginx: Option<crate::core::nginx::NginxStatus>,
+    pub nginx_busy: Option<&'static str>,
+    pub nginx_public_base: Option<String>,
+    pub sub_public_base: Option<String>,
     // 系统指标历史（TUI 仪表盘曲线）
     pub cpu_history: Vec<u8>,        // 0-100
     pub net_rx_history: Vec<u64>,    // 每秒新增字节
@@ -68,6 +72,10 @@ impl AppState {
             modal: None,
             kernel: None,
             kernel_busy: None,
+            nginx: None,
+            nginx_busy: None,
+            nginx_public_base: None,
+            sub_public_base: None,
             cpu_history: Vec::new(),
             net_rx_history: Vec::new(),
             net_tx_history: Vec::new(),
@@ -102,7 +110,8 @@ impl AppState {
             Page::Users     => Page::Nodes,
             Page::Nodes     => Page::Logs,
             Page::Logs      => Page::Kernel,
-            Page::Kernel    => Page::Dashboard,
+            Page::Kernel    => Page::Nginx,
+            Page::Nginx     => Page::Dashboard,
         };
     }
 }

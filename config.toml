@@ -13,3 +13,11 @@ quota_alert_percent  = 80
 [kernel]
 # 从此仓库拉取带 with_v2ray_api 的自编译 sing-box（tag 形如 singbox-v1.10.x）
 update_repo = "why1f/singbox-manager"
+
+[subscription]
+enabled     = true
+listen      = "127.0.0.1:18081"
+# 对外 URL 基础，用于拼订阅链接和 nginx server_name
+# 设置后 TUI nginx 页 [g] 可以生成反代配置
+public_base = ""                                    # 例: "https://sub.example.com"
+nginx_conf  = "/etc/nginx/conf.d/sb-manager.conf"

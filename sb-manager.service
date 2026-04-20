@@ -27,7 +27,7 @@ ProtectControlGroups=true
 RestrictSUIDSGID=true
 RestrictRealtime=true
 LockPersonality=true
-ReadWritePaths=/var/lib/sing-box-manager /etc/sing-box /etc/sing-box-manager
+ReadWritePaths=/var/lib/sing-box-manager /etc/sing-box /etc/sing-box-manager /etc/nginx/conf.d /etc/nginx/certs /etc/systemd/system
 
 [Install]
 WantedBy=multi-user.target

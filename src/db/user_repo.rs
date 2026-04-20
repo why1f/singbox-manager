@@ -15,15 +15,27 @@ pub async fn get(pool: &SqlitePool, name: &str) -> Result<Option<User>> {
 pub async fn insert(pool: &SqlitePool, u: &User) -> Result<()> {
     sqlx::query(r#"INSERT INTO users(name,uuid,password,enabled,quota_gb,used_up_bytes,used_down_bytes,
         manual_bytes,last_live_up,last_live_down,reset_day,last_reset_ym,
-        expire_at,allow_all_nodes,created_at,allowed_nodes)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"#)
+        expire_at,allow_all_nodes,created_at,allowed_nodes,sub_token)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"#)
         .bind(&u.name).bind(&u.uuid).bind(&u.password).bind(u.enabled).bind(u.quota_gb)
         .bind(u.used_up_bytes).bind(u.used_down_bytes).bind(u.manual_bytes)
         .bind(u.last_live_up).bind(u.last_live_down).bind(u.reset_day)
         .bind(&u.last_reset_ym).bind(&u.expire_at).bind(u.allow_all_nodes).bind(&u.created_at)
-        .bind(&u.allowed_nodes)
+        .bind(&u.allowed_nodes).bind(&u.sub_token)
         .execute(pool).await?;
     Ok(())
+}
+
+pub async fn set_sub_token(pool: &SqlitePool, name: &str, token: &str) -> Result<()> {
+    sqlx::query("UPDATE users SET sub_token=? WHERE name=?")
+        .bind(token).bind(name)
+        .execute(pool).await?;
+    Ok(())
+}
+
+pub async fn find_by_token(pool: &SqlitePool, token: &str) -> Result<Option<User>> {
+    Ok(sqlx::query_as::<_, User>("SELECT * FROM users WHERE sub_token=? AND sub_token != ''")
+        .bind(token).fetch_optional(pool).await?)
 }
 
 pub async fn set_allow_all_nodes(pool: &SqlitePool, name: &str, allow_all: bool, allowed: &[String]) -> Result<()> {

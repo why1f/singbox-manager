@@ -19,7 +19,9 @@ pub struct User {
     pub allow_all_nodes: bool,
     pub created_at:      String,
     #[sqlx(default)]
-    pub allowed_nodes:   String,   // JSON 数组字符串：["tag1","tag2"]；空或 [] = 无
+    pub allowed_nodes:   String,   // JSON 数组字符串：["tag1","tag2"]
+    #[sqlx(default)]
+    pub sub_token:       String,   // 32 字节 base64url，订阅 URL 用
 }
 
 impl User {
