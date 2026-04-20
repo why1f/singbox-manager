@@ -1,9 +1,64 @@
 use anyhow::{Context, Result};
+use base64::{engine::general_purpose::STANDARD, Engine};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::process::Command;
 
 use crate::model::{node::{AddNodeRequest, Protocol}, user::User};
+
+const META_FILE: &str = "/etc/sing-box-manager/nodes.meta.json";
+const CERTS_DIR: &str = "/etc/sing-box-manager/certs";
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct NodesMeta {
+    /// tag -> { public_key (reality base64), ss_password (base64 16B) }
+    #[serde(default)]
+    nodes: HashMap<String, NodeMeta>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct NodeMeta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ss_password: Option<String>,
+}
+
+fn load_meta_file() -> NodesMeta {
+    std::fs::read_to_string(META_FILE).ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_meta_file(m: &NodesMeta) -> Result<()> {
+    if let Some(p) = Path::new(META_FILE).parent() {
+        std::fs::create_dir_all(p)?;
+    }
+    std::fs::write(META_FILE, serde_json::to_string_pretty(m)?)?;
+    Ok(())
+}
+
+pub fn get_node_meta(tag: &str) -> Option<NodeMeta> {
+    load_meta_file().nodes.get(tag).cloned()
+}
+
+pub fn set_node_meta(tag: &str, meta: NodeMeta) -> Result<()> {
+    let mut m = load_meta_file();
+    m.nodes.insert(tag.to_string(), meta);
+    save_meta_file(&m)
+}
+
+pub fn remove_node_meta(tag: &str) {
+    let mut m = load_meta_file();
+    if m.nodes.remove(tag).is_some() {
+        let _ = save_meta_file(&m);
+    }
+    // 同时清除证书文件
+    let _ = std::fs::remove_file(Path::new(CERTS_DIR).join(format!("{}.crt", tag)));
+    let _ = std::fs::remove_file(Path::new(CERTS_DIR).join(format!("{}.key", tag)));
+}
 
 pub fn load(path: &str) -> Result<Value> {
     Ok(serde_json::from_str(&std::fs::read_to_string(path)
@@ -12,7 +67,7 @@ pub fn load(path: &str) -> Result<Value> {
 
 pub fn save(path: &str, json: &Value) -> Result<()> {
     let tmp = format!("{}.tmp", path);
-    if let Some(parent) = std::path::Path::new(path).parent() {
+    if let Some(parent) = Path::new(path).parent() {
         if !parent.as_os_str().is_empty() { std::fs::create_dir_all(parent).ok(); }
     }
     std::fs::write(&tmp, serde_json::to_string_pretty(json)?)?;
@@ -46,7 +101,9 @@ pub fn remove_node(cfg: &mut Value, tag: &str) -> bool {
     let Some(inbounds) = cfg.get_mut("inbounds").and_then(|v| v.as_array_mut()) else { return false; };
     let before = inbounds.len();
     inbounds.retain(|ib| ib.get("tag").and_then(Value::as_str) != Some(tag));
-    inbounds.len() < before
+    let removed = inbounds.len() < before;
+    if removed { remove_node_meta(tag); }
+    removed
 }
 
 /// 将 managed 用户同步到所有用户型 inbound 的 users 数组。
@@ -111,7 +168,13 @@ fn build_user_value(ib: &Value, user: &User) -> Option<Value> {
             Some(value)
         }
         "vmess" => Some(json!({"name": user.name, "uuid": user.uuid})),
-        "trojan" | "hysteria2" | "anytls" | "shadowsocks" => {
+        // shadowsocks 2022 系列方法要求 password 为 base64(16B)；
+        // 用户的 uuid 恰好是 16B，取 as_bytes() 编码即可。
+        "shadowsocks" => {
+            let pw = STANDARD.encode(parse_uuid_bytes(&user.uuid));
+            Some(json!({"name": user.name, "password": pw}))
+        }
+        "trojan" | "hysteria2" | "anytls" => {
             Some(json!({"name": user.name, "password": user.password}))
         }
         "tuic" => Some(json!({"name": user.name, "uuid": user.uuid, "password": user.password})),
@@ -119,74 +182,199 @@ fn build_user_value(ib: &Value, user: &User) -> Option<Value> {
     }
 }
 
+fn parse_uuid_bytes(s: &str) -> [u8; 16] {
+    uuid::Uuid::parse_str(s).map(|u| *u.as_bytes()).unwrap_or([0u8; 16])
+}
+
 fn build_inbound(req: &AddNodeRequest) -> Result<(Value, AddNodeMeta)> {
     match req.protocol {
         Protocol::VlessReality => {
             let (private_key, public_key) = generate_reality_keypair()?;
             let short_id = random_short_id();
+            let sni = req.server_name.clone().unwrap_or_else(|| "www.apple.com".into());
+            // public_key 不能写进 config.json（sing-box 严格 JSON 解析会拒绝未知字段），
+            // 改用 sidecar 保存，供订阅生成读取
+            let _ = set_node_meta(&req.tag, NodeMeta {
+                public_key: Some(public_key.clone()),
+                ss_password: None,
+            });
             let inbound = json!({
-                "tag": req.tag, "type": "vless", "listen": "::",
-                "listen_port": req.listen_port, "users": [],
+                "type": "vless",
+                "tag":  req.tag,
+                "listen": "::",
+                "listen_port": req.listen_port,
+                "users": [],
                 "tls": {
                     "enabled": true,
-                    "server_name": req.server_name.clone().unwrap_or_else(|| "www.apple.com".into()),
+                    "server_name": sni,
                     "reality": {
                         "enabled": true,
+                        "handshake": { "server": "www.apple.com", "server_port": 443 },
                         "private_key": private_key,
-                        // 非标准字段，sing-box 会忽略；供订阅生成读 public_key 用
-                        "public_key": public_key.clone(),
-                        "short_id": [short_id.clone()],
-                        "handshake": {
-                            "server": req.server_name.clone().unwrap_or_else(|| "www.apple.com".into()),
-                            "server_port": 443
-                        }
+                        "short_id": [short_id.clone()]
                     }
                 }
             });
             Ok((inbound, AddNodeMeta::RealityKeys { public_key, short_id }))
         }
-        Protocol::VlessWs => Ok((json!({
-            "tag": req.tag, "type": "vless", "listen": "::",
-            "listen_port": req.listen_port, "users": [],
-            "transport": { "type": "ws", "path": req.path.clone().unwrap_or_else(|| "/vless".into()) },
-            "tls": { "enabled": true, "server_name": req.server_name.clone().unwrap_or_default() }
-        }), AddNodeMeta::Plain)),
-        Protocol::VmessWs => Ok((json!({
-            "tag": req.tag, "type": "vmess", "listen": "::",
-            "listen_port": req.listen_port, "users": [],
-            "transport": { "type": "ws", "path": req.path.clone().unwrap_or_else(|| "/vmess".into()) },
-            "tls": { "enabled": true, "server_name": req.server_name.clone().unwrap_or_default() }
-        }), AddNodeMeta::Plain)),
-        Protocol::Trojan => Ok((json!({
-            "tag": req.tag, "type": "trojan", "listen": "::",
-            "listen_port": req.listen_port, "users": [],
-            "tls": { "enabled": true, "server_name": req.server_name.clone().unwrap_or_default() }
-        }), AddNodeMeta::Plain)),
-        Protocol::Shadowsocks => Ok((json!({
-            "tag": req.tag, "type": "shadowsocks", "listen": "::",
-            "listen_port": req.listen_port, "users": [],
-            "method": "2022-blake3-aes-128-gcm"
-        }), AddNodeMeta::Plain)),
-        Protocol::Hysteria2 => Ok((json!({
-            "tag": req.tag, "type": "hysteria2", "listen": "::",
-            "listen_port": req.listen_port, "users": [],
-            "tls": { "enabled": true, "server_name": req.server_name.clone().unwrap_or_else(|| "bing.com".into()) }
-        }), AddNodeMeta::Plain)),
-        Protocol::Tuic => Ok((json!({
-            "tag": req.tag, "type": "tuic", "listen": "::",
-            "listen_port": req.listen_port, "users": [],
-            "tls": { "enabled": true, "server_name": req.server_name.clone().unwrap_or_else(|| "bing.com".into()) }
-        }), AddNodeMeta::Plain)),
-        Protocol::Anytls => Ok((json!({
-            "tag": req.tag, "type": "anytls", "listen": "::",
-            "listen_port": req.listen_port, "users": [],
-            "tls": { "enabled": true, "server_name": req.server_name.clone().unwrap_or_else(|| "bing.com".into()) }
-        }), AddNodeMeta::Plain)),
+        Protocol::VlessWs => {
+            let sni_opt = req.server_name.clone();
+            let path = req.path.clone().unwrap_or_else(|| "/vless".into());
+            let mut inbound = json!({
+                "type": "vless",
+                "tag":  req.tag,
+                "listen": "::",
+                "listen_port": req.listen_port,
+                "users": [],
+                "transport": { "type": "ws", "path": path }
+            });
+            if let Some(sni) = sni_opt.filter(|s| !s.is_empty()) {
+                let (crt, key) = ensure_self_signed_cert(&req.tag, &sni)?;
+                inbound["tls"] = json!({
+                    "enabled": true,
+                    "server_name": sni,
+                    "certificate_path": crt,
+                    "key_path": key
+                });
+            }
+            Ok((inbound, AddNodeMeta::Plain))
+        }
+        Protocol::VmessWs => {
+            let sni_opt = req.server_name.clone();
+            let path = req.path.clone().unwrap_or_else(|| "/vmess".into());
+            let mut inbound = json!({
+                "type": "vmess",
+                "tag":  req.tag,
+                "listen": "::",
+                "listen_port": req.listen_port,
+                "users": [],
+                "transport": { "type": "ws", "path": path }
+            });
+            if let Some(sni) = sni_opt.filter(|s| !s.is_empty()) {
+                let (crt, key) = ensure_self_signed_cert(&req.tag, &sni)?;
+                inbound["tls"] = json!({
+                    "enabled": true,
+                    "server_name": sni,
+                    "certificate_path": crt,
+                    "key_path": key
+                });
+            }
+            Ok((inbound, AddNodeMeta::Plain))
+        }
+        Protocol::Trojan => {
+            let sni = req.server_name.clone().unwrap_or_else(|| "bing.com".into());
+            let (crt, key) = ensure_self_signed_cert(&req.tag, &sni)?;
+            Ok((json!({
+                "type": "trojan",
+                "tag":  req.tag,
+                "listen": "::",
+                "listen_port": req.listen_port,
+                "users": [],
+                "tls": {
+                    "enabled": true,
+                    "server_name": sni,
+                    "certificate_path": crt,
+                    "key_path": key
+                }
+            }), AddNodeMeta::Plain))
+        }
+        Protocol::Shadowsocks => {
+            let method = "2022-blake3-aes-128-gcm";
+            let ss_pwd = random_b64_16();
+            let _ = set_node_meta(&req.tag, NodeMeta {
+                public_key: None, ss_password: Some(ss_pwd.clone()),
+            });
+            Ok((json!({
+                "type": "shadowsocks",
+                "tag":  req.tag,
+                "listen": "::",
+                "listen_port": req.listen_port,
+                "method": method,
+                "password": ss_pwd,
+                "users": []
+            }), AddNodeMeta::Plain))
+        }
+        Protocol::Hysteria2 => {
+            let sni = req.server_name.clone().unwrap_or_else(|| "bing.com".into());
+            let (crt, key) = ensure_self_signed_cert(&req.tag, &sni)?;
+            Ok((json!({
+                "type": "hysteria2",
+                "tag":  req.tag,
+                "listen": "::",
+                "listen_port": req.listen_port,
+                "users": [],
+                "tls": {
+                    "enabled": true,
+                    "server_name": sni,
+                    "certificate_path": crt,
+                    "key_path": key
+                }
+            }), AddNodeMeta::Plain))
+        }
+        Protocol::Tuic => {
+            let sni = req.server_name.clone().unwrap_or_else(|| "bing.com".into());
+            let (crt, key) = ensure_self_signed_cert(&req.tag, &sni)?;
+            Ok((json!({
+                "type": "tuic",
+                "tag":  req.tag,
+                "listen": "::",
+                "listen_port": req.listen_port,
+                "users": [],
+                "congestion_control": "bbr",
+                "tls": {
+                    "enabled": true,
+                    "alpn": ["h3"],
+                    "server_name": sni,
+                    "certificate_path": crt,
+                    "key_path": key
+                }
+            }), AddNodeMeta::Plain))
+        }
+        Protocol::Anytls => {
+            let sni = req.server_name.clone().unwrap_or_else(|| "bing.com".into());
+            let (crt, key) = ensure_self_signed_cert(&req.tag, &sni)?;
+            Ok((json!({
+                "type": "anytls",
+                "tag":  req.tag,
+                "listen": "::",
+                "listen_port": req.listen_port,
+                "users": [],
+                "tls": {
+                    "enabled": true,
+                    "server_name": sni,
+                    "certificate_path": crt,
+                    "key_path": key
+                }
+            }), AddNodeMeta::Plain))
+        }
         Protocol::Unknown => Ok((json!({
-            "tag": req.tag, "type": "unknown", "listen": "::",
-            "listen_port": req.listen_port, "users": []
+            "type": "direct",
+            "tag":  req.tag,
+            "listen": "::",
+            "listen_port": req.listen_port
         }), AddNodeMeta::Plain)),
     }
+}
+
+/// 为 TLS 协议按需生成自签 cert/key 文件
+fn ensure_self_signed_cert(tag: &str, sni: &str) -> Result<(String, String)> {
+    let base = Path::new(CERTS_DIR);
+    std::fs::create_dir_all(base).with_context(|| format!("创建证书目录 {} 失败", base.display()))?;
+    let crt = base.join(format!("{}.crt", tag));
+    let key = base.join(format!("{}.key", tag));
+    if !crt.exists() || !key.exists() {
+        let status = Command::new("openssl")
+            .args(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "3650"])
+            .arg("-subj").arg(format!("/CN={}", sni))
+            .arg("-keyout").arg(&key)
+            .arg("-out").arg(&crt)
+            .status()
+            .with_context(|| "调用 openssl 失败，请确保系统已安装 openssl")?;
+        if !status.success() {
+            anyhow::bail!("openssl 生成自签证书失败 (tag={})", tag);
+        }
+    }
+    Ok((crt.display().to_string(), key.display().to_string()))
 }
 
 /// 调用 `sing-box generate reality-keypair`，返回 (private_key, public_key)
@@ -220,6 +408,11 @@ fn generate_reality_keypair() -> Result<(String, String)> {
 fn random_short_id() -> String {
     // 8 hex 字符 = 4 字节。用 UUIDv4 前 8 位足够随机
     uuid::Uuid::new_v4().simple().to_string().chars().take(8).collect()
+}
+
+/// 生成 base64(16 随机字节)，用于 shadowsocks 2022 系列方法的密钥 / 密码
+fn random_b64_16() -> String {
+    STANDARD.encode(uuid::Uuid::new_v4().as_bytes())
 }
 
 fn sync_v2ray_api_users(cfg: &mut Value, users: &[&User], grpc_addr: &str) {

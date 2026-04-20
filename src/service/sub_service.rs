@@ -60,7 +60,10 @@ fn vless_reality(ib: &Value, user: &Value, s: &str, p: u64, tag: &str) -> Option
     let uuid = user["uuid"].as_str()?;
     let name = user["name"].as_str()?;
     let sni = ib["tls"]["server_name"].as_str().unwrap_or("www.apple.com");
-    let pk  = ib["tls"]["reality"]["public_key"].as_str().unwrap_or("");
+    // 公钥从 sidecar 读（config.json 里不能放非标字段）
+    let pk = crate::core::config::get_node_meta(tag)
+        .and_then(|m| m.public_key)
+        .unwrap_or_default();
     let sid = ib["tls"]["reality"]["short_id"].as_array()
         .and_then(|a| a.first()).and_then(Value::as_str).unwrap_or("");
     Some(format!(
