@@ -29,6 +29,7 @@ pub enum UiEvent {
     Status { msg: String, level: StatusLevel },
     KernelStatus(crate::core::singbox::KernelStatus),
     KernelBusy(Option<&'static str>),
+    SysMetrics { cpu: u8, rx: u64, tx: u64 },
 }
 
 pub async fn run(
@@ -61,6 +62,7 @@ async fn event_loop(
 ) -> Result<()> {
     let (ui_tx, mut ui_rx) = mpsc::channel::<UiEvent>(64);
     spawn_kernel_refresh(ui_tx.clone());
+    spawn_sys_sampler(ui_tx.clone());
 
     loop {
         s.tick_status();
@@ -140,6 +142,14 @@ fn apply_ui_event(s: &mut AppState, ev: UiEvent) {
             s.kernel = Some(k);
         }
         UiEvent::KernelBusy(op) => s.kernel_busy = op,
+        UiEvent::SysMetrics { cpu, rx, tx } => {
+            s.cpu_history.push(cpu);
+            if s.cpu_history.len() > 60 { s.cpu_history.remove(0); }
+            s.net_rx_history.push(rx);
+            if s.net_rx_history.len() > 60 { s.net_rx_history.remove(0); }
+            s.net_tx_history.push(tx);
+            if s.net_tx_history.len() > 60 { s.net_tx_history.remove(0); }
+        }
     }
 }
 
@@ -197,9 +207,17 @@ fn handle_modal_key(
             s.modal = None;
             spawn_add_user(pool, cfg, ui_tx, name, quota, reset_day, expire);
         }
+        ModalAction::SubmitUserEdit { name, quota, reset_day, expire } => {
+            s.modal = None;
+            spawn_edit_user(pool, cfg, ui_tx, name, quota, reset_day, expire);
+        }
         ModalAction::SubmitNode { tag, protocol, port, server_name, path } => {
             s.modal = None;
             spawn_add_node(cfg, ui_tx, tag, protocol, port, server_name, path);
+        }
+        ModalAction::SubmitNodeEdit { tag, port, server_name, path } => {
+            s.modal = None;
+            spawn_edit_node(cfg, ui_tx, tag, port, server_name, path);
         }
         ModalAction::DeleteUser(name) => {
             s.modal = None;
@@ -253,6 +271,28 @@ fn handle_page_key(
                 port: "443".into(),
                 ..NodeForm::default()
             })),
+            _ => {}
+        },
+        KeyCode::Char('E') => match s.page {
+            Page::Users => if let Some(u) = s.selected_user() {
+                s.modal = Some(Modal::EditUser(crate::tui::forms::UserEditForm {
+                    name: u.name.clone(),
+                    quota: if u.quota_gb <= 0.0 { String::new() } else { format!("{}", u.quota_gb) },
+                    reset_day: if u.reset_day == 0 { String::new() } else { u.reset_day.to_string() },
+                    expire: u.expire_at.clone(),
+                    ..Default::default()
+                }));
+            },
+            Page::Nodes => if let Some(n) = s.selected_node() {
+                s.modal = Some(Modal::EditNode(crate::tui::forms::NodeEditForm {
+                    tag: n.tag.clone(),
+                    protocol: n.protocol.to_string(),
+                    port: n.listen_port.to_string(),
+                    server_name: String::new(),
+                    path: String::new(),
+                    ..Default::default()
+                }));
+            },
             _ => {}
         },
         KeyCode::Char('d') => match s.page {
@@ -332,6 +372,32 @@ fn spawn_kernel_refresh(tx: mpsc::Sender<UiEvent>) {
     });
 }
 
+fn spawn_sys_sampler(tx: mpsc::Sender<UiEvent>) {
+    tokio::spawn(async move {
+        use crate::core::sysinfo;
+        let mut iv = tokio::time::interval(std::time::Duration::from_secs(1));
+        iv.tick().await;
+        let mut prev_cpu = sysinfo::read_cpu();
+        let mut prev_net = sysinfo::read_net();
+        loop {
+            iv.tick().await;
+            let cur_cpu = sysinfo::read_cpu();
+            let cur_net = sysinfo::read_net();
+            let cpu = match (prev_cpu.as_ref(), cur_cpu.as_ref()) {
+                (Some(p), Some(c)) => sysinfo::cpu_percent(p, c),
+                _ => 0,
+            };
+            let (rx, tx_bytes) = match (prev_net, cur_net) {
+                (Some(p), Some(c)) => (c.0.saturating_sub(p.0), c.1.saturating_sub(p.1)),
+                _ => (0, 0),
+            };
+            if tx.send(UiEvent::SysMetrics { cpu, rx, tx: tx_bytes }).await.is_err() { break; }
+            prev_cpu = cur_cpu;
+            prev_net = cur_net;
+        }
+    });
+}
+
 fn spawn_kernel_op<F>(tx: mpsc::Sender<UiEvent>, label: &'static str, op: F)
 where F: FnOnce() -> anyhow::Result<()> + Send + 'static {
     tokio::spawn(async move {
@@ -408,6 +474,67 @@ fn spawn_save_nodes(
         let msg = if all { format!("{} 已恢复全部节点可用", user) }
                   else { format!("{} 已分配 {} 个节点", user, tags.len()) };
         let _ = tx.send(UiEvent::Status { msg, level: StatusLevel::Warn }).await;
+    });
+}
+
+fn spawn_edit_user(
+    pool: Arc<sqlx::SqlitePool>, cfg: Arc<AppConfig>, tx: mpsc::Sender<UiEvent>,
+    name: String, quota: Option<f64>, reset_day: Option<i64>, expire: Option<String>,
+) {
+    tokio::spawn(async move {
+        if let Err(e) = crate::service::user_service::update_package(
+            &pool, &name, quota, reset_day, expire.as_deref()
+        ).await {
+            let _ = tx.send(UiEvent::Status { msg: format!("更新失败: {}", e), level: StatusLevel::Error }).await;
+            return;
+        }
+        if let Err(e) = crate::apply_runtime_changes(&pool, &cfg).await {
+            let _ = tx.send(UiEvent::Status { msg: format!("配置同步失败: {}", e), level: StatusLevel::Error }).await;
+            return;
+        }
+        if let Ok(users) = crate::service::user_service::list_users(&pool).await {
+            let _ = tx.send(UiEvent::UsersRefreshed(users)).await;
+        }
+        let _ = tx.send(UiEvent::Status { msg: format!("{} 已更新", name), level: StatusLevel::Warn }).await;
+    });
+}
+
+fn spawn_edit_node(
+    cfg: Arc<AppConfig>, tx: mpsc::Sender<UiEvent>,
+    tag: String, port: Option<u16>, server_name: Option<String>, path: Option<String>,
+) {
+    tokio::spawn(async move {
+        let mut cfg_json = match crate::core::config::load(&cfg.singbox.config_path) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = tx.send(UiEvent::Status { msg: format!("读取配置失败: {}", e), level: StatusLevel::Error }).await;
+                return;
+            }
+        };
+        if let Err(e) = crate::core::config::edit_node(&mut cfg_json, &tag, port, server_name, path) {
+            let _ = tx.send(UiEvent::Status { msg: format!("编辑失败: {}", e), level: StatusLevel::Error }).await;
+            return;
+        }
+        if let Err(e) = crate::core::config::save(&cfg.singbox.config_path, &cfg_json) {
+            let _ = tx.send(UiEvent::Status { msg: format!("保存失败: {}", e), level: StatusLevel::Error }).await;
+            return;
+        }
+        let proc = crate::core::singbox::SingboxProcess::new(&cfg.singbox.binary_path, &cfg.singbox.config_path);
+        let check_msg = match proc.check_config() {
+            Ok(()) => {
+                if matches!(proc.is_running(), Some(true)) { let _ = proc.reload(); }
+                None
+            }
+            Err(e) => Some(format!("sing-box 校验/reload 失败: {}（改动已保存）", e)),
+        };
+        if let Ok(v) = crate::core::config::load(&cfg.singbox.config_path) {
+            let _ = tx.send(UiEvent::NodesRefreshed(crate::service::node_service::list_nodes(&v))).await;
+        }
+        let (msg, level) = match check_msg {
+            Some(w) => (w, StatusLevel::Error),
+            None    => (format!("节点 {} 已更新", tag), StatusLevel::Warn),
+        };
+        let _ = tx.send(UiEvent::Status { msg, level }).await;
     });
 }
 

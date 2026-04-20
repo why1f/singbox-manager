@@ -43,6 +43,10 @@ pub struct AppState {
     pub modal: Option<Modal>,
     pub kernel: Option<crate::core::singbox::KernelStatus>,
     pub kernel_busy: Option<&'static str>,
+    // 系统指标历史（TUI 仪表盘曲线）
+    pub cpu_history: Vec<u8>,        // 0-100
+    pub net_rx_history: Vec<u64>,    // 每秒新增字节
+    pub net_tx_history: Vec<u64>,
 }
 
 impl Default for AppState {
@@ -64,6 +68,9 @@ impl AppState {
             modal: None,
             kernel: None,
             kernel_busy: None,
+            cpu_history: Vec::new(),
+            net_rx_history: Vec::new(),
+            net_tx_history: Vec::new(),
         }
     }
     pub fn selected_user(&self) -> Option<&User> {

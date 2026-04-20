@@ -106,6 +106,37 @@ pub fn remove_node(cfg: &mut Value, tag: &str) -> bool {
     removed
 }
 
+/// 编辑已有节点：只能改 port / server_name / path（不改协议或密钥，否则应删重建）
+pub fn edit_node(
+    cfg: &mut Value, tag: &str,
+    new_port: Option<u16>,
+    new_server_name: Option<String>,
+    new_path: Option<String>,
+) -> Result<()> {
+    let inbounds = cfg.get_mut("inbounds").and_then(|v| v.as_array_mut())
+        .ok_or_else(|| anyhow::anyhow!("inbounds 不是数组"))?;
+    let ib = inbounds.iter_mut()
+        .find(|ib| ib.get("tag").and_then(Value::as_str) == Some(tag))
+        .ok_or_else(|| anyhow::anyhow!("节点不存在: {}", tag))?;
+    if let Some(p) = new_port { ib["listen_port"] = json!(p); }
+    if let Some(sn) = new_server_name {
+        if let Some(tls) = ib.get_mut("tls").and_then(|v| v.as_object_mut()) {
+            tls.insert("server_name".into(), json!(&sn));
+            if let Some(reality) = tls.get_mut("reality").and_then(|v| v.as_object_mut()) {
+                if let Some(hs) = reality.get_mut("handshake").and_then(|v| v.as_object_mut()) {
+                    hs.insert("server".into(), json!(&sn));
+                }
+            }
+        }
+    }
+    if let Some(p) = new_path {
+        if let Some(transport) = ib.get_mut("transport").and_then(|v| v.as_object_mut()) {
+            transport.insert("path".into(), json!(p));
+        }
+    }
+    Ok(())
+}
+
 /// 将 managed 用户同步到所有用户型 inbound 的 users 数组。
 /// 安全边界：仅移除 name 命中 managed 集合的用户条目，不触碰未托管的默认/旧账号。
 /// 授权：`user.can_use_node(tag)` 为 false 的组合会被排除。

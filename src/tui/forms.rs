@@ -35,10 +35,33 @@ pub struct NodeForm {
 
 pub enum Modal {
     AddUser(UserForm),
+    EditUser(UserEditForm),
     AddNode(NodeForm),
+    EditNode(NodeEditForm),
     ConfirmDeleteUser(String),
     ConfirmDeleteNode(String),
     NodePicker(NodePicker),
+}
+
+#[derive(Default)]
+pub struct UserEditForm {
+    pub name: String,          // 只读，用作定位
+    pub quota: String,
+    pub reset_day: String,
+    pub expire: String,
+    pub focus: usize,
+    pub error: Option<String>,
+}
+
+#[derive(Default)]
+pub struct NodeEditForm {
+    pub tag: String,           // 只读，用作定位
+    pub protocol: String,      // 只读，用于渲染
+    pub port: String,
+    pub server_name: String,
+    pub path: String,
+    pub focus: usize,
+    pub error: Option<String>,
 }
 
 pub struct NodePicker {
@@ -53,7 +76,9 @@ pub enum ModalAction {
     None,
     Close,
     SubmitUser { name: String, quota: f64, reset_day: i64, expire: String },
+    SubmitUserEdit { name: String, quota: Option<f64>, reset_day: Option<i64>, expire: Option<String> },
     SubmitNode { tag: String, protocol: String, port: u16, server_name: Option<String>, path: Option<String> },
+    SubmitNodeEdit { tag: String, port: Option<u16>, server_name: Option<String>, path: Option<String> },
     DeleteUser(String),
     DeleteNode(String),
     SaveNodePicker { user: String, all: bool, tags: Vec<String> },
@@ -63,8 +88,10 @@ impl Modal {
     pub fn handle(&mut self, k: KeyEvent) -> ModalAction {
         if matches!(k.code, KeyCode::Esc) { return ModalAction::Close; }
         match self {
-            Modal::AddUser(f) => handle_user(f, k),
-            Modal::AddNode(f) => handle_node(f, k),
+            Modal::AddUser(f)  => handle_user(f, k),
+            Modal::EditUser(f) => handle_user_edit(f, k),
+            Modal::AddNode(f)  => handle_node(f, k),
+            Modal::EditNode(f) => handle_node_edit(f, k),
             Modal::ConfirmDeleteUser(name) => match k.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => ModalAction::DeleteUser(name.clone()),
                 KeyCode::Char('n') | KeyCode::Char('N') => ModalAction::Close,
@@ -78,6 +105,71 @@ impl Modal {
             Modal::NodePicker(p) => handle_picker(p, k),
         }
     }
+}
+
+fn handle_user_edit(f: &mut UserEditForm, k: KeyEvent) -> ModalAction {
+    const FIELDS: usize = 3;
+    f.error = None;
+    match k.code {
+        KeyCode::Tab | KeyCode::Down => { f.focus = (f.focus + 1) % FIELDS; ModalAction::None }
+        KeyCode::BackTab | KeyCode::Up => {
+            f.focus = if f.focus == 0 { FIELDS - 1 } else { f.focus - 1 };
+            ModalAction::None
+        }
+        KeyCode::Enter => {
+            let q  = if f.quota.trim().is_empty() { None } else {
+                match f.quota.trim().parse::<f64>() {
+                    Ok(v) => Some(v),
+                    Err(_) => { f.error = Some("配额需为数字".into()); return ModalAction::None; }
+                }
+            };
+            let d  = if f.reset_day.trim().is_empty() { None } else {
+                match f.reset_day.trim().parse::<i64>() {
+                    Ok(v) if v == 0 || v == 32 || (1..=28).contains(&v) => Some(v),
+                    _ => { f.error = Some("重置日需 0/1-28/32".into()); return ModalAction::None; }
+                }
+            };
+            let e = if f.expire.trim().is_empty() { None } else { Some(f.expire.trim().to_string()) };
+            ModalAction::SubmitUserEdit { name: f.name.clone(), quota: q, reset_day: d, expire: e }
+        }
+        KeyCode::Backspace => { user_edit_field(f).pop(); ModalAction::None }
+        KeyCode::Char(c) => { user_edit_field(f).push(c); ModalAction::None }
+        _ => ModalAction::None,
+    }
+}
+
+fn user_edit_field(f: &mut UserEditForm) -> &mut String {
+    match f.focus { 0 => &mut f.quota, 1 => &mut f.reset_day, _ => &mut f.expire }
+}
+
+fn handle_node_edit(f: &mut NodeEditForm, k: KeyEvent) -> ModalAction {
+    const FIELDS: usize = 3;
+    f.error = None;
+    match k.code {
+        KeyCode::Tab | KeyCode::Down => { f.focus = (f.focus + 1) % FIELDS; ModalAction::None }
+        KeyCode::BackTab | KeyCode::Up => {
+            f.focus = if f.focus == 0 { FIELDS - 1 } else { f.focus - 1 };
+            ModalAction::None
+        }
+        KeyCode::Enter => {
+            let port = if f.port.trim().is_empty() { None } else {
+                match f.port.trim().parse::<u16>() {
+                    Ok(v) if v > 0 => Some(v),
+                    _ => { f.error = Some("端口需为 1-65535".into()); return ModalAction::None; }
+                }
+            };
+            let sn = if f.server_name.trim().is_empty() { None } else { Some(f.server_name.trim().to_string()) };
+            let pa = if f.path.trim().is_empty() { None } else { Some(f.path.trim().to_string()) };
+            ModalAction::SubmitNodeEdit { tag: f.tag.clone(), port, server_name: sn, path: pa }
+        }
+        KeyCode::Backspace => { node_edit_field(f).pop(); ModalAction::None }
+        KeyCode::Char(c) => { node_edit_field(f).push(c); ModalAction::None }
+        _ => ModalAction::None,
+    }
+}
+
+fn node_edit_field(f: &mut NodeEditForm) -> &mut String {
+    match f.focus { 0 => &mut f.port, 1 => &mut f.server_name, _ => &mut f.path }
 }
 
 fn handle_picker(p: &mut NodePicker, k: KeyEvent) -> ModalAction {
@@ -199,8 +291,10 @@ pub fn render(f: &mut Frame, area: Rect, modal: &Modal) {
     let pop = centered(area, 62, 16);
     f.render_widget(Clear, pop);
     match modal {
-        Modal::AddUser(form) => render_user(f, pop, form),
-        Modal::AddNode(form) => render_node(f, pop, form),
+        Modal::AddUser(form)  => render_user(f, pop, form, "添加用户"),
+        Modal::EditUser(form) => render_user_edit(f, pop, form),
+        Modal::AddNode(form)  => render_node(f, pop, form),
+        Modal::EditNode(form) => render_node_edit(f, pop, form),
         Modal::ConfirmDeleteUser(name) => render_confirm(f, pop, " 确认删除用户 ", name),
         Modal::ConfirmDeleteNode(tag) => render_confirm(f, pop, " 确认删除节点 ", tag),
         Modal::NodePicker(p) => render_picker(f, centered(area, 62, (p.tags.len() as u16 + 8).min(20)), p),
@@ -222,7 +316,7 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
     ]).split(v[1])[1]
 }
 
-fn render_user(f: &mut Frame, area: Rect, form: &UserForm) {
+fn render_user(f: &mut Frame, area: Rect, form: &UserForm, title: &str) {
     let labels = ["用户名", "配额 GB (0=不限)", "重置日 (1-28/32/0)", "到期 (YYYY-MM-DD)"];
     let vals = [&form.name, &form.quota, &form.reset_day, &form.expire];
     let mut lines: Vec<Line> = Vec::new();
@@ -242,17 +336,50 @@ fn render_user(f: &mut Frame, area: Rect, form: &UserForm) {
         lines.push(Line::from(Span::styled(format!("  ! {}", e), Style::default().fg(Color::Red))));
     }
     lines.push(Line::from(Span::styled(
-        "  Tab/↑↓ 切换   Enter 提交   Esc 取消",
+        "  Tab/↑↓ 切换   Enter 提交   Esc 取消   (留空使用默认值)",
         Style::default().fg(Color::DarkGray),
     )));
     f.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" 添加用户 ")),
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(format!(" {} ", title))),
+        area,
+    );
+}
+
+fn render_user_edit(f: &mut Frame, area: Rect, form: &UserEditForm) {
+    let labels = ["配额 GB (留空不改)", "重置日 (留空不改)", "到期 (留空不改)"];
+    let vals = [&form.quota, &form.reset_day, &form.expire];
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!("  用户: {}  （name 不可改，删掉重建）", form.name),
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+    for (i, (label, val)) in labels.iter().zip(vals).enumerate() {
+        let style = if i == form.focus {
+            Style::default().fg(Color::Black).bg(Color::Cyan)
+        } else { Style::default().fg(Color::White) };
+        let cursor = if i == form.focus { "_" } else { "" };
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {:<22}", label), Style::default().fg(Color::Yellow)),
+            Span::styled(format!(" {}{}  ", val, cursor), style),
+        ]));
+        lines.push(Line::from(""));
+    }
+    if let Some(e) = &form.error {
+        lines.push(Line::from(Span::styled(format!("  ! {}", e), Style::default().fg(Color::Red))));
+    }
+    lines.push(Line::from(Span::styled(
+        "  Tab/↑↓ 切换   Enter 保存   Esc 取消",
+        Style::default().fg(Color::DarkGray),
+    )));
+    f.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" 编辑用户 ")),
         area,
     );
 }
 
 fn render_node(f: &mut Frame, area: Rect, form: &NodeForm) {
-    let labels = ["Tag", "协议", "端口", "server_name (可选)", "path (可选)"];
+    let labels = ["Tag *必填", "协议", "端口 *必填 (默认 443)", "server_name (留空=默认)", "path (留空=默认)"];
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(""));
     for (i, label) in labels.iter().enumerate() {
@@ -268,7 +395,7 @@ fn render_node(f: &mut Frame, area: Rect, form: &NodeForm) {
         } else { Style::default().fg(Color::White) };
         let cursor = if i == form.focus && i != 1 { "_" } else { "" };
         lines.push(Line::from(vec![
-            Span::styled(format!(" {:<22}", label), Style::default().fg(Color::Yellow)),
+            Span::styled(format!(" {:<24}", label), Style::default().fg(Color::Yellow)),
             Span::styled(format!(" {}{}  ", val, cursor), style),
         ]));
         lines.push(Line::from(""));
@@ -277,11 +404,48 @@ fn render_node(f: &mut Frame, area: Rect, form: &NodeForm) {
         lines.push(Line::from(Span::styled(format!("  ! {}", e), Style::default().fg(Color::Red))));
     }
     lines.push(Line::from(Span::styled(
+        "  reality: private_key/short_id 自动生成；ws: 无 server_name 不启 TLS",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(Span::styled(
         "  Tab/↑↓ 切换   ←/→ 选协议   Enter 提交   Esc 取消",
         Style::default().fg(Color::DarkGray),
     )));
     f.render_widget(
         Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" 添加节点 ")),
+        area,
+    );
+}
+
+fn render_node_edit(f: &mut Frame, area: Rect, form: &NodeEditForm) {
+    let labels = ["端口 (留空不改)", "server_name (留空不改)", "path (留空不改)"];
+    let vals = [&form.port, &form.server_name, &form.path];
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!("  Tag: {}   协议: {}   （tag/协议不可改，删掉重建）", form.tag, form.protocol),
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+    for (i, (label, val)) in labels.iter().zip(vals).enumerate() {
+        let style = if i == form.focus {
+            Style::default().fg(Color::Black).bg(Color::Cyan)
+        } else { Style::default().fg(Color::White) };
+        let cursor = if i == form.focus { "_" } else { "" };
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {:<24}", label), Style::default().fg(Color::Yellow)),
+            Span::styled(format!(" {}{}  ", val, cursor), style),
+        ]));
+        lines.push(Line::from(""));
+    }
+    if let Some(e) = &form.error {
+        lines.push(Line::from(Span::styled(format!("  ! {}", e), Style::default().fg(Color::Red))));
+    }
+    lines.push(Line::from(Span::styled(
+        "  Tab/↑↓ 切换   Enter 保存   Esc 取消",
+        Style::default().fg(Color::DarkGray),
+    )));
+    f.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" 编辑节点 ")),
         area,
     );
 }
