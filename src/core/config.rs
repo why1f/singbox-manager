@@ -198,7 +198,7 @@ fn build_user_value(ib: &Value, user: &User) -> Option<Value> {
             }
             Some(value)
         }
-        "vmess" => Some(json!({"name": user.name, "uuid": user.uuid})),
+        "vmess" => Some(json!({"name": user.name, "uuid": user.uuid, "alterId": 0})),
         // shadowsocks 2022 系列方法要求 password 为 base64(16B)；
         // 用户的 uuid 恰好是 16B，取 as_bytes() 编码即可。
         "shadowsocks" => {
@@ -223,8 +223,6 @@ fn build_inbound(req: &AddNodeRequest) -> Result<(Value, AddNodeMeta)> {
             let (private_key, public_key) = generate_reality_keypair()?;
             let short_id = random_short_id();
             let sni = req.server_name.clone().unwrap_or_else(|| "www.apple.com".into());
-            // public_key 不能写进 config.json（sing-box 严格 JSON 解析会拒绝未知字段），
-            // 改用 sidecar 保存，供订阅生成读取
             let _ = set_node_meta(&req.tag, NodeMeta {
                 public_key: Some(public_key.clone()),
                 ss_password: None,
@@ -240,7 +238,8 @@ fn build_inbound(req: &AddNodeRequest) -> Result<(Value, AddNodeMeta)> {
                     "server_name": sni,
                     "reality": {
                         "enabled": true,
-                        "handshake": { "server": "www.apple.com", "server_port": 443 },
+                        // handshake.server 跟 sni 一致，比硬编 www.apple.com 更合理
+                        "handshake": { "server": sni, "server_port": 443 },
                         "private_key": private_key,
                         "short_id": [short_id.clone()]
                     }
@@ -248,49 +247,37 @@ fn build_inbound(req: &AddNodeRequest) -> Result<(Value, AddNodeMeta)> {
             });
             Ok((inbound, AddNodeMeta::RealityKeys { public_key, short_id }))
         }
+        // vless-ws / vmess-ws 默认**不启用 TLS**：正常部署会在前面挂 nginx/caddy 做 TLS 终结，
+        // 后端 ws 走明文；若要后端直连 TLS，可事后手工加 tls 块
         Protocol::VlessWs => {
-            let sni_opt = req.server_name.clone();
             let path = req.path.clone().unwrap_or_else(|| "/vless".into());
-            let mut inbound = json!({
+            Ok((json!({
                 "type": "vless",
                 "tag":  req.tag,
                 "listen": "::",
                 "listen_port": req.listen_port,
                 "users": [],
-                "transport": { "type": "ws", "path": path }
-            });
-            if let Some(sni) = sni_opt.filter(|s| !s.is_empty()) {
-                let (crt, key) = ensure_self_signed_cert(&req.tag, &sni)?;
-                inbound["tls"] = json!({
-                    "enabled": true,
-                    "server_name": sni,
-                    "certificate_path": crt,
-                    "key_path": key
-                });
-            }
-            Ok((inbound, AddNodeMeta::Plain))
+                "transport": {
+                    "type": "ws", "path": path,
+                    "max_early_data": 2048,
+                    "early_data_header_name": "Sec-WebSocket-Protocol"
+                }
+            }), AddNodeMeta::Plain))
         }
         Protocol::VmessWs => {
-            let sni_opt = req.server_name.clone();
             let path = req.path.clone().unwrap_or_else(|| "/vmess".into());
-            let mut inbound = json!({
+            Ok((json!({
                 "type": "vmess",
                 "tag":  req.tag,
                 "listen": "::",
                 "listen_port": req.listen_port,
                 "users": [],
-                "transport": { "type": "ws", "path": path }
-            });
-            if let Some(sni) = sni_opt.filter(|s| !s.is_empty()) {
-                let (crt, key) = ensure_self_signed_cert(&req.tag, &sni)?;
-                inbound["tls"] = json!({
-                    "enabled": true,
-                    "server_name": sni,
-                    "certificate_path": crt,
-                    "key_path": key
-                });
-            }
-            Ok((inbound, AddNodeMeta::Plain))
+                "transport": {
+                    "type": "ws", "path": path,
+                    "max_early_data": 2048,
+                    "early_data_header_name": "Sec-WebSocket-Protocol"
+                }
+            }), AddNodeMeta::Plain))
         }
         Protocol::Trojan => {
             let sni = req.server_name.clone().unwrap_or_else(|| "bing.com".into());
@@ -336,6 +323,7 @@ fn build_inbound(req: &AddNodeRequest) -> Result<(Value, AddNodeMeta)> {
                 "users": [],
                 "tls": {
                     "enabled": true,
+                    "alpn": ["h3"],
                     "server_name": sni,
                     "certificate_path": crt,
                     "key_path": key
@@ -370,8 +358,10 @@ fn build_inbound(req: &AddNodeRequest) -> Result<(Value, AddNodeMeta)> {
                 "listen": "::",
                 "listen_port": req.listen_port,
                 "users": [],
+                "padding_scheme": [],
                 "tls": {
                     "enabled": true,
+                    "alpn": ["h2", "http/1.1"],
                     "server_name": sni,
                     "certificate_path": crt,
                     "key_path": key
@@ -387,24 +377,31 @@ fn build_inbound(req: &AddNodeRequest) -> Result<(Value, AddNodeMeta)> {
     }
 }
 
-/// 为 TLS 协议按需生成自签 cert/key 文件
+/// 为 TLS 协议按需生成自签 cert/key 文件。使用 EC P-256（比 RSA 小很多，握手快）。
 fn ensure_self_signed_cert(tag: &str, sni: &str) -> Result<(String, String)> {
     let base = Path::new(CERTS_DIR);
     std::fs::create_dir_all(base).with_context(|| format!("创建证书目录 {} 失败", base.display()))?;
     let crt = base.join(format!("{}.crt", tag));
     let key = base.join(format!("{}.key", tag));
-    if !crt.exists() || !key.exists() {
-        let status = Command::new("openssl")
-            .args(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "3650"])
-            .arg("-subj").arg(format!("/CN={}", sni))
-            .arg("-keyout").arg(&key)
-            .arg("-out").arg(&crt)
-            .status()
-            .with_context(|| "调用 openssl 失败，请确保系统已安装 openssl")?;
-        if !status.success() {
-            anyhow::bail!("openssl 生成自签证书失败 (tag={})", tag);
-        }
-    }
+    if crt.exists() && key.exists() { return Ok((crt.display().to_string(), key.display().to_string())); }
+
+    // 1. 生成 EC P-256 私钥
+    let status = Command::new("openssl")
+        .args(["ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out"])
+        .arg(&key).status()
+        .with_context(|| "调用 openssl ecparam 失败（请确保已安装 openssl）")?;
+    if !status.success() { anyhow::bail!("openssl 生成 EC 私钥失败 (tag={})", tag); }
+
+    // 2. 用该私钥签一个 100 年有效的自签证书
+    let status = Command::new("openssl")
+        .args(["req", "-x509", "-new", "-key"])
+        .arg(&key)
+        .arg("-out").arg(&crt)
+        .args(["-days", "36500", "-nodes", "-subj"])
+        .arg(format!("/CN={}", sni))
+        .status()
+        .with_context(|| "调用 openssl req 失败")?;
+    if !status.success() { anyhow::bail!("openssl 生成自签证书失败 (tag={})", tag); }
     Ok((crt.display().to_string(), key.display().to_string()))
 }
 

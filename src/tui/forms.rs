@@ -8,8 +8,15 @@ use ratatui::{
 };
 
 pub const PROTOCOLS: [&str; 8] = [
-    "vless-reality", "vless-ws", "vmess-ws", "trojan",
-    "shadowsocks", "hysteria2", "tuic", "anytls",
+    // 常用在前：vless（reality + ws） → hysteria2 → vmess-ws，其余按偏好
+    "vless-reality",
+    "vless-ws",
+    "hysteria2",
+    "vmess-ws",
+    "trojan",
+    "shadowsocks",
+    "tuic",
+    "anytls",
 ];
 
 #[derive(Default)]
