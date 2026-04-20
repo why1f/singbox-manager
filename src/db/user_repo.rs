@@ -13,12 +13,13 @@ pub async fn get(pool: &SqlitePool, name: &str) -> Result<Option<User>> {
 }
 
 pub async fn insert(pool: &SqlitePool, u: &User) -> Result<()> {
+    // manual_bytes 在 schema 里保留为冗余列（默认 0），不再由应用写入
     sqlx::query(r#"INSERT INTO users(name,uuid,password,enabled,quota_gb,used_up_bytes,used_down_bytes,
-        manual_bytes,last_live_up,last_live_down,reset_day,last_reset_ym,
+        last_live_up,last_live_down,reset_day,last_reset_ym,
         expire_at,allow_all_nodes,created_at,allowed_nodes,sub_token)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"#)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"#)
         .bind(&u.name).bind(&u.uuid).bind(&u.password).bind(u.enabled).bind(u.quota_gb)
-        .bind(u.used_up_bytes).bind(u.used_down_bytes).bind(u.manual_bytes)
+        .bind(u.used_up_bytes).bind(u.used_down_bytes)
         .bind(u.last_live_up).bind(u.last_live_down).bind(u.reset_day)
         .bind(&u.last_reset_ym).bind(&u.expire_at).bind(u.allow_all_nodes).bind(&u.created_at)
         .bind(&u.allowed_nodes).bind(&u.sub_token)
@@ -84,11 +85,5 @@ pub async fn update_package(
         WHERE name = ?"#)
         .bind(quota_gb).bind(reset_day).bind(expire_at).bind(name)
         .execute(pool).await?;
-    Ok(())
-}
-
-pub async fn add_manual_bytes(pool: &SqlitePool, name: &str, bytes: i64) -> Result<()> {
-    sqlx::query("UPDATE users SET manual_bytes=manual_bytes+? WHERE name=?")
-        .bind(bytes).bind(name).execute(pool).await?;
     Ok(())
 }

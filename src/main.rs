@@ -39,7 +39,6 @@ async fn main() -> Result<()> {
         Commands::Info { name }  => run_user(cli::user::UserCommands::Info { name }, &pool, &cfg).await,
         Commands::Sub { name }   => run_user(cli::user::UserCommands::Sub { name }, &pool, &cfg).await,
         Commands::Pkg(a)         => run_user(cli::user::UserCommands::Package { name: a.name, quota: a.quota, reset_day: a.reset_day, expire: a.expire }, &pool, &cfg).await,
-        Commands::AddTraffic { name, amount } => run_user(cli::user::UserCommands::AddTraffic { name, amount }, &pool, &cfg).await,
         Commands::Grant { name, tag }    => run_user(cli::user::UserCommands::Grant { name, tag }, &pool, &cfg).await,
         Commands::Revoke { name, tag }   => run_user(cli::user::UserCommands::Revoke { name, tag }, &pool, &cfg).await,
         Commands::GrantAll { name }      => run_user(cli::user::UserCommands::GrantAll { name }, &pool, &cfg).await,
@@ -299,12 +298,6 @@ async fn run_user(cmd: cli::user::UserCommands, pool: &sqlx::SqlitePool, cfg: &A
             apply_runtime_changes(pool, cfg).await?;
             println!("✓ '{}' 套餐已更新", name);
         }
-        UserCommands::AddTraffic { name, amount } => {
-            let b = parse_bytes(&amount)?;
-            db::user_repo::add_manual_bytes(pool, &name, b).await?;
-            apply_runtime_changes(pool, cfg).await?;
-            println!("✓ '{}' 已调整 {}", name, amount);
-        }
         UserCommands::Grant { name, tag } => {
             user_service::grant_node(pool, &name, &tag).await?;
             apply_runtime_changes(pool, cfg).await?;
@@ -408,24 +401,6 @@ async fn run_node(cmd: cli::node::NodeCommands, cfg: &AppConfig) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn parse_bytes(s: &str) -> Result<i64> {
-    let s = s.trim();
-    let (neg, rest) = s.strip_prefix('-').map(|r| (true, r)).unwrap_or((false, s));
-    let up = rest.to_uppercase();
-    let split = up.find(|c: char| c.is_ascii_alphabetic()).unwrap_or(up.len());
-    let num: f64 = up[..split].trim().parse().map_err(|_| anyhow::anyhow!("解析数字失败"))?;
-    let mult: f64 = match up[split..].trim() {
-        "TB" | "TIB" => 1_099_511_627_776.0,
-        "GB" | "GIB" => 1_073_741_824.0,
-        "MB" | "MIB" => 1_048_576.0,
-        "KB" | "KIB" => 1_024.0,
-        "B" | ""     => 1.0,
-        other        => return Err(anyhow::anyhow!("未知单位: {}", other)),
-    };
-    let v = (num * mult) as i64;
-    Ok(if neg { -v } else { v })
 }
 
 pub async fn apply_runtime_changes(pool: &sqlx::SqlitePool, cfg: &AppConfig) -> Result<()> {

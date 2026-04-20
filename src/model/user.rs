@@ -10,7 +10,6 @@ pub struct User {
     pub quota_gb:        f64,
     pub used_up_bytes:   i64,
     pub used_down_bytes: i64,
-    pub manual_bytes:    i64,
     pub last_live_up:    i64,
     pub last_live_down:  i64,
     pub reset_day:       i64,
@@ -26,7 +25,7 @@ pub struct User {
 
 impl User {
     pub fn used_total_bytes(&self) -> i64 {
-        self.used_up_bytes + self.used_down_bytes + self.manual_bytes
+        self.used_up_bytes + self.used_down_bytes
     }
     pub fn quota_bytes(&self) -> i64 { (self.quota_gb * 1_073_741_824.0) as i64 }
     pub fn quota_used_percent(&self) -> f64 {

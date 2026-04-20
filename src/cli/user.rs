@@ -34,7 +34,6 @@ pub enum UserCommands {
               #[arg(short,long)] quota:     Option<f64>,
               #[arg(short,long)] reset_day: Option<i64>,
               #[arg(short,long)] expire:    Option<String> },
-    AddTraffic { name: String, amount: String },
     Sub    { name: String },
     /// 授权该用户访问指定 inbound tag
     Grant  { name: String, tag: String },

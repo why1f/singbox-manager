@@ -136,7 +136,7 @@ fn apply_ui_event(s: &mut AppState, ev: UiEvent) {
         }
         UiEvent::TrafficReset { name } => {
             if let Some(u) = s.users.iter_mut().find(|u| u.name == name) {
-                u.used_up_bytes = 0; u.used_down_bytes = 0; u.manual_bytes = 0;
+                u.used_up_bytes = 0; u.used_down_bytes = 0;
             }
             s.push_log(format!("[INFO] {} 流量已重置", name));
         }

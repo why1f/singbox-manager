@@ -22,7 +22,6 @@ pub enum Commands {
     #[command(about="查看用户详情")]     Info { name: String },
     #[command(about="导出用户订阅")]     Sub { name: String },
     #[command(about="调整用户套餐")]     Pkg(user::PackageArgs),
-    #[command(about="增加用户流量")]     AddTraffic { name: String, amount: String },
     #[command(about="授权用户可用某节点")] Grant { name: String, tag: String },
     #[command(about="撤销用户可用某节点")] Revoke { name: String, tag: String },
     #[command(about="恢复用户所有节点可用")] GrantAll { name: String },

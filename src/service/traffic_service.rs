@@ -97,7 +97,7 @@ async fn sync_once(
             .find(|d| d.username == u.name).map(|d| d.delta_up).unwrap_or(0);
         let applied_dn = u.used_down_bytes + deltas.iter()
             .find(|d| d.username == u.name).map(|d| d.delta_down).unwrap_or(0);
-        let used = applied_up + applied_dn + u.manual_bytes;
+        let used = applied_up + applied_dn;
         let quota = (u.quota_gb * 1_073_741_824.0) as i64;
         if quota <= 0 { continue; }
         let pct = ((used as f64 / quota as f64 * 100.0).min(100.0)) as u8;

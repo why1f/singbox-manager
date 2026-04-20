@@ -118,7 +118,7 @@ async fn handle_sub(
 /// subscription-userinfo 头：`upload=X; download=Y; total=Z; expire=T`
 fn userinfo_header(u: &User) -> String {
     let upload   = u.used_up_bytes.max(0) as u64;
-    let download = u.used_down_bytes.max(0) as u64 + u.manual_bytes.max(0) as u64;
+    let download = u.used_down_bytes.max(0) as u64;
     let total    = (u.quota_gb * 1_073_741_824.0) as u64;
     let expire = if u.expire_at.is_empty() {
         0
