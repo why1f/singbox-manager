@@ -13,9 +13,7 @@
 > 适用：Linux amd64 / arm64（任意发行版），只需 `curl` + `tar` + `systemd`，无需 Rust/gcc。
 
 ```bash
-# 以 root 执行
-curl -fL https://raw.githubusercontent.com/why1f/singbox-manager/master/install-release.sh -o install-release.sh
-sudo REPO=why1f/singbox-manager bash install-release.sh
+curl -fsSL https://raw.githubusercontent.com/why1f/singbox-manager/master/install-release.sh | sudo bash
 sudo systemctl start sb-manager
 ```
 
@@ -25,10 +23,11 @@ sudo systemctl start sb-manager
 3. 建软链 `/usr/bin/sb` + 清 `/etc/profile.d/sb-manager.sh` 里的 stale alias
 4. `systemctl enable sb-manager`
 
-指定版本：
+指定版本 / 自己的 fork：
 
 ```bash
-sudo REPO=why1f/singbox-manager VERSION=v0.1.2 bash install-release.sh
+curl -fsSL https://raw.githubusercontent.com/why1f/singbox-manager/master/install-release.sh \
+  | sudo REPO=why1f/singbox-manager VERSION=v0.2.4 bash
 ```
 
 **装完直接敲 `sb` 进 TUI**。如果提示 command not found：
@@ -190,7 +189,7 @@ sb reload                           # 重载 sing-box
 ## 升级
 
 ```bash
-sudo REPO=why1f/singbox-manager bash install-release.sh  # 拉最新 release
+curl -fsSL https://raw.githubusercontent.com/why1f/singbox-manager/master/install-release.sh | sudo bash
 sudo systemctl restart sb-manager
 ```
 
