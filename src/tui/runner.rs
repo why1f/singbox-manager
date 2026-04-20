@@ -342,6 +342,23 @@ fn handle_page_key(
         KeyCode::Char('s') => if let Some(name) = s.selected_user().map(|u| u.name.clone()) {
             spawn_export(cfg, ui_tx, name);
         },
+        KeyCode::Char('u') => if let Some(u) = s.selected_user() {
+            if u.sub_token.is_empty() {
+                s.set_status(format!("{} 无订阅 token", u.name), StatusLevel::Warn);
+            } else if let Some(base) = s.sub_public_base.clone() {
+                let base = base.trim_end_matches('/').to_string();
+                s.modal = Some(Modal::SubUrl {
+                    name:    u.name.clone(),
+                    singbox: format!("{}/sub/{}", base, u.sub_token),
+                    mihomo:  format!("{}/sub/{}?type=clash", base, u.sub_token),
+                });
+            } else {
+                s.set_status(
+                    format!("需在 config.toml 里填 [subscription].public_base；当前 token: {}", u.sub_token),
+                    StatusLevel::Warn,
+                );
+            }
+        },
         KeyCode::Char('R') => spawn_refresh(pool, cfg, ui_tx),
         KeyCode::Char('c') => spawn_check(cfg, ui_tx),
         _ => {}

@@ -4,7 +4,7 @@ use crate::tui::app::AppState;
 pub fn render(f: &mut Frame, area: Rect, s: &AppState) {
     let c = ratatui::layout::Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
-        .constraints([Constraint::Min(0),Constraint::Length(3)]).split(area);
+        .constraints([Constraint::Min(0),Constraint::Length(4)]).split(area);
     let hdr = Row::new(["Tag","协议","端口","用户数",""].map(|h|
         Cell::from(h).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
     let rows: Vec<Row> = s.nodes.iter().enumerate().map(|(i, n)| {

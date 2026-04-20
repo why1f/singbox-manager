@@ -41,6 +41,7 @@ pub enum Modal {
     ConfirmDeleteUser(String),
     ConfirmDeleteNode(String),
     NodePicker(NodePicker),
+    SubUrl { name: String, singbox: String, mihomo: String },
 }
 
 #[derive(Default)]
@@ -103,6 +104,10 @@ impl Modal {
                 _ => ModalAction::None,
             },
             Modal::NodePicker(p) => handle_picker(p, k),
+            Modal::SubUrl { .. } => match k.code {
+                KeyCode::Enter | KeyCode::Char(' ') => ModalAction::Close,
+                _ => ModalAction::None,
+            },
         }
     }
 }
@@ -298,6 +303,12 @@ pub fn render(f: &mut Frame, area: Rect, modal: &Modal) {
         Modal::ConfirmDeleteUser(name) => render_confirm(f, pop, " 确认删除用户 ", name),
         Modal::ConfirmDeleteNode(tag) => render_confirm(f, pop, " 确认删除节点 ", tag),
         Modal::NodePicker(p) => render_picker(f, centered(area, 62, (p.tags.len() as u16 + 8).min(20)), p),
+        Modal::SubUrl { name, singbox, mihomo } => {
+            // URL 可能很长，modal 宽度用 min(屏宽-4, max(url长度+8, 62))
+            let max_len = singbox.len().max(mihomo.len()) as u16 + 8;
+            let w = max_len.max(62).min(area.width.saturating_sub(4));
+            render_sub_url(f, centered(area, w, 12), name, singbox, mihomo);
+        }
     }
 }
 
@@ -466,6 +477,32 @@ fn render_confirm(f: &mut Frame, area: Rect, title: &str, target: &str) {
     f.render_widget(
         Paragraph::new(text).alignment(Alignment::Left)
             .block(Block::default().borders(Borders::ALL).title(title)),
+        area,
+    );
+}
+
+fn render_sub_url(f: &mut Frame, area: Rect, name: &str, singbox: &str, mihomo: &str) {
+    f.render_widget(Clear, area);
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  用户: {}", name),
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled("  sing-box / v2rayN:", Style::default().fg(Color::Cyan))),
+        Line::from(Span::styled(format!("    {}", singbox), Style::default().fg(Color::White))),
+        Line::from(""),
+        Line::from(Span::styled("  mihomo / Clash-meta:", Style::default().fg(Color::Cyan))),
+        Line::from(Span::styled(format!("    {}", mihomo), Style::default().fg(Color::White))),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  终端里鼠标选中即可复制；按 Esc/Enter 关闭",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    f.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" 订阅 URL ")),
         area,
     );
 }

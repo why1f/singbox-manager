@@ -57,7 +57,7 @@ pub fn render(f: &mut Frame, area: Rect, s: &AppState) {
         }
     };
     f.render_widget(
-        Paragraph::new(status_lines).block(Block::default().borders(Borders::ALL).title(" nginx ")),
+        Paragraph::new(status_lines).block(Block::default().borders(Borders::ALL).title(" 订阅服务 / nginx 反代 ")),
         c[0],
     );
 
