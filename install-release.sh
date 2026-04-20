@@ -38,6 +38,26 @@ if [ "$VERSION" = "latest" ]; then
   [ -n "$VERSION" ] || fail "无法获取最新 release tag"
 fi
 
+# 若已安装且与目标版本相同，默认跳过（FORCE=1 可强制重装）
+if [ -x "$BIN_PATH" ] && [ "${FORCE:-0}" != "1" ]; then
+  CURRENT_VER="$("$BIN_PATH" --version 2>/dev/null | awk '{print $2}')"
+  if [ -n "$CURRENT_VER" ]; then
+    TARGET_VER="${VERSION#v}"
+    if [ "$CURRENT_VER" = "$TARGET_VER" ]; then
+      note "已是目标版本 $VERSION，跳过下载与安装（FORCE=1 可强制重装）"
+      # 但仍尝试启动服务（首次安装后用户可能忘了 start）
+      if systemctl is-enabled --quiet sb-manager.service 2>/dev/null \
+         && ! systemctl is-active --quiet sb-manager.service; then
+        note "服务未运行，尝试启动"
+        systemctl start sb-manager.service || true
+      fi
+      exit 0
+    else
+      note "升级 $CURRENT_VER → ${VERSION#v}"
+    fi
+  fi
+fi
+
 ASSET="sb-${VERSION}-${TARGET}.tar.gz"
 URL="https://github.com/${REPO}/releases/download/${VERSION}/${ASSET}"
 TMP="$(mktemp -d)"
