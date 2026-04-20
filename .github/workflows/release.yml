@@ -16,16 +16,15 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
-            runner: ubuntu-latest
-            cross: false
+            use_cross: false
           - target: aarch64-unknown-linux-musl
-            runner: ubuntu-24.04-arm
-            cross: false
-    runs-on: ${{ matrix.runner }}
+            use_cross: true     # 用 cross (docker) 跨编译，避开不稳定的 ARM runner
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install musl + protoc deps
+      - name: Install musl-tools (native target)
+        if: matrix.use_cross != true
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends musl-tools
@@ -39,19 +38,26 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Build
+      - name: Install cross
+        if: matrix.use_cross == true
+        run: cargo install cross --locked --git https://github.com/cross-rs/cross
+
+      - name: Build (native)
+        if: matrix.use_cross != true
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
-          CC_aarch64_unknown_linux_musl: musl-gcc
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
         run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Build (cross)
+        if: matrix.use_cross == true
+        run: cross build --release --locked --target ${{ matrix.target }}
 
       - name: Package
         id: pkg
         run: |
           BIN=target/${{ matrix.target }}/release/sb
-          strip "$BIN" || true
+          strip "$BIN" 2>/dev/null || true
           NAME=sb-${{ github.ref_name }}-${{ matrix.target }}
           mkdir -p dist/$NAME
           cp "$BIN" dist/$NAME/sb
