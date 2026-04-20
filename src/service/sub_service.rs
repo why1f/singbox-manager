@@ -251,12 +251,17 @@ fn find_user<'a>(ib: &'a Value, name: &str) -> Option<&'a Value> {
     ib["users"].as_array()?.iter().find(|u| u["name"].as_str() == Some(name))
 }
 
-/// 是否在订阅中加 allowInsecure=1：自签名 / 无证书路径时才加。
+/// 是否在订阅中加 allowInsecure=1：reality 信任 TLS 层，走完整握手；
+/// acme 拿的是真实 CA 签的证书；用户自己写入的 cert_path（不在我们托管目录下）也视为真证书。
+/// 其他情况——自签证书（cert_path 在我们托管目录下）或根本没 cert_path——客户端都校验不过，必须 insecure。
 fn insecure_flag(ib: &Value) -> bool {
     let tls = &ib["tls"];
     if tls["reality"]["enabled"].as_bool() == Some(true) { return false; }
-    tls["certificate_path"].as_str().is_none()
-        && tls["acme"].as_object().is_none()
+    if tls["acme"].as_object().is_some() { return false; }
+    match tls["certificate_path"].as_str() {
+        None => true,
+        Some(p) => p.starts_with(crate::core::config::CERTS_DIR),
+    }
 }
 
 fn fragment(tag: &str, name: &str) -> String {

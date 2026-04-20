@@ -90,9 +90,28 @@ sb info alice                                   # 详情
 sb on alice / sb off alice                      # 启用 / 禁用
 sb reset alice                                  # 清零流量
 sb pkg alice -q 200                             # 改配额（只动这一项）
-sb add-traffic alice 5GB                        # 手动加 5GB 已用量；支持负数
 sb sub alice                                    # 打印该用户的订阅链接
 sb del alice
+```
+
+### 用户可用节点授权
+
+默认新建用户可用所有节点。收敛范围：
+
+```bash
+sb revoke alice vless1                          # 从 alice 撤销 vless1
+sb grant  alice vless2                          # 授权 alice 用 vless2
+sb grant-all alice                              # 恢复全部节点可用
+sb allowed alice                                # 查看当前允许列表
+```
+
+### 订阅 token / HTTP 服务
+
+daemon/TUI 会起一个本地订阅 HTTP（默认 `127.0.0.1:18081`），给每个用户分配一个 token，前挂 nginx 反代即可对外分发订阅。
+
+```bash
+sb token show alice                             # 打印订阅 URL + token
+sb token regen alice                            # 轮换 token（旧 URL 立即失效）
 ```
 
 ### 节点
@@ -101,10 +120,16 @@ sb del alice
 sb nodes
 sb add-node vless1 -p vless-reality --port 443 --server-name www.apple.com
 sb add-node vless2 -p vless-ws      --port 8443 --path /vless
+sb add-node hy1    -p hysteria2     --port 8443       # 无需 server_name / path
 sb export alice                                 # Base64 订阅 + 明文链接
 ```
 
 协议：`vless-reality` / `vless-ws` / `vmess-ws` / `trojan` / `shadowsocks` / `hysteria2` / `tuic` / `anytls`
+
+各协议需要的字段不同：
+- `vless-reality` / `trojan` / `tuic` / `anytls`：`--server-name`（SNI / 自签证书 CN）
+- `vless-ws` / `vmess-ws`：`--path`
+- `hysteria2` / `shadowsocks`：只要 `--port`（多填会被忽略）
 
 ### sing-box 内核
 
@@ -115,6 +140,17 @@ sb kernel install-v2ray-api         # v2ray_api 版（推荐）
 sb kernel start / stop / restart
 sb kernel enable / disable          # 开机自启
 sb kernel uninstall
+```
+
+### nginx 反代
+
+```bash
+sb nginx install                    # 用发行版包管理器装
+sb nginx gen-conf                   # 按 config.toml 生成反代 conf 到 [subscription].nginx_conf
+sb nginx test                       # nginx -t 语法检查
+sb nginx start / stop / restart / reload
+sb nginx enable / disable
+sb nginx status
 ```
 
 ### 服务状态
@@ -130,7 +166,7 @@ sb reload                           # 重载 sing-box
 ## TUI 操作速查
 
 ```
-  [1-5]       切换页：仪表盘 / 用户 / 节点 / 日志 / 内核
+  [1-6]       切换页：仪表盘 / 用户 / 节点 / 日志 / 内核 / nginx
   [Tab]       下一页
   [q] / Ctrl+C 退出
   [Esc]       清当前状态提示
@@ -139,11 +175,13 @@ sb reload                           # 重载 sing-box
   [Enter]     弹窗里确认提交
 ```
 
-**用户页**：`[a]` 添加 `[d]` 删除 `[t]` 启禁 `[r]` 重置流量 `[s]` 导出订阅
+**用户页**：`[a]` 添加 `[E]` 编辑 `[d]` 删除 `[t]` 启禁 `[r]` 重置流量 `[s]` 导出订阅 `[n]` 分配可用节点
 
-**节点页**：`[a]` 添加 `[d]` 删除（弹窗内 `←/→` 选协议）
+**节点页**：`[a]` 添加 `[E]` 编辑 `[d]` 删除（弹窗表单按当前协议显示字段：reality/trojan/tuic/anytls 多一行 `server_name`；vless-ws/vmess-ws 多一行 `path`；hysteria2/shadowsocks 只要端口）
 
 **内核页**：`[i]` 装官方 `[v]` 装 v2ray_api 版 `[u]` 卸载 `[s/S/x]` 启/停/重启 `[e/d]` 开/关自启
+
+**nginx 页**：`[i]` 装 `[g]` 生成反代 conf `[t]` 语法检查 `[s/S/x]` 启/停/重启 `[r]` reload `[e/d]` 开/关自启
 
 添加节点后会自动 `sing-box check -c ... && systemctl reload sing-box`，校验不通过不会覆盖。
 
@@ -207,6 +245,12 @@ quota_alert_percent = 80    # 用户用量到达此百分比触发告警
 # TUI 内核页「安装 v2ray_api 版」从此仓库 release 拉取
 # 改成你自己的 fork 可用自编译版本
 update_repo = "why1f/singbox-manager"
+
+[subscription]
+enabled     = true
+listen      = "127.0.0.1:18081"           # 订阅 HTTP 监听（nginx 反代上游）
+public_base = ""                          # 例: "https://sub.example.com"；填了才能拼对外订阅 URL
+nginx_conf  = "/etc/nginx/conf.d/sb-manager.conf"
 ```
 
 ---
@@ -217,18 +261,24 @@ update_repo = "why1f/singbox-manager"
 ┌──────────┐        ┌──────────┐        ┌─────────────┐
 │   TUI    │◄──────►│ sb-mgr   │◄──gRPC►│  sing-box   │
 │  (你)    │ UiEvent│ (daemon) │ 18080  │ +v2ray_api  │
-└──────────┘        └────┬─────┘        └─────────────┘
-                         │ sqlx
-                         ▼
-                   ┌──────────┐
-                   │  SQLite  │ 用户、流量历史
-                   └──────────┘
+└──────────┘        └──┬────┬──┘        └─────────────┘
+                       │    │ sqlx
+                       │    ▼
+                       │  ┌──────────┐
+                       │  │  SQLite  │ 用户、流量历史
+                       │  └──────────┘
+                       │ HTTP 18081
+                       ▼
+                   ┌──────────┐      ┌──────────┐
+                   │ 订阅服务 │◄─反代│   nginx  │◄── 客户端拉订阅
+                   └──────────┘      └──────────┘
 ```
 
 - TUI 是客户端，一切改动走 `service/` 层写 SQLite + 重写 `/etc/sing-box/config.json`，然后 `systemctl reload sing-box`
 - `sb daemon` 后台每 30 s 通过 gRPC 拉 sing-box 的用户流量统计，算增量写库；每分钟跑一次"到期禁用 / 月重置 / 超额禁用"
 - 掉线指数退避重连，上限 60 s
-- 订阅导出基于 `/etc/sing-box/config.json` 现有 inbound 推导 URI，不依赖额外数据库表
+- 订阅 HTTP 服务按 token 分发 sing-box / mihomo 订阅，**token 轮换**即可踢掉旧 URL
+- 各协议订阅链接由 `service/sub_service.rs` 按 inbound 实际字段生成：自签证书自动带 `insecure=1`，reality/acme 不带；每个协议的字段与 sing-box schema 对齐
 
 ---
 

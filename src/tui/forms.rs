@@ -19,6 +19,36 @@ pub const PROTOCOLS: [&str; 8] = [
     "anytls",
 ];
 
+/// 节点表单里的逻辑字段，用来按协议动态组装 add/edit 表单。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum NodeField { Tag, Protocol, Port, ServerName, Path }
+
+/// 需要 TLS SNI 的协议（inbound tls.server_name 生效）。
+/// 对照参考脚本 `20_protocol.sh`：只有 reality/trojan/tuic/anytls 真正用到 SNI；
+/// hysteria2 / shadowsocks / *-ws 都不应该出现 server_name 字段。
+pub fn protocol_uses_sni(p: &str) -> bool {
+    matches!(p, "vless-reality" | "trojan" | "tuic" | "anytls")
+}
+
+/// 需要 WebSocket path 的协议。
+pub fn protocol_uses_path(p: &str) -> bool {
+    matches!(p, "vless-ws" | "vmess-ws")
+}
+
+fn add_fields(protocol: &str) -> Vec<NodeField> {
+    let mut v = vec![NodeField::Tag, NodeField::Protocol, NodeField::Port];
+    if protocol_uses_sni(protocol)  { v.push(NodeField::ServerName); }
+    if protocol_uses_path(protocol) { v.push(NodeField::Path); }
+    v
+}
+
+fn edit_fields(protocol: &str) -> Vec<NodeField> {
+    let mut v = vec![NodeField::Port];
+    if protocol_uses_sni(protocol)  { v.push(NodeField::ServerName); }
+    if protocol_uses_path(protocol) { v.push(NodeField::Path); }
+    v
+}
+
 #[derive(Default)]
 pub struct UserForm {
     pub name: String,
@@ -155,12 +185,13 @@ fn user_edit_field(f: &mut UserEditForm) -> &mut String {
 }
 
 fn handle_node_edit(f: &mut NodeEditForm, k: KeyEvent) -> ModalAction {
-    const FIELDS: usize = 3;
+    let fields = edit_fields(&f.protocol);
+    let n = fields.len().max(1);
     f.error = None;
     match k.code {
-        KeyCode::Tab | KeyCode::Down => { f.focus = (f.focus + 1) % FIELDS; ModalAction::None }
+        KeyCode::Tab | KeyCode::Down => { f.focus = (f.focus + 1) % n; ModalAction::None }
         KeyCode::BackTab | KeyCode::Up => {
-            f.focus = if f.focus == 0 { FIELDS - 1 } else { f.focus - 1 };
+            f.focus = if f.focus == 0 { n - 1 } else { f.focus - 1 };
             ModalAction::None
         }
         KeyCode::Enter => {
@@ -170,18 +201,33 @@ fn handle_node_edit(f: &mut NodeEditForm, k: KeyEvent) -> ModalAction {
                     _ => { f.error = Some("端口需为 1-65535".into()); return ModalAction::None; }
                 }
             };
-            let sn = if f.server_name.trim().is_empty() { None } else { Some(f.server_name.trim().to_string()) };
-            let pa = if f.path.trim().is_empty() { None } else { Some(f.path.trim().to_string()) };
+            let sn = if protocol_uses_sni(&f.protocol) && !f.server_name.trim().is_empty() {
+                Some(f.server_name.trim().to_string())
+            } else { None };
+            let pa = if protocol_uses_path(&f.protocol) && !f.path.trim().is_empty() {
+                Some(f.path.trim().to_string())
+            } else { None };
             ModalAction::SubmitNodeEdit { tag: f.tag.clone(), port, server_name: sn, path: pa }
         }
-        KeyCode::Backspace => { node_edit_field(f).pop(); ModalAction::None }
-        KeyCode::Char(c) => { node_edit_field(f).push(c); ModalAction::None }
+        KeyCode::Backspace => {
+            if let Some(s) = node_edit_field_mut(f, fields.get(f.focus).copied()) { s.pop(); }
+            ModalAction::None
+        }
+        KeyCode::Char(c) => {
+            if let Some(s) = node_edit_field_mut(f, fields.get(f.focus).copied()) { s.push(c); }
+            ModalAction::None
+        }
         _ => ModalAction::None,
     }
 }
 
-fn node_edit_field(f: &mut NodeEditForm) -> &mut String {
-    match f.focus { 0 => &mut f.port, 1 => &mut f.server_name, _ => &mut f.path }
+fn node_edit_field_mut(f: &mut NodeEditForm, which: Option<NodeField>) -> Option<&mut String> {
+    match which? {
+        NodeField::Port       => Some(&mut f.port),
+        NodeField::ServerName => Some(&mut f.server_name),
+        NodeField::Path       => Some(&mut f.path),
+        _ => None,
+    }
 }
 
 fn handle_picker(p: &mut NodePicker, k: KeyEvent) -> ModalAction {
@@ -256,19 +302,22 @@ fn user_field(f: &mut UserForm) -> &mut String {
 }
 
 fn handle_node(f: &mut NodeForm, k: KeyEvent) -> ModalAction {
-    const FIELDS: usize = 5;
+    let fields = add_fields(PROTOCOLS[f.protocol_idx]);
+    let n = fields.len();
+    if f.focus >= n { f.focus = n - 1; }
+    let focused = fields[f.focus];
     f.error = None;
     match k.code {
-        KeyCode::Tab | KeyCode::Down => { f.focus = (f.focus + 1) % FIELDS; ModalAction::None }
+        KeyCode::Tab | KeyCode::Down => { f.focus = (f.focus + 1) % n; ModalAction::None }
         KeyCode::BackTab | KeyCode::Up => {
-            f.focus = if f.focus == 0 { FIELDS - 1 } else { f.focus - 1 };
+            f.focus = if f.focus == 0 { n - 1 } else { f.focus - 1 };
             ModalAction::None
         }
-        KeyCode::Left if f.focus == 1 => {
+        KeyCode::Left if focused == NodeField::Protocol => {
             f.protocol_idx = if f.protocol_idx == 0 { PROTOCOLS.len() - 1 } else { f.protocol_idx - 1 };
             ModalAction::None
         }
-        KeyCode::Right if f.focus == 1 => {
+        KeyCode::Right if focused == NodeField::Protocol => {
             f.protocol_idx = (f.protocol_idx + 1) % PROTOCOLS.len();
             ModalAction::None
         }
@@ -280,22 +329,34 @@ fn handle_node(f: &mut NodeForm, k: KeyEvent) -> ModalAction {
                 _ => { f.error = Some("端口需为 1-65535".into()); return ModalAction::None; }
             };
             let protocol = PROTOCOLS[f.protocol_idx].to_string();
-            let sn = if f.server_name.trim().is_empty() { None } else { Some(f.server_name.trim().to_string()) };
-            let path = if f.path.trim().is_empty() { None } else { Some(f.path.trim().to_string()) };
+            // 只在协议实际需要时回传对应字段，避免把 server_name / path 塞进不该有的协议。
+            let sn = if protocol_uses_sni(&protocol) && !f.server_name.trim().is_empty() {
+                Some(f.server_name.trim().to_string())
+            } else { None };
+            let path = if protocol_uses_path(&protocol) && !f.path.trim().is_empty() {
+                Some(f.path.trim().to_string())
+            } else { None };
             ModalAction::SubmitNode { tag, protocol, port, server_name: sn, path }
         }
-        KeyCode::Backspace if f.focus != 1 => { node_field(f).pop(); ModalAction::None }
-        KeyCode::Char(c) if f.focus != 1 => { node_field(f).push(c); ModalAction::None }
+        KeyCode::Backspace if focused != NodeField::Protocol => {
+            if let Some(s) = node_field_mut(f, focused) { s.pop(); }
+            ModalAction::None
+        }
+        KeyCode::Char(c) if focused != NodeField::Protocol => {
+            if let Some(s) = node_field_mut(f, focused) { s.push(c); }
+            ModalAction::None
+        }
         _ => ModalAction::None,
     }
 }
 
-fn node_field(f: &mut NodeForm) -> &mut String {
-    match f.focus {
-        0 => &mut f.tag,
-        2 => &mut f.port,
-        3 => &mut f.server_name,
-        _ => &mut f.path,
+fn node_field_mut(f: &mut NodeForm, which: NodeField) -> Option<&mut String> {
+    match which {
+        NodeField::Tag        => Some(&mut f.tag),
+        NodeField::Port       => Some(&mut f.port),
+        NodeField::ServerName => Some(&mut f.server_name),
+        NodeField::Path       => Some(&mut f.path),
+        NodeField::Protocol   => None,
     }
 }
 
@@ -397,21 +458,22 @@ fn render_user_edit(f: &mut Frame, area: Rect, form: &UserEditForm) {
 }
 
 fn render_node(f: &mut Frame, area: Rect, form: &NodeForm) {
-    let labels = ["Tag *必填", "协议", "端口 *必填 (默认 443)", "server_name (留空=默认)", "path (留空=默认)"];
+    let protocol = PROTOCOLS[form.protocol_idx];
+    let fields = add_fields(protocol);
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(""));
-    for (i, label) in labels.iter().enumerate() {
-        let val: String = match i {
-            0 => form.tag.clone(),
-            1 => format!("◀ {} ▶", PROTOCOLS[form.protocol_idx]),
-            2 => form.port.clone(),
-            3 => form.server_name.clone(),
-            _ => form.path.clone(),
+    for (i, field) in fields.iter().enumerate() {
+        let (label, val): (&str, String) = match field {
+            NodeField::Tag        => ("Tag *必填",             form.tag.clone()),
+            NodeField::Protocol   => ("协议 (←/→ 切换)",       format!("◀ {} ▶", protocol)),
+            NodeField::Port       => ("端口 *必填 (默认 443)", form.port.clone()),
+            NodeField::ServerName => ("server_name (SNI)",     form.server_name.clone()),
+            NodeField::Path       => ("path (留空=默认)",      form.path.clone()),
         };
         let style = if i == form.focus {
             Style::default().fg(Color::Black).bg(Color::Cyan)
         } else { Style::default().fg(Color::White) };
-        let cursor = if i == form.focus && i != 1 { "_" } else { "" };
+        let cursor = if i == form.focus && *field != NodeField::Protocol { "_" } else { "" };
         lines.push(Line::from(vec![
             Span::styled(format!(" {:<24}", label), Style::default().fg(Color::Yellow)),
             Span::styled(format!(" {}{}  ", val, cursor), style),
@@ -421,10 +483,17 @@ fn render_node(f: &mut Frame, area: Rect, form: &NodeForm) {
     if let Some(e) = &form.error {
         lines.push(Line::from(Span::styled(format!("  ! {}", e), Style::default().fg(Color::Red))));
     }
-    lines.push(Line::from(Span::styled(
-        "  reality: private_key/short_id 自动生成；ws: 无 server_name 不启 TLS",
-        Style::default().fg(Color::DarkGray),
-    )));
+    let hint = match protocol {
+        "vless-reality" => "  reality: private_key/short_id 自动生成；server_name 同时作为 handshake 目标",
+        "vless-ws" | "vmess-ws" => "  ws: 后端不启 TLS，建议前挂 nginx/caddy 终结 TLS",
+        "shadowsocks" => "  shadowsocks-2022：密钥自动生成，无 SNI / path 字段",
+        "hysteria2" => "  hysteria2: 无 server_name / path；证书 CN=tag，客户端订阅走 insecure=1",
+        "trojan" | "tuic" | "anytls" => "  自签证书 CN=server_name；客户端订阅自动带 allowInsecure/insecure",
+        _ => "",
+    };
+    if !hint.is_empty() {
+        lines.push(Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray))));
+    }
     lines.push(Line::from(Span::styled(
         "  Tab/↑↓ 切换   ←/→ 选协议   Enter 提交   Esc 取消",
         Style::default().fg(Color::DarkGray),
@@ -436,15 +505,26 @@ fn render_node(f: &mut Frame, area: Rect, form: &NodeForm) {
 }
 
 fn render_node_edit(f: &mut Frame, area: Rect, form: &NodeEditForm) {
-    let labels = ["端口 (留空不改)", "server_name (留空不改)", "path (留空不改)"];
-    let vals = [&form.port, &form.server_name, &form.path];
+    let fields = edit_fields(&form.protocol);
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(
         format!("  Tag: {}   协议: {}   （tag/协议不可改，删掉重建）", form.tag, form.protocol),
         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(""));
-    for (i, (label, val)) in labels.iter().zip(vals).enumerate() {
+    if fields.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  （该协议没有可编辑字段，删掉重建）",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    for (i, field) in fields.iter().enumerate() {
+        let (label, val): (&str, String) = match field {
+            NodeField::Port       => ("端口 (留空不改)",        form.port.clone()),
+            NodeField::ServerName => ("server_name (留空不改)", form.server_name.clone()),
+            NodeField::Path       => ("path (留空不改)",        form.path.clone()),
+            _ => continue,
+        };
         let style = if i == form.focus {
             Style::default().fg(Color::Black).bg(Color::Cyan)
         } else { Style::default().fg(Color::White) };

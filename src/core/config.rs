@@ -9,7 +9,7 @@ use std::process::Command;
 use crate::model::{node::{AddNodeRequest, Protocol}, user::User};
 
 const META_FILE: &str = "/etc/sing-box-manager/nodes.meta.json";
-const CERTS_DIR: &str = "/etc/sing-box-manager/certs";
+pub const CERTS_DIR: &str = "/etc/sing-box-manager/certs";
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct NodesMeta {
@@ -121,10 +121,13 @@ pub fn edit_node(
     if let Some(p) = new_port { ib["listen_port"] = json!(p); }
     if let Some(sn) = new_server_name {
         if let Some(tls) = ib.get_mut("tls").and_then(|v| v.as_object_mut()) {
-            tls.insert("server_name".into(), json!(&sn));
-            if let Some(reality) = tls.get_mut("reality").and_then(|v| v.as_object_mut()) {
-                if let Some(hs) = reality.get_mut("handshake").and_then(|v| v.as_object_mut()) {
-                    hs.insert("server".into(), json!(&sn));
+            // 只对已经有 server_name 的 inbound 更新（避免向 hy2 这类不该有 server_name 的协议里硬塞字段）
+            if tls.contains_key("server_name") {
+                tls.insert("server_name".into(), json!(&sn));
+                if let Some(reality) = tls.get_mut("reality").and_then(|v| v.as_object_mut()) {
+                    if let Some(hs) = reality.get_mut("handshake").and_then(|v| v.as_object_mut()) {
+                        hs.insert("server".into(), json!(&sn));
+                    }
                 }
             }
         }
@@ -313,8 +316,9 @@ fn build_inbound(req: &AddNodeRequest) -> Result<(Value, AddNodeMeta)> {
             }), AddNodeMeta::Plain))
         }
         Protocol::Hysteria2 => {
-            let sni = req.server_name.clone().unwrap_or_else(|| "bing.com".into());
-            let (crt, key) = ensure_self_signed_cert(&req.tag, &sni)?;
+            // hy2 inbound 不需要 server_name（sing-box 官方示例亦无此字段）；
+            // 证书 CN 用 tag 本身，server_name 交由客户端从 URL 的 sni 决定（默认回落到 server）。
+            let (crt, key) = ensure_self_signed_cert(&req.tag, &req.tag)?;
             Ok((json!({
                 "type": "hysteria2",
                 "tag":  req.tag,
@@ -324,7 +328,6 @@ fn build_inbound(req: &AddNodeRequest) -> Result<(Value, AddNodeMeta)> {
                 "tls": {
                     "enabled": true,
                     "alpn": ["h3"],
-                    "server_name": sni,
                     "certificate_path": crt,
                     "key_path": key
                 }

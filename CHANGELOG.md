@@ -1,5 +1,25 @@
 # CHANGELOG
 
+## v0.2.4
+
+### Fixed
+
+- **hysteria2 inbound 莫名其妙的 `server_name: bing.com`**：之前所有 TLS 协议共用了同一套默认 SNI，hy2 被硬塞了 `tls.server_name`；对照参考脚本 `20_protocol.sh` 与 sing-box 官方 hy2 示例，hy2 inbound 本就不该带 server_name，现在不再写入（自签证书 CN 改用 tag 本身）
+- **自签证书协议订阅链接缺 `insecure=1`**：`insecure_flag()` 旧判定 `certificate_path 为空才算自签`，我们走自签时 path 永远非空，flag 永远返回 false。改为判定路径是否在托管目录 `/etc/sing-box-manager/certs/` 下。影响面：trojan / tuic / anytls / hysteria2 客户端 TLS 校验现在能正确通过
+
+### Changed
+
+- **节点 add/edit 表单按协议显示字段**，拒绝"无中生有"：
+  - reality/trojan/tuic/anytls：显示 `server_name`
+  - vless-ws/vmess-ws：显示 `path`
+  - hysteria2/shadowsocks：仅 tag+协议+端口
+  - 未激活字段的值不会回传到 `AddNodeRequest`，即便用户通过 CLI `--server-name` 传了也会在 hy2 构建时被忽略
+- `edit_node` 只在 inbound 的 `tls` 已有 `server_name` 键时才更新，杜绝给不该有的协议塞字段
+
+### Docs
+
+- README 补齐 `sb grant/revoke/grant-all/allowed`、`sb token`、`sb nginx`、TUI 第 6 页 nginx、节点编辑按 `[E]`、`[subscription]` 配置段
+
 ## v0.1.3
 
 ### Fixed
