@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # 从 GitHub Release 下载预编译二进制并安装。无需 Rust/gcc 等编译依赖。
 #
-# 用法：
-#   sudo REPO=youruser/singbox-manager ./install-release.sh             # 安装最新 release
-#   sudo REPO=youruser/singbox-manager VERSION=v0.1.0 ./install-release.sh  # 指定版本
+# 一键:
+#   curl -fsSL https://raw.githubusercontent.com/why1f/singbox-manager/master/install-release.sh | sudo bash
+#
+# 进阶:
+#   REPO=你的用户名/singbox-manager VERSION=v0.2.1 bash install-release.sh
 
 set -euo pipefail
 
-REPO="${REPO:-}"
+REPO="${REPO:-why1f/singbox-manager}"
 VERSION="${VERSION:-latest}"
 PREFIX="/usr/local"
 BIN_PATH="$PREFIX/bin/sb"
@@ -21,7 +23,6 @@ note() { printf '%s\n' "$1"; }
 
 [ "${EUID:-$(id -u)}" -eq 0 ] || fail "请使用 root 运行"
 [ "$(uname -s)" = "Linux" ] || fail "仅支持 Linux"
-[ -n "$REPO" ] || fail "请设置 REPO 环境变量，例如：REPO=youruser/singbox-manager"
 command -v systemctl >/dev/null 2>&1 || fail "未检测到 systemctl"
 command -v curl >/dev/null 2>&1 || fail "需要 curl"
 command -v tar >/dev/null 2>&1 || fail "需要 tar"
@@ -101,12 +102,21 @@ systemctl enable sb-manager.service
 ln -sf "$BIN_PATH" /usr/bin/sb 2>/dev/null || true
 hash -r 2>/dev/null || true
 
+# 升级场景：如果服务已经在跑，新二进制需要重启；初次安装也启动起来
+if systemctl is-active --quiet sb-manager.service; then
+  note "检测到 sb-manager 正在运行，重启以加载新版本"
+  systemctl restart sb-manager.service
+else
+  note "启动 sb-manager"
+  systemctl start sb-manager.service || note "(启动失败，请手动 systemctl status sb-manager)"
+fi
+
 note ""
 note "安装完成。版本：$VERSION  目标：$TARGET"
-note "启动："
-note "  systemctl start sb-manager.service"
-note "  systemctl status sb-manager.service"
-note "  journalctl -u sb-manager -f"
+note "常用命令:"
+note "  sb                              # 进 TUI"
+note "  systemctl status sb-manager     # 看服务"
+note "  journalctl -u sb-manager -f     # 看日志"
 note ""
-note "若 sb 报找不到/错误路径：unalias sb sing-box 2>/dev/null; hash -r  或重新登录"
-[ -z "$SB_BIN" ] && note "sing-box 未安装 — 进 TUI（sb）后到「内核[5]」页一键安装。"
+note "若 sb 报找不到：unalias sb sing-box 2>/dev/null; hash -r  或重新登录"
+[ -z "$SB_BIN" ] && note "sing-box 未安装 — 进 TUI (sb) 到内核[5]页按 v 一键装带 v2ray_api 的版本。"
