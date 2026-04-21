@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## v0.3.6
+
+### Changed
+
+- `[C]` 编辑 config.json 的编辑器回落链从 `${EDITOR:-nano} || vi` 改为 `${EDITOR:-vim} || nano || vi` —— 裸机没设 `$EDITOR` 直接上 vim
+
 ## v0.3.5
 
 ### Added

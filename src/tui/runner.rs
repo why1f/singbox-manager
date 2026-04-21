@@ -189,10 +189,10 @@ fn run_edit_singbox_config(cfg: &AppConfig) -> Option<(String, StatusLevel)> {
     let path = &cfg.singbox.config_path;
     println!();
     println!("=== 编辑 {} ===", path);
-    println!("$EDITOR 读不到则回落 nano → vi。退出后自动 sing-box check + reload。");
+    println!("$EDITOR 未设则回落 vim → nano → vi。退出后自动 sing-box check + reload。");
     println!();
     let cmd = format!(
-        "${{EDITOR:-nano}} \"{path}\" || vi \"{path}\"",
+        "${{EDITOR:-vim}} \"{path}\" || nano \"{path}\" || vi \"{path}\"",
         path = path.replace('"', r#"\""#),
     );
     let _ = std::process::Command::new("sh").arg("-c").arg(&cmd).status();
