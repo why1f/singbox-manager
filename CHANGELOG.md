@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## v0.3.5
+
+### Added
+
+- **仪表盘 `[U]` 一键升级**：弹确认框 → `curl -fsSL .../install-release.sh | bash` 异步执行，stdout/stderr 流式推送到日志页 `[4]`。脚本自己判是否已是最新，最新会自动跳过。升级完成后状态条提示 "升级脚本执行完毕；若版本有变请按 [q] 退出 TUI 重新打开"（运行中的 TUI 进程本体没法自更新）
+- 仪表盘 sing-box 状态栏尾部新增 `[U] 升级` 提示文本
+
+### Notes
+
+- 升级需 TUI 进程本身是 root 运行（systemctl restart sb-manager 要权限）；非 root 会在状态条提示退出重来
+- 脚本行为已经包含版本比对，TUI 这边不做二次判断，把逻辑集中在安装脚本一处
+
 ## v0.3.4
 
 ### Added

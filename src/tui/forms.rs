@@ -86,6 +86,7 @@ pub enum Modal {
     EditNode(NodeEditForm),
     ConfirmDeleteUser(String),
     ConfirmDeleteNode(String),
+    ConfirmSelfUpdate,
     NodePicker(NodePicker),
     SubUrl { name: String, singbox: String, mihomo: String },
     TokenManage { name: String, has_token: bool },
@@ -133,6 +134,7 @@ pub enum ModalAction {
     SaveNodePicker { user: String, all: bool, tags: Vec<String> },
     RegenToken(String),
     RevokeToken(String),
+    RunSelfUpdate,
 }
 
 impl Modal {
@@ -150,6 +152,11 @@ impl Modal {
             },
             Modal::ConfirmDeleteNode(tag) => match k.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => ModalAction::DeleteNode(tag.clone()),
+                KeyCode::Char('n') | KeyCode::Char('N') => ModalAction::Close,
+                _ => ModalAction::None,
+            },
+            Modal::ConfirmSelfUpdate => match k.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => ModalAction::RunSelfUpdate,
                 KeyCode::Char('n') | KeyCode::Char('N') => ModalAction::Close,
                 _ => ModalAction::None,
             },
@@ -405,6 +412,7 @@ pub fn render(f: &mut Frame, area: Rect, modal: &Modal) {
         Modal::EditNode(form) => render_node_edit(f, pop, form),
         Modal::ConfirmDeleteUser(name) => render_confirm(f, pop, " 确认删除用户 ", name),
         Modal::ConfirmDeleteNode(tag) => render_confirm(f, pop, " 确认删除节点 ", tag),
+        Modal::ConfirmSelfUpdate => render_self_update(f, pop),
         Modal::NodePicker(p) => render_picker(f, centered(area, 62, (p.tags.len() as u16 + 8).min(20)), p),
         Modal::SubUrl { name, singbox, mihomo } => {
             // URL 可能很长，modal 宽度用 min(屏宽-4, max(url长度+8, 62))
@@ -662,6 +670,44 @@ fn render_token_manage(f: &mut Frame, area: Rect, name: &str, has_token: bool) {
     )));
     f.render_widget(
         Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Token 管理 ")),
+        area,
+    );
+}
+
+fn render_self_update(f: &mut Frame, area: Rect) {
+    f.render_widget(Clear, area);
+    let text = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  即将执行安装脚本检查并升级 sb-manager：",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "    curl -fsSL .../install-release.sh | bash",
+            Style::default().fg(Color::Cyan),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  • 已是最新会自动跳过",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            "  • 有新版本会下载并 systemctl restart sb-manager",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            "  • 升级后需 [q] 退出 TUI 重进才能用到新二进制",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  [Y/Enter] 开始    [N/Esc] 取消",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    f.render_widget(
+        Paragraph::new(text).block(Block::default().borders(Borders::ALL).title(" 升级 sb-manager ")),
         area,
     );
 }
