@@ -32,7 +32,6 @@ pub enum UiEvent {
     NginxStatus(crate::core::nginx::NginxStatus),
     NginxBusy(Option<&'static str>),
     SysMetrics { cpu: u8, rx: u64, tx: u64 },
-    LogLine(String),
 }
 
 pub async fn run(
@@ -163,7 +162,6 @@ fn apply_ui_event(s: &mut AppState, ev: UiEvent) {
             s.net_tx_history.push(tx);
             if s.net_tx_history.len() > 60 { s.net_tx_history.remove(0); }
         }
-        UiEvent::LogLine(line) => s.push_log(line),
     }
 }
 
@@ -252,10 +250,6 @@ fn handle_modal_key(
         ModalAction::RevokeToken(name) => {
             s.modal = None;
             spawn_revoke_token(pool, ui_tx, name);
-        }
-        ModalAction::RunSelfUpdate => {
-            s.modal = None;
-            spawn_self_update(ui_tx);
         }
     }
     false
@@ -385,9 +379,6 @@ fn handle_page_key(
                     has_token: !u.sub_token.is_empty(),
                 });
             }
-        }
-        KeyCode::Char('U') if s.page == Page::Dashboard => {
-            s.modal = Some(Modal::ConfirmSelfUpdate);
         }
         _ => {}
     }
@@ -758,100 +749,6 @@ fn spawn_revoke_token(pool: Arc<sqlx::SqlitePool>, tx: mpsc::Sender<UiEvent>, na
         }
     });
 }
-
-/// 执行 install-release.sh 升级自身：curl | bash 一条龙，stdout/stderr 流式推到日志页。
-/// 脚本自己会检查是否已是最新、是否需要 systemctl restart；TUI 这边不做版本判断。
-fn spawn_self_update(tx: mpsc::Sender<UiEvent>) {
-    tokio::spawn(async move {
-        use tokio::io::{AsyncBufReadExt, BufReader};
-        use tokio::process::Command;
-        use std::process::Stdio;
-
-        if unsafe { libc_geteuid() } != 0 {
-            let _ = tx.send(UiEvent::Status {
-                msg: "升级需 root；请以 root 身份或 sudo 运行 sb 后再按 [U]".into(),
-                level: StatusLevel::Error,
-            }).await;
-            return;
-        }
-
-        let _ = tx.send(UiEvent::Status {
-            msg: "正在拉取 install-release.sh 并执行升级…（进度输出在日志页 [4]）".into(),
-            level: StatusLevel::Warn,
-        }).await;
-        let _ = tx.send(UiEvent::LogLine("[UPDATE] 开始执行 install-release.sh".into())).await;
-
-        let cmd_str = "set -e; \
-            curl -fsSL https://raw.githubusercontent.com/why1f/singbox-manager/master/install-release.sh | bash";
-
-        let mut child = match Command::new("sh")
-            .arg("-c").arg(cmd_str)
-            .stdout(Stdio::piped()).stderr(Stdio::piped())
-            .spawn() {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = tx.send(UiEvent::Status {
-                    msg: format!("启动脚本失败: {}", e),
-                    level: StatusLevel::Error,
-                }).await;
-                return;
-            }
-        };
-        let stdout = child.stdout.take().map(BufReader::new);
-        let stderr = child.stderr.take().map(BufReader::new);
-        let tx_out = tx.clone();
-        let tx_err = tx.clone();
-        let out_task = tokio::spawn(async move {
-            if let Some(mut r) = stdout {
-                let mut buf = String::new();
-                loop {
-                    buf.clear();
-                    match r.read_line(&mut buf).await {
-                        Ok(0) => break,
-                        Ok(_) => { let _ = tx_out.send(UiEvent::LogLine(format!("[UPDATE] {}", buf.trim_end()))).await; }
-                        Err(_) => break,
-                    }
-                }
-            }
-        });
-        let err_task = tokio::spawn(async move {
-            if let Some(mut r) = stderr {
-                let mut buf = String::new();
-                loop {
-                    buf.clear();
-                    match r.read_line(&mut buf).await {
-                        Ok(0) => break,
-                        Ok(_) => { let _ = tx_err.send(UiEvent::LogLine(format!("[UPDATE!] {}", buf.trim_end()))).await; }
-                        Err(_) => break,
-                    }
-                }
-            }
-        });
-
-        let status = child.wait().await;
-        let _ = out_task.await;
-        let _ = err_task.await;
-        let (msg, level) = match status {
-            Ok(s) if s.success() => (
-                "升级脚本执行完毕；若版本有变请按 [q] 退出 TUI 重新打开".into(),
-                StatusLevel::Warn,
-            ),
-            Ok(s) => (format!("升级脚本返回非零: {}", s), StatusLevel::Error),
-            Err(e) => (format!("等待脚本退出失败: {}", e), StatusLevel::Error),
-        };
-        let _ = tx.send(UiEvent::LogLine(format!("[UPDATE] 结束: {}", msg))).await;
-        let _ = tx.send(UiEvent::Status { msg, level }).await;
-    });
-}
-
-/// 最小化的 geteuid 包装，避免拉 libc crate；Linux 唯一目标平台，Windows 开发机 stub 返回 0 让代码可编译。
-#[cfg(unix)]
-unsafe fn libc_geteuid() -> u32 {
-    extern "C" { fn geteuid() -> u32; }
-    unsafe { geteuid() }
-}
-#[cfg(not(unix))]
-unsafe fn libc_geteuid() -> u32 { 0 }
 
 fn spawn_reset(pool: Arc<sqlx::SqlitePool>, cfg: Arc<AppConfig>, tx: mpsc::Sender<UiEvent>, name: String) {
     tokio::spawn(async move {
