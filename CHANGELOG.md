@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## v0.2.6
+
+### Changed
+
+- nginx 反代模板的证书默认路径改为 `/etc/nginx/ssl/{host}.crt` / `.key`（平铺命名），更贴近手签 / 宝塔 / 常见站长习惯；acme.sh 用户改成 `/etc/nginx/certs/{host}/fullchain.pem` 之类的老路径即可
+
 ## v0.2.5
 
 ### Fixed

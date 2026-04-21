@@ -120,9 +120,9 @@ server {{
     listen [::]:443 ssl http2;
     server_name {host};
 
-    # ▼ 这两行请改为你实际的证书路径（acme.sh 或其他方式）
-    ssl_certificate     /etc/nginx/certs/{host}/fullchain.pem;
-    ssl_certificate_key /etc/nginx/certs/{host}/privkey.pem;
+    # ▼ 这两行请改为你实际的证书路径（acme.sh / 手签 / 宝塔等）
+    ssl_certificate     /etc/nginx/ssl/{host}.crt;
+    ssl_certificate_key /etc/nginx/ssl/{host}.key;
     ssl_protocols TLSv1.2 TLSv1.3;
 
     # /sub/<token> 反代到 sb-manager；token 只允许 16-64 的 URL-safe 字符
