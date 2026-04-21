@@ -432,7 +432,7 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
 }
 
 fn render_user(f: &mut Frame, area: Rect, form: &UserForm, title: &str) {
-    let labels = ["用户名", "配额 GB (0=不限)", "重置日 (1-28/32/0)", "到期 (YYYY-MM-DD)"];
+    let labels = ["用户名", "配额 GB (0=不限)", "重置日 (1-28/32/0)", "到期 (YYYY-MM-DD, 例: 2026-12-31)"];
     let vals = [&form.name, &form.quota, &form.reset_day, &form.expire];
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(""));
@@ -461,7 +461,7 @@ fn render_user(f: &mut Frame, area: Rect, form: &UserForm, title: &str) {
 }
 
 fn render_user_edit(f: &mut Frame, area: Rect, form: &UserEditForm) {
-    let labels = ["配额 GB (留空不改)", "重置日 (留空不改)", "到期 (留空不改)"];
+    let labels = ["配额 GB (留空不改)", "重置日 (留空不改)", "到期 (留空不改, 例: 2026-12-31)"];
     let vals = [&form.quota, &form.reset_day, &form.expire];
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(

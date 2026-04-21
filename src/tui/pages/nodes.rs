@@ -17,10 +17,11 @@ pub fn render(f: &mut Frame, area: Rect, s: &AppState) {
             if on {
                 Cell::from("● 开").style(Style::default().fg(Color::Green))
             } else {
-                Cell::from("○ 关").style(Style::default().fg(Color::DarkGray))
+                // 不染色：让它继承行样式，选中时是白字+灰底，可读
+                Cell::from("○ 关")
             }
         } else {
-            Cell::from("─ 不支持").style(Style::default().fg(Color::DarkGray))
+            Cell::from("─ 不支持")
         };
         Row::new(vec![
             Cell::from(n.tag.clone()),
