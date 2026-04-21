@@ -227,9 +227,9 @@ fn handle_modal_key(
             s.modal = None;
             spawn_add_node(cfg, ui_tx, tag, protocol, port, server_name, path);
         }
-        ModalAction::SubmitNodeEdit { tag, port, server_name, path } => {
+        ModalAction::SubmitNodeEdit { tag, port, server_name, path, port_reuse } => {
             s.modal = None;
-            spawn_edit_node(cfg, ui_tx, tag, port, server_name, path);
+            spawn_edit_node(cfg, ui_tx, tag, port, server_name, path, port_reuse);
         }
         ModalAction::DeleteUser(name) => {
             s.modal = None;
@@ -309,12 +309,15 @@ fn handle_page_key(
                 }));
             },
             Page::Nodes => if let Some(n) = s.selected_node() {
+                let port_reuse = crate::core::config::get_node_meta(&n.tag)
+                    .map(|m| m.port_reuse).unwrap_or(false);
                 s.modal = Some(Modal::EditNode(crate::tui::forms::NodeEditForm {
                     tag: n.tag.clone(),
                     protocol: n.protocol.to_string(),
                     port: n.listen_port.to_string(),
                     server_name: String::new(),
                     path: String::new(),
+                    port_reuse,
                     ..Default::default()
                 }));
             },
@@ -655,6 +658,7 @@ fn spawn_edit_user(
 fn spawn_edit_node(
     cfg: Arc<AppConfig>, tx: mpsc::Sender<UiEvent>,
     tag: String, port: Option<u16>, server_name: Option<String>, path: Option<String>,
+    port_reuse: Option<bool>,
 ) {
     tokio::spawn(async move {
         let mut cfg_json = match crate::core::config::load(&cfg.singbox.config_path) {
@@ -664,7 +668,7 @@ fn spawn_edit_node(
                 return;
             }
         };
-        if let Err(e) = crate::core::config::edit_node(&mut cfg_json, &tag, port, server_name, path) {
+        if let Err(e) = crate::core::config::edit_node(&mut cfg_json, &tag, port, server_name, path, port_reuse) {
             let _ = tx.send(UiEvent::Status { msg: format!("编辑失败: {}", e), level: StatusLevel::Error }).await;
             return;
         }

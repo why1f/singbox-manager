@@ -24,6 +24,9 @@ pub struct NodeMeta {
     pub public_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ss_password: Option<String>,
+    /// 端口复用：sing-box 监听改走 127.0.0.1，订阅 URL 的端口写死 443（需自己配 nginx stream SNI 分流）
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub port_reuse: bool,
 }
 
 fn load_meta_file() -> NodesMeta {
@@ -106,12 +109,13 @@ pub fn remove_node(cfg: &mut Value, tag: &str) -> bool {
     removed
 }
 
-/// 编辑已有节点：只能改 port / server_name / path（不改协议或密钥，否则应删重建）
+/// 编辑已有节点：只能改 port / server_name / path / port_reuse（不改协议或密钥，否则应删重建）
 pub fn edit_node(
     cfg: &mut Value, tag: &str,
     new_port: Option<u16>,
     new_server_name: Option<String>,
     new_path: Option<String>,
+    new_port_reuse: Option<bool>,
 ) -> Result<()> {
     let inbounds = cfg.get_mut("inbounds").and_then(|v| v.as_array_mut())
         .ok_or_else(|| anyhow::anyhow!("inbounds 不是数组"))?;
@@ -136,6 +140,14 @@ pub fn edit_node(
         if let Some(transport) = ib.get_mut("transport").and_then(|v| v.as_object_mut()) {
             transport.insert("path".into(), json!(p));
         }
+    }
+    if let Some(reuse) = new_port_reuse {
+        // listen 字段按端口复用开关改写：开启 = 127.0.0.1（仅回环，给 nginx stream 回源用）；关闭 = ::（全部接口）
+        ib["listen"] = Value::String(if reuse { "127.0.0.1".into() } else { "::".into() });
+        // 同步更新 meta
+        let mut meta = get_node_meta(tag).unwrap_or_default();
+        meta.port_reuse = reuse;
+        let _ = set_node_meta(tag, meta);
     }
     Ok(())
 }
@@ -229,6 +241,7 @@ fn build_inbound(req: &AddNodeRequest) -> Result<(Value, AddNodeMeta)> {
             let _ = set_node_meta(&req.tag, NodeMeta {
                 public_key: Some(public_key.clone()),
                 ss_password: None,
+                port_reuse: false,
             });
             let inbound = json!({
                 "type": "vless",
@@ -304,6 +317,7 @@ fn build_inbound(req: &AddNodeRequest) -> Result<(Value, AddNodeMeta)> {
             let ss_pwd = random_b64_16();
             let _ = set_node_meta(&req.tag, NodeMeta {
                 public_key: None, ss_password: Some(ss_pwd.clone()),
+                port_reuse: false,
             });
             Ok((json!({
                 "type": "shadowsocks",

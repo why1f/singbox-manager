@@ -27,7 +27,16 @@ pub fn render(f: &mut Frame, area: Rect, s: &AppState) {
     ]).header(hdr).block(Block::default().borders(Borders::ALL).title(" 节点列表 ")), c[0]);
 
     let sel = s.nodes.get(s.node_table.selected)
-        .map(|n| format!("  选中: {}  协议: {}  端口: {}", n.tag, n.protocol, n.listen_port))
+        .map(|n| {
+            let reuse = crate::core::config::get_node_meta(&n.tag)
+                .map(|m| m.port_reuse).unwrap_or(false);
+            let port_part = if reuse {
+                format!("内部 {} · 对外 443 (端口复用)", n.listen_port)
+            } else {
+                n.listen_port.to_string()
+            };
+            format!("  选中: {}  协议: {}  端口: {}", n.tag, n.protocol, port_part)
+        })
         .unwrap_or_else(|| "  (无节点)".into());
     f.render_widget(Paragraph::new(vec![
         Line::from(sel),

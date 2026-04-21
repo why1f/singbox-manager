@@ -1,5 +1,21 @@
 # CHANGELOG
 
+## v0.3.1
+
+### Added
+
+- **节点端口复用开关**（仅 vless-reality / trojan / anytls）：TUI 编辑节点时多一个 `端口复用` 开关，开启后
+  - sing-box inbound `listen` 自动改写为 `127.0.0.1`（由 nginx stream 回源）
+  - 订阅 URL 的 port 固定写 443（不跟 `listen_port`）
+  - 状态存 `NodeMeta.port_reuse`，重启保留
+  - 同时提示用户需手动配 nginx stream `ssl_preread` SNI 分流（README 新增模板段）
+- 节点页选中栏新增端口复用状态显示：`内部 4433 · 对外 443 (端口复用)`
+
+### Notes
+
+- 不支持端口复用的协议（hy2/tuic UDP、ss/vless-ws/vmess-ws 无 SNI）编辑表单不显示该字段
+- sing-box ≥1.11 inbound 已不支持 `proxy_protocol`，故我们不走 PROXY header 方案；代价是日志里 `remote_addr` 总是 127.0.0.1，鉴权/统计不受影响
+
 ## v0.3.0
 
 ### Added

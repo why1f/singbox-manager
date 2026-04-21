@@ -187,13 +187,63 @@ sb reload                           # 重载 sing-box
 
 **用户页**：`[a]` 添加 `[E]` 编辑 `[d]` 删除 `[t]` 启禁 `[r]` 重置流量 `[T]` token 管理（生成 / 撤销）`[u]` 复制订阅 URL `[s]` 打印订阅链接 `[n]` 分配可用节点
 
-**节点页**：`[a]` 添加 `[E]` 编辑 `[d]` 删除（弹窗表单按当前协议显示字段：reality/trojan/tuic/anytls 多一行 `server_name`；vless-ws/vmess-ws 多一行 `path`；hysteria2/shadowsocks 只要端口）
+**节点页**：`[a]` 添加 `[E]` 编辑 `[d]` 删除（弹窗表单按当前协议显示字段：reality/trojan/tuic/anytls 多一行 `server_name`；vless-ws/vmess-ws 多一行 `path`；hysteria2/shadowsocks 只要端口；reality/trojan/anytls 编辑时还多一个"端口复用"开关）
 
 **内核页**：`[i]` 装官方 `[v]` 装 v2ray_api 版 `[u]` 卸载 `[s/S/x]` 启/停/重启 `[e/d]` 开/关自启
 
 **nginx 页**：`[i]` 装 `[g]` 生成反代 conf `[t]` 语法检查 `[s/S/x]` 启/停/重启 `[r]` reload `[e/d]` 开/关自启
 
 添加节点后会自动 `sing-box check -c ... && systemctl reload sing-box`，校验不通过不会覆盖。
+
+---
+
+## 端口复用（Reality / Trojan / anyTLS 共享 443）
+
+vless-reality 跑在 443 上对"伪装正常网站"很有帮助，但订阅 HTTP 也想用 443 时就冲突了。这种场景用 nginx stream + `ssl_preread` 按 SNI 分流。
+
+**TUI 操作**：选中节点 → `[E]` → 把"端口复用"切到"开" → 保存。工具会自动：
+
+- sing-box inbound 的 `listen` 改写为 `127.0.0.1`（只对回环可见，由 nginx 回源）
+- 订阅 URL 的 port 写死 443（不再跟着 inbound 的 `listen_port`）
+
+**nginx 侧要你自己配**，参考模板：
+
+```nginx
+# Layer 4: SNI 分流
+stream {
+    map $ssl_preread_server_name $upstream {
+        www.apple.com   127.0.0.1:4433;   # Reality 假域名 → sing-box inbound
+        506777.xyz      127.0.0.1:8443;   # 你的真域名 → 下面 https 块
+        default         127.0.0.1:8443;
+    }
+    server {
+        listen 443 reuseport;
+        listen [::]:443 reuseport;
+        ssl_preread on;
+        proxy_pass $upstream;
+        proxy_timeout 300s;
+    }
+}
+
+http {
+    server {
+        listen 127.0.0.1:8443 ssl http2;
+        server_name 506777.xyz;
+        ssl_certificate     /etc/nginx/ssl/506777.xyz.crt;
+        ssl_certificate_key /etc/nginx/ssl/506777.xyz.key;
+
+        location ~ "^/sub/[A-Za-z0-9_-]{16,64}$" {
+            proxy_pass http://127.0.0.1:18081;
+            proxy_set_header Host $host;
+        }
+        location / { return 404; }
+    }
+}
+```
+
+> 不加 `proxy_protocol`：sing-box 从 1.11 起 inbound 不再支持接收 PROXY header。代价是 nginx 和 sing-box 日志看到的 `remote_addr` 都是 127.0.0.1，但订阅 token 鉴权、sing-box 流量统计都和客户端 IP 无关，**功能上无影响**。
+
+支持端口复用的协议：**vless-reality / trojan / anytls**（都是 TCP+TLS+SNI）。hy2/tuic 是 UDP 走不了 L4 preread；ss / vless-ws / vmess-ws 没 SNI 也不支持。
 
 ---
 

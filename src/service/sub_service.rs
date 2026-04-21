@@ -11,7 +11,7 @@ pub fn generate_links(cfg: &Value, username: &str, server: &str) -> Result<Vec<S
     for ib in inbounds {
         let tag  = ib["tag"].as_str().unwrap_or("");
         let typ  = ib["type"].as_str().unwrap_or("");
-        let port = ib["listen_port"].as_u64().unwrap_or(0);
+        let port = effective_port(ib, tag);
         let Some(user) = find_user(ib, username) else { continue; };
         let link = match typ {
             "vless" => {
@@ -34,6 +34,16 @@ pub fn generate_links(cfg: &Value, username: &str, server: &str) -> Result<Vec<S
         }
     }
     Ok(links)
+}
+
+/// 订阅 URL 里用的端口：端口复用节点回 443，否则读 inbound.listen_port
+fn effective_port(ib: &Value, tag: &str) -> u64 {
+    let raw = ib["listen_port"].as_u64().unwrap_or(0);
+    if crate::core::config::get_node_meta(tag).map(|m| m.port_reuse).unwrap_or(false) {
+        443
+    } else {
+        raw
+    }
 }
 
 pub fn generate_subscription(links: &[ShareLink]) -> String {
@@ -61,7 +71,7 @@ pub fn generate_clash_yaml(cfg: &Value, username: &str, server: &str) -> Result<
     for ib in inbounds {
         let tag  = ib["tag"].as_str().unwrap_or("");
         let typ  = ib["type"].as_str().unwrap_or("");
-        let port = ib["listen_port"].as_u64().unwrap_or(0);
+        let port = effective_port(ib, tag);
         let Some(user) = find_user(ib, username) else { continue; };
 
         let proxy_name = format!("{}-{}", tag, username);

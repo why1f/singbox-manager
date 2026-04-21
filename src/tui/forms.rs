@@ -21,7 +21,7 @@ pub const PROTOCOLS: [&str; 8] = [
 
 /// 节点表单里的逻辑字段，用来按协议动态组装 add/edit 表单。
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum NodeField { Tag, Protocol, Port, ServerName, Path }
+pub enum NodeField { Tag, Protocol, Port, ServerName, Path, PortReuse }
 
 /// 需要 TLS SNI 的协议（inbound tls.server_name 生效）。
 /// 对照参考脚本 `20_protocol.sh`：只有 reality/trojan/tuic/anytls 真正用到 SNI；
@@ -35,6 +35,12 @@ pub fn protocol_uses_path(p: &str) -> bool {
     matches!(p, "vless-ws" | "vmess-ws")
 }
 
+/// 能通过 nginx stream SNI 分流做端口复用的协议（TCP + TLS-with-SNI）。
+/// hy2/tuic 是 UDP QUIC，走不了 stream preread；ss / *-ws 没 TLS SNI 也不行。
+pub fn protocol_supports_port_reuse(p: &str) -> bool {
+    matches!(p, "vless-reality" | "trojan" | "anytls")
+}
+
 fn add_fields(protocol: &str) -> Vec<NodeField> {
     let mut v = vec![NodeField::Tag, NodeField::Protocol, NodeField::Port];
     if protocol_uses_sni(protocol)  { v.push(NodeField::ServerName); }
@@ -46,6 +52,7 @@ fn edit_fields(protocol: &str) -> Vec<NodeField> {
     let mut v = vec![NodeField::Port];
     if protocol_uses_sni(protocol)  { v.push(NodeField::ServerName); }
     if protocol_uses_path(protocol) { v.push(NodeField::Path); }
+    if protocol_supports_port_reuse(protocol) { v.push(NodeField::PortReuse); }
     v
 }
 
@@ -99,6 +106,7 @@ pub struct NodeEditForm {
     pub port: String,
     pub server_name: String,
     pub path: String,
+    pub port_reuse: bool,      // 端口复用：开启时订阅 URL 的端口固定 443
     pub focus: usize,
     pub error: Option<String>,
 }
@@ -117,7 +125,7 @@ pub enum ModalAction {
     SubmitUser { name: String, quota: f64, reset_day: i64, expire: String },
     SubmitUserEdit { name: String, quota: Option<f64>, reset_day: Option<i64>, expire: Option<String> },
     SubmitNode { tag: String, protocol: String, port: u16, server_name: Option<String>, path: Option<String> },
-    SubmitNodeEdit { tag: String, port: Option<u16>, server_name: Option<String>, path: Option<String> },
+    SubmitNodeEdit { tag: String, port: Option<u16>, server_name: Option<String>, path: Option<String>, port_reuse: Option<bool> },
     DeleteUser(String),
     DeleteNode(String),
     SaveNodePicker { user: String, all: bool, tags: Vec<String> },
@@ -195,11 +203,18 @@ fn user_edit_field(f: &mut UserEditForm) -> &mut String {
 fn handle_node_edit(f: &mut NodeEditForm, k: KeyEvent) -> ModalAction {
     let fields = edit_fields(&f.protocol);
     let n = fields.len().max(1);
+    if f.focus >= n { f.focus = n - 1; }
+    let focused = fields.get(f.focus).copied();
     f.error = None;
     match k.code {
         KeyCode::Tab | KeyCode::Down => { f.focus = (f.focus + 1) % n; ModalAction::None }
         KeyCode::BackTab | KeyCode::Up => {
             f.focus = if f.focus == 0 { n - 1 } else { f.focus - 1 };
+            ModalAction::None
+        }
+        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+            if focused == Some(NodeField::PortReuse) => {
+            f.port_reuse = !f.port_reuse;
             ModalAction::None
         }
         KeyCode::Enter => {
@@ -215,14 +230,16 @@ fn handle_node_edit(f: &mut NodeEditForm, k: KeyEvent) -> ModalAction {
             let pa = if protocol_uses_path(&f.protocol) && !f.path.trim().is_empty() {
                 Some(f.path.trim().to_string())
             } else { None };
-            ModalAction::SubmitNodeEdit { tag: f.tag.clone(), port, server_name: sn, path: pa }
+            // 只有可复用的协议才回传 port_reuse 开关
+            let pr = if protocol_supports_port_reuse(&f.protocol) { Some(f.port_reuse) } else { None };
+            ModalAction::SubmitNodeEdit { tag: f.tag.clone(), port, server_name: sn, path: pa, port_reuse: pr }
         }
-        KeyCode::Backspace => {
-            if let Some(s) = node_edit_field_mut(f, fields.get(f.focus).copied()) { s.pop(); }
+        KeyCode::Backspace if focused != Some(NodeField::PortReuse) => {
+            if let Some(s) = node_edit_field_mut(f, focused) { s.pop(); }
             ModalAction::None
         }
-        KeyCode::Char(c) => {
-            if let Some(s) = node_edit_field_mut(f, fields.get(f.focus).copied()) { s.push(c); }
+        KeyCode::Char(c) if focused != Some(NodeField::PortReuse) => {
+            if let Some(s) = node_edit_field_mut(f, focused) { s.push(c); }
             ModalAction::None
         }
         _ => ModalAction::None,
@@ -364,7 +381,7 @@ fn node_field_mut(f: &mut NodeForm, which: NodeField) -> Option<&mut String> {
         NodeField::Port       => Some(&mut f.port),
         NodeField::ServerName => Some(&mut f.server_name),
         NodeField::Path       => Some(&mut f.path),
-        NodeField::Protocol   => None,
+        NodeField::Protocol | NodeField::PortReuse => None,
     }
 }
 
@@ -480,6 +497,7 @@ fn render_node(f: &mut Frame, area: Rect, form: &NodeForm) {
             NodeField::Port       => ("端口 *必填 (默认 443)", form.port.clone()),
             NodeField::ServerName => ("server_name (SNI)",     form.server_name.clone()),
             NodeField::Path       => ("path (留空=默认)",      form.path.clone()),
+            NodeField::PortReuse  => continue,  // 添加时不暴露端口复用，留给编辑
         };
         let style = if i == form.focus {
             Style::default().fg(Color::Black).bg(Color::Cyan)
@@ -534,17 +552,31 @@ fn render_node_edit(f: &mut Frame, area: Rect, form: &NodeEditForm) {
             NodeField::Port       => ("端口 (留空不改)",        form.port.clone()),
             NodeField::ServerName => ("server_name (留空不改)", form.server_name.clone()),
             NodeField::Path       => ("path (留空不改)",        form.path.clone()),
+            NodeField::PortReuse  => (
+                "端口复用 (Space/←→ 切换)",
+                format!("◀ {} ▶", if form.port_reuse { "开" } else { "关" }),
+            ),
             _ => continue,
         };
         let style = if i == form.focus {
             Style::default().fg(Color::Black).bg(Color::Cyan)
         } else { Style::default().fg(Color::White) };
-        let cursor = if i == form.focus { "_" } else { "" };
+        let cursor = if i == form.focus && *field != NodeField::PortReuse { "_" } else { "" };
         lines.push(Line::from(vec![
-            Span::styled(format!(" {:<24}", label), Style::default().fg(Color::Yellow)),
+            Span::styled(format!(" {:<28}", label), Style::default().fg(Color::Yellow)),
             Span::styled(format!(" {}{}  ", val, cursor), style),
         ]));
         lines.push(Line::from(""));
+    }
+    if protocol_supports_port_reuse(&form.protocol) {
+        lines.push(Line::from(Span::styled(
+            "  端口复用开启后：listen 改为 127.0.0.1，订阅端口写 443；",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(Span::styled(
+            "  你需要手动在 nginx stream 里用 ssl_preread 做 SNI 分流（详见 README）。",
+            Style::default().fg(Color::DarkGray),
+        )));
     }
     if let Some(e) = &form.error {
         lines.push(Line::from(Span::styled(format!("  ! {}", e), Style::default().fg(Color::Red))));
