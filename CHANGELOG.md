@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## v0.2.5
+
+### Fixed
+
+- **nginx 反代 conf 模板 `nginx -t` 失败**：`location ~ ^/sub/[A-Za-z0-9_-]{16,64}$` 正则没加引号，nginx 把第一个 `{` 当成 location block 起始，于是 `16,64}$ {` 被当成下一条 directive → `unknown directive "16,64}$"`。改为 `location ~ "^/sub/[A-Za-z0-9_-]{16,64}$"` 用双引号包裹正则。已经 `[g]` 过坏 conf 的用户，再跑一次 `[g]` / `sb nginx gen-conf` 覆盖即可
+
 ## v0.2.4
 
 ### Fixed

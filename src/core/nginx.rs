@@ -126,7 +126,8 @@ server {{
     ssl_protocols TLSv1.2 TLSv1.3;
 
     # /sub/<token> 反代到 sb-manager；token 只允许 16-64 的 URL-safe 字符
-    location ~ ^/sub/[A-Za-z0-9_-]{{16,64}}$ {{
+    # 正则包含 {{ }} 必须用双引号包裹，否则 nginx 把 {{ 当 location block 起始
+    location ~ "^/sub/[A-Za-z0-9_-]{{16,64}}$" {{
         proxy_pass              http://{upstream};
         proxy_http_version      1.1;
         proxy_set_header Host            $host;
