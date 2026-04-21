@@ -189,7 +189,9 @@ fn handle_user_edit(f: &mut UserEditForm, k: KeyEvent) -> ModalAction {
                     _ => { f.error = Some("重置日需 0/1-28/32".into()); return ModalAction::None; }
                 }
             };
-            let e = if f.expire.trim().is_empty() { None } else { Some(f.expire.trim().to_string()) };
+            let e = if f.expire.trim().is_empty() { None }
+                else if f.expire.trim() == "-" { Some(String::new()) }   // 清为永久
+                else { Some(f.expire.trim().to_string()) };
             ModalAction::SubmitUserEdit { name: f.name.clone(), quota: q, reset_day: d, expire: e }
         }
         KeyCode::Backspace => { user_edit_field(f).pop(); ModalAction::None }
@@ -461,7 +463,7 @@ fn render_user(f: &mut Frame, area: Rect, form: &UserForm, title: &str) {
 }
 
 fn render_user_edit(f: &mut Frame, area: Rect, form: &UserEditForm) {
-    let labels = ["配额 GB (留空不改)", "重置日 (留空不改)", "到期 (留空不改, 例: 2026-12-31)"];
+    let labels = ["配额 GB (留空不改)", "重置日 (留空不改)", "到期 (留空不改, - 清为永久, 例: 2026-12-31)"];
     let vals = [&form.quota, &form.reset_day, &form.expire];
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(
