@@ -1,6 +1,17 @@
 use crate::model::{node::InboundNode, user::User};
 use crate::tui::forms::Modal;
 
+/// 需要主 loop 挂起 TUI、让外部命令接管 TTY 的动作。按键 handler 只设置，主 loop 统一执行。
+#[derive(Debug, Clone, Copy)]
+pub enum ExternalCmd {
+    /// curl -fsSL install-release.sh | sudo bash
+    SelfUpdate,
+    /// $EDITOR /etc/sing-box/config.json → 退出后 sing-box check + reload
+    EditSingboxConfig,
+    /// journalctl -u sing-box -f（Ctrl-C 退出）
+    TailSingboxLog,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Page { Dashboard, Users, Nodes, Logs, Kernel, Nginx }
 impl Page {
@@ -51,6 +62,8 @@ pub struct AppState {
     pub cpu_history: Vec<u8>,        // 0-100
     pub net_rx_history: Vec<u64>,    // 每秒新增字节
     pub net_tx_history: Vec<u64>,
+    /// 按键处理设置后，主 loop 下一次 iteration 会挂起 TUI 执行它然后清空
+    pub pending_cmd: Option<ExternalCmd>,
 }
 
 impl Default for AppState {
@@ -79,6 +92,7 @@ impl AppState {
             cpu_history: Vec::new(),
             net_rx_history: Vec::new(),
             net_tx_history: Vec::new(),
+            pending_cmd: None,
         }
     }
     pub fn selected_user(&self) -> Option<&User> {

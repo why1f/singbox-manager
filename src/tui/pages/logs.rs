@@ -4,6 +4,11 @@ use crate::tui::app::AppState;
 pub fn render(f: &mut Frame, area: Rect, s: &AppState) {
     let h = area.height.saturating_sub(2) as usize;
     let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        "[f] journalctl -u sing-box -f   (Ctrl-C 退回)",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(""));
     if let Some(sub) = &s.last_subscription {
         lines.push(Line::from(Span::styled("[SUB] 最近一次订阅导出", Style::default().fg(Color::Cyan))));
         for line in sub.lines() {

@@ -12,7 +12,7 @@ use crate::{
     model::{config::AppConfig, node::InboundNode, user::User},
     service::traffic_service::TrafficEvent,
     tui::{
-        app::{AppState, Page, StatusLevel},
+        app::{AppState, ExternalCmd, Page, StatusLevel},
         forms::{Modal, ModalAction, NodeForm, UserForm},
         pages, widgets,
     },
@@ -75,6 +75,18 @@ async fn event_loop(
 
     loop {
         s.tick_status();
+
+        // 挂起 TUI 跑外部命令（编辑器 / 升级 / journalctl -f）。
+        // 按键 handler 只写 pending_cmd，这里统一消费。跑完返回带一个 status 回显。
+        if let Some(cmd) = s.pending_cmd.take() {
+            match run_external_suspended(term, cmd, &cfg) {
+                Ok(Some((msg, level))) => s.set_status(msg, level),
+                Ok(None) => {}
+                Err(e) => s.set_status(format!("外部命令异常: {}", e), StatusLevel::Error),
+            }
+            continue; // 跳过本次 draw，下次 iteration 重新渲染
+        }
+
         term.draw(|f| {
             let area = f.area();
             let c = Layout::default().direction(Direction::Vertical)
@@ -123,6 +135,96 @@ fn is_quit(k: &KeyEvent) -> bool {
     use crossterm::event::KeyModifiers;
     matches!(k.code, KeyCode::Char('q') | KeyCode::Char('Q'))
         || (matches!(k.code, KeyCode::Char('c')) && k.modifiers == KeyModifiers::CONTROL)
+}
+
+/// 挂起 TUI → 让外部命令接管 TTY → 用户 Enter → 恢复 TUI。
+/// 同步阻塞调用当前 worker；后台 tokio 任务仍在另一个 worker 上跑。
+fn run_external_suspended(
+    term: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    cmd: ExternalCmd,
+    cfg: &AppConfig,
+) -> Result<Option<(String, StatusLevel)>> {
+    // —— 让出 TTY ——
+    disable_raw_mode()?;
+    execute!(term.backend_mut(), LeaveAlternateScreen)?;
+    term.show_cursor()?;
+
+    let post = match cmd {
+        ExternalCmd::SelfUpdate => run_self_update(),
+        ExternalCmd::EditSingboxConfig => run_edit_singbox_config(cfg),
+        ExternalCmd::TailSingboxLog => run_tail_singbox_log(),
+    };
+
+    // —— 等用户确认再回 TUI ——
+    println!();
+    println!("按回车返回 TUI…");
+    let mut _buf = String::new();
+    let _ = io::stdin().read_line(&mut _buf);
+
+    // —— 恢复 TUI ——
+    enable_raw_mode()?;
+    execute!(term.backend_mut(), EnterAlternateScreen)?;
+    term.clear()?;
+    Ok(post)
+}
+
+fn run_self_update() -> Option<(String, StatusLevel)> {
+    println!();
+    println!("=== 升级 sb-manager ===");
+    println!("脚本内部会比对版本，已是最新会自动跳过，有新版会下载并 systemctl restart。");
+    println!();
+    let cmd = "curl -fsSL https://raw.githubusercontent.com/why1f/singbox-manager/master/install-release.sh | sudo bash";
+    let status = std::process::Command::new("sh").arg("-c").arg(cmd).status();
+    match status {
+        Ok(s) if s.success() => Some((
+            "升级脚本结束；若版本有变按 [q] 退出 TUI 重进以加载新二进制".into(),
+            StatusLevel::Warn,
+        )),
+        Ok(s) => Some((format!("升级脚本非零退出 (exit {:?})", s.code()), StatusLevel::Error)),
+        Err(e) => Some((format!("升级脚本启动失败: {}", e), StatusLevel::Error)),
+    }
+}
+
+fn run_edit_singbox_config(cfg: &AppConfig) -> Option<(String, StatusLevel)> {
+    let path = &cfg.singbox.config_path;
+    println!();
+    println!("=== 编辑 {} ===", path);
+    println!("$EDITOR 读不到则回落 nano → vi。退出后自动 sing-box check + reload。");
+    println!();
+    let cmd = format!(
+        "${{EDITOR:-nano}} \"{path}\" || vi \"{path}\"",
+        path = path.replace('"', r#"\""#),
+    );
+    let _ = std::process::Command::new("sh").arg("-c").arg(&cmd).status();
+
+    // 编辑后：校验 + reload
+    let proc = crate::core::singbox::SingboxProcess::new(&cfg.singbox.binary_path, &cfg.singbox.config_path);
+    match proc.check_config() {
+        Ok(()) => {
+            if matches!(proc.is_running(), Some(true)) {
+                match proc.reload() {
+                    Ok(()) => Some(("config.json 校验通过，已 reload sing-box".into(), StatusLevel::Warn)),
+                    Err(e) => Some((format!("校验通过但 reload 失败: {}", e), StatusLevel::Error)),
+                }
+            } else {
+                Some(("config.json 校验通过（sing-box 未运行，跳过 reload）".into(), StatusLevel::Warn))
+            }
+        }
+        Err(e) => Some((format!("config.json 校验失败: {}（未 reload，请修复）", e), StatusLevel::Error)),
+    }
+}
+
+fn run_tail_singbox_log() -> Option<(String, StatusLevel)> {
+    println!();
+    println!("=== journalctl -u sing-box -f  (按 Ctrl-C 退出回 TUI) ===");
+    println!();
+    let status = std::process::Command::new("journalctl")
+        .args(["-u", "sing-box", "-f", "-n", "50"])
+        .status();
+    match status {
+        Ok(_) => None,
+        Err(e) => Some((format!("journalctl 启动失败: {}", e), StatusLevel::Error)),
+    }
 }
 
 fn apply_ui_event(s: &mut AppState, ev: UiEvent) {
@@ -379,6 +481,15 @@ fn handle_page_key(
                     has_token: !u.sub_token.is_empty(),
                 });
             }
+        }
+        KeyCode::Char('U') if s.page == Page::Dashboard => {
+            s.pending_cmd = Some(ExternalCmd::SelfUpdate);
+        }
+        KeyCode::Char('C') if s.page == Page::Nodes => {
+            s.pending_cmd = Some(ExternalCmd::EditSingboxConfig);
+        }
+        KeyCode::Char('f') if s.page == Page::Logs => {
+            s.pending_cmd = Some(ExternalCmd::TailSingboxLog);
         }
         _ => {}
     }

@@ -56,7 +56,7 @@ pub fn render(f: &mut Frame, area: Rect, s: &AppState) {
     f.render_widget(Paragraph::new(vec![
         Line::from(sel),
         Line::from(Span::styled(
-            "  [a]添加  [E]编辑  [d]删除  [↑↓/jk]选择",
+            "  [a]添加  [E]编辑  [d]删除  [C]编辑 config.json  [↑↓/jk]选择",
             Style::default().fg(Color::DarkGray))),
     ]).block(Block::default().borders(Borders::ALL).title(" 操作 ")).wrap(Wrap{trim:true}), c[1]);
 }
