@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## v0.3.7
+
+### Fixed
+
+- 内核页 [5] 按数字 `6` 切不到 nginx 页（`handle_kernel_key` 漏了 `'6'` 分支）。Tab 一直能用是因为走的是 `s.next_page()`，不走 match
+
 ## v0.3.6
 
 ### Changed

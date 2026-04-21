@@ -503,6 +503,7 @@ fn handle_kernel_key(s: &mut AppState, k: KeyEvent, ui_tx: mpsc::Sender<UiEvent>
         KeyCode::Char('3') => s.page = Page::Nodes,
         KeyCode::Char('4') => s.page = Page::Logs,
         KeyCode::Char('5') => { /* 已在本页 */ }
+        KeyCode::Char('6') => { s.page = Page::Nginx; maybe_refresh_nginx(s, &ui_tx, cfg.clone()); }
         KeyCode::Esc       => s.status_msg = None,
         KeyCode::Char('R') => spawn_kernel_refresh(ui_tx),
         _ if s.kernel_busy.is_some() => {
