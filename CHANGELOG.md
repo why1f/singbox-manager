@@ -1,5 +1,19 @@
 # CHANGELOG
 
+## v0.3.5
+
+### Added
+
+- **TUI 挂起式外部命令机制**：通用基础设施，按键只写 `AppState.pending_cmd`，主 loop 下一轮挂起 TUI (LeaveAlternateScreen + disable_raw_mode) → 让子进程继承 TTY → Enter 返回 → 恢复 TUI。同步阻塞当前 tokio worker，后台任务仍在另一个 worker 跑。相比之前 v0.3.5 被 revert 的 tokio pipe + 流式日志方案代码量少三分之一且无 root 检查 / cfg gate
+- **Dashboard `[U]` 一键升级**：`curl -fsSL .../install-release.sh | sudo bash`，sudo 问密码 TTY 已让出可正常输入。脚本自带版本比对，已最新会跳过
+- **Nodes `[C]` 编辑 sing-box config.json**：`$EDITOR` → 回落 `nano` → `vi`，退出后自动 `sing-box check`，通过则若运行中即 `reload`，失败在状态栏提示不 reload
+- **Logs `[f]` 实时 sing-box 日志**：`journalctl -u sing-box -f -n 50`，`Ctrl-C` 回 TUI
+
+### Notes
+
+- 之前 v0.3.5（tokio pipe 方案）已 revert + tag 删除，本 v0.3.5 是重新实现的干净版
+- 三个外部命令场景共用一套挂起机制，后续新增每个 ~10 行
+
 ## v0.3.4
 
 ### Added
