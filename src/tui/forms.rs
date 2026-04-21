@@ -79,6 +79,7 @@ pub enum Modal {
     ConfirmDeleteNode(String),
     NodePicker(NodePicker),
     SubUrl { name: String, singbox: String, mihomo: String },
+    TokenManage { name: String, has_token: bool },
 }
 
 #[derive(Default)]
@@ -120,6 +121,8 @@ pub enum ModalAction {
     DeleteUser(String),
     DeleteNode(String),
     SaveNodePicker { user: String, all: bool, tags: Vec<String> },
+    RegenToken(String),
+    RevokeToken(String),
 }
 
 impl Modal {
@@ -143,6 +146,11 @@ impl Modal {
             Modal::NodePicker(p) => handle_picker(p, k),
             Modal::SubUrl { .. } => match k.code {
                 KeyCode::Enter | KeyCode::Char(' ') => ModalAction::Close,
+                _ => ModalAction::None,
+            },
+            Modal::TokenManage { name, has_token } => match k.code {
+                KeyCode::Char('g') | KeyCode::Char('G') => ModalAction::RegenToken(name.clone()),
+                KeyCode::Char('v') | KeyCode::Char('V') if *has_token => ModalAction::RevokeToken(name.clone()),
                 _ => ModalAction::None,
             },
         }
@@ -377,6 +385,9 @@ pub fn render(f: &mut Frame, area: Rect, modal: &Modal) {
             let w = max_len.max(62).min(area.width.saturating_sub(4));
             render_sub_url(f, centered(area, w, 12), name, singbox, mihomo);
         }
+        Modal::TokenManage { name, has_token } => {
+            render_token_manage(f, centered(area, 62, 10), name, *has_token);
+        }
     }
 }
 
@@ -564,6 +575,42 @@ fn render_confirm(f: &mut Frame, area: Rect, title: &str, target: &str) {
     f.render_widget(
         Paragraph::new(text).alignment(Alignment::Left)
             .block(Block::default().borders(Borders::ALL).title(title)),
+        area,
+    );
+}
+
+fn render_token_manage(f: &mut Frame, area: Rect, name: &str, has_token: bool) {
+    f.render_widget(Clear, area);
+    let mut lines: Vec<Line> = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  用户: {}   当前: {}", name, if has_token { "● 订阅已开启" } else { "○ 订阅已关闭" }),
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  [g]  重新生成 token（老 URL 立即失效）",
+            Style::default().fg(Color::White),
+        )),
+    ];
+    if has_token {
+        lines.push(Line::from(Span::styled(
+            "  [v]  撤销 token（关闭订阅，/sub/ 返回 404）",
+            Style::default().fg(Color::White),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "  (已关闭状态，[g] 重新生成即可恢复)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  [Esc] 取消",
+        Style::default().fg(Color::DarkGray),
+    )));
+    f.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Token 管理 ")),
         area,
     );
 }

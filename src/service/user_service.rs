@@ -51,6 +51,15 @@ pub async fn regen_sub_token(pool: &SqlitePool, name: &str) -> Result<String> {
     Ok(t)
 }
 
+/// 撤销 token：直接置空，find_by_token 会过滤空串，/sub/ 返回 404
+pub async fn revoke_sub_token(pool: &SqlitePool, name: &str) -> Result<()> {
+    if user_repo::get(pool, name).await?.is_none() {
+        return Err(anyhow!("用户不存在: {}", name));
+    }
+    user_repo::set_sub_token(pool, name, "").await?;
+    Ok(())
+}
+
 pub async fn ensure_sub_tokens(pool: &SqlitePool) -> Result<usize> {
     let users = user_repo::list_all(pool).await?;
     let mut count = 0;

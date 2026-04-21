@@ -1,5 +1,24 @@
 # CHANGELOG
 
+## v0.3.0
+
+### Added
+
+- **浏览器打开订阅 URL = 流量统计 HTML 页面**：同一条 `/sub/<token>` 按 User-Agent 分流：
+  - `Mozilla/*`（浏览器）→ 深色主题 HTML 页：流量进度条（按百分比分段 绿/黄/红）、上下行分拆、重置日 / 到期日倒计时、整体订阅链接（sing-box + mihomo 双行，复制按钮）、单节点链接列表（每条配可展开的 QR SVG）
+  - `clash-meta` / `mihomo` / `stash` / `clashx` → mihomo yaml
+  - 其他（sing-box / v2rayN / 未识别客户端）→ base64 sing-box
+- **`?type=` 显式覆盖**：`?type=stats|clash|mihomo|yaml|sing-box|base64` 优先于 UA 分流；浏览器里加 `?type=clash` 可直接查看 yaml 源码
+- **Token 撤销**：
+  - CLI `sb token revoke <user>` 把 token 置空，`/sub/` 立即 404；再 `sb token regen` 可恢复
+  - TUI 用户页 `[T]` 打开 token 管理弹窗：`[g]` 重新生成 / `[v]` 撤销
+- 新增依赖 `qrcode 0.14`（`default-features = false, features = ["svg"]`，仅 SVG 渲染，几十 KB）
+
+### Changed
+
+- 用户页操作栏：`[a]添加 [E]编辑 [d]删除 [t]启/禁 [r]重置 [T]token [u]复制URL [s]打印 [n]分配节点 [R]刷新`
+- `ShareLink` 结构体新增 `tag` 字段，用于 HTML 页面按节点分组展示
+
 ## v0.2.6
 
 ### Changed

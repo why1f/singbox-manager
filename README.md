@@ -106,12 +106,23 @@ sb allowed alice                                # 查看当前允许列表
 
 ### 订阅 token / HTTP 服务
 
-daemon/TUI 会起一个本地订阅 HTTP（默认 `127.0.0.1:18081`），给每个用户分配一个 token，前挂 nginx 反代即可对外分发订阅。
+daemon/TUI 会起一个本地订阅 HTTP（默认 `127.0.0.1:18081`），给每个用户分配一个 token，前挂 nginx 反代即可对外分发订阅。**浏览器直接访问 `/sub/<token>` 会看到带进度条、节点 QR 码的流量统计页**；代理客户端按 User-Agent 自动取对应格式。
 
 ```bash
 sb token show alice                             # 打印订阅 URL + token
 sb token regen alice                            # 轮换 token（旧 URL 立即失效）
+sb token revoke alice                           # 撤销 token（关闭订阅，/sub/ 返回 404；再 regen 可恢复）
 ```
+
+订阅 URL 的三种用法：
+
+| 场景 | URL |
+|---|---|
+| 浏览器看流量 / 复制订阅 / 单节点 QR | `https://sub.example.com/sub/<token>` |
+| 复制给 mihomo/Clash Meta | `https://sub.example.com/sub/<token>?type=clash` |
+| 复制给 sing-box/v2rayN | `https://sub.example.com/sub/<token>?type=sing-box` |
+
+其中 mihomo 等客户端用自己的 UA 拉订阅会自动拿到 yaml，不必手写 `?type=`；显式参数优先级最高。
 
 ### 节点
 
@@ -174,7 +185,7 @@ sb reload                           # 重载 sing-box
   [Enter]     弹窗里确认提交
 ```
 
-**用户页**：`[a]` 添加 `[E]` 编辑 `[d]` 删除 `[t]` 启禁 `[r]` 重置流量 `[s]` 导出订阅 `[n]` 分配可用节点
+**用户页**：`[a]` 添加 `[E]` 编辑 `[d]` 删除 `[t]` 启禁 `[r]` 重置流量 `[T]` token 管理（生成 / 撤销）`[u]` 复制订阅 URL `[s]` 打印订阅链接 `[n]` 分配可用节点
 
 **节点页**：`[a]` 添加 `[E]` 编辑 `[d]` 删除（弹窗表单按当前协议显示字段：reality/trojan/tuic/anytls 多一行 `server_name`；vless-ws/vmess-ws 多一行 `path`；hysteria2/shadowsocks 只要端口）
 

@@ -1,6 +1,6 @@
 [package]
 name    = "singbox-manager"
-version = "0.2.6"
+version = "0.3.0"
 edition = "2021"
 
 [[bin]]
@@ -27,6 +27,7 @@ anyhow             = "1"
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
 axum               = { version = "0.7", default-features = false, features = ["tokio", "http1", "query"] }
+qrcode             = { version = "0.14", default-features = false, features = ["svg"] }
 
 [build-dependencies]
 tonic-build = { version = "0.12", default-features = false, features = ["transport", "prost"] }

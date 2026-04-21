@@ -243,6 +243,14 @@ fn handle_modal_key(
             s.modal = None;
             spawn_save_nodes(pool, cfg, ui_tx, user, all, tags);
         }
+        ModalAction::RegenToken(name) => {
+            s.modal = None;
+            spawn_regen_token(pool, ui_tx, name);
+        }
+        ModalAction::RevokeToken(name) => {
+            s.modal = None;
+            spawn_revoke_token(pool, ui_tx, name);
+        }
     }
     false
 }
@@ -361,6 +369,14 @@ fn handle_page_key(
         },
         KeyCode::Char('R') => spawn_refresh(pool, cfg, ui_tx),
         KeyCode::Char('c') => spawn_check(cfg, ui_tx),
+        KeyCode::Char('T') if s.page == Page::Users => {
+            if let Some(u) = s.selected_user() {
+                s.modal = Some(Modal::TokenManage {
+                    name: u.name.clone(),
+                    has_token: !u.sub_token.is_empty(),
+                });
+            }
+        }
         _ => {}
     }
 }
@@ -687,6 +703,44 @@ fn spawn_toggle(pool: Arc<sqlx::SqlitePool>, cfg: Arc<AppConfig>, tx: mpsc::Send
             }
             Err(e) => {
                 let _ = tx.send(UiEvent::Status { msg: format!("切换失败: {}", e), level: StatusLevel::Error }).await;
+            }
+        }
+    });
+}
+
+fn spawn_regen_token(pool: Arc<sqlx::SqlitePool>, tx: mpsc::Sender<UiEvent>, name: String) {
+    tokio::spawn(async move {
+        match crate::service::user_service::regen_sub_token(&pool, &name).await {
+            Ok(_) => {
+                if let Ok(users) = crate::service::user_service::list_users(&pool).await {
+                    let _ = tx.send(UiEvent::UsersRefreshed(users)).await;
+                }
+                let _ = tx.send(UiEvent::Status {
+                    msg: format!("{} 的 token 已轮换；老 URL 立即失效", name),
+                    level: StatusLevel::Warn,
+                }).await;
+            }
+            Err(e) => {
+                let _ = tx.send(UiEvent::Status { msg: format!("重置 token 失败: {}", e), level: StatusLevel::Error }).await;
+            }
+        }
+    });
+}
+
+fn spawn_revoke_token(pool: Arc<sqlx::SqlitePool>, tx: mpsc::Sender<UiEvent>, name: String) {
+    tokio::spawn(async move {
+        match crate::service::user_service::revoke_sub_token(&pool, &name).await {
+            Ok(()) => {
+                if let Ok(users) = crate::service::user_service::list_users(&pool).await {
+                    let _ = tx.send(UiEvent::UsersRefreshed(users)).await;
+                }
+                let _ = tx.send(UiEvent::Status {
+                    msg: format!("{} 的订阅已关闭；再 [T][g] 可恢复", name),
+                    level: StatusLevel::Warn,
+                }).await;
+            }
+            Err(e) => {
+                let _ = tx.send(UiEvent::Status { msg: format!("撤销 token 失败: {}", e), level: StatusLevel::Error }).await;
             }
         }
     });

@@ -512,6 +512,10 @@ async fn run_token(cmd: cli::token::TokenCommands, pool: &sqlx::SqlitePool, cfg:
             print_sub_url(&u, &cfg.subscription.public_base);
             drop(t);
         }
+        T::Revoke { name } => {
+            service::user_service::revoke_sub_token(pool, &name).await?;
+            println!("✓ '{}' 的订阅已关闭；`sb token regen {}` 可恢复", name, name);
+        }
     }
     Ok(())
 }

@@ -3,7 +3,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::Value;
 
 #[derive(Debug, Clone)]
-pub struct ShareLink { pub protocol: String, pub link: String }
+pub struct ShareLink { pub tag: String, pub protocol: String, pub link: String }
 
 pub fn generate_links(cfg: &Value, username: &str, server: &str) -> Result<Vec<ShareLink>> {
     let mut links = Vec::new();
@@ -30,7 +30,7 @@ pub fn generate_links(cfg: &Value, username: &str, server: &str) -> Result<Vec<S
             _ => None,
         };
         if let Some(l) = link {
-            links.push(ShareLink { protocol: typ.into(), link: l });
+            links.push(ShareLink { tag: tag.into(), protocol: typ.into(), link: l });
         }
     }
     Ok(links)

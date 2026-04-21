@@ -61,7 +61,7 @@ pub fn render(f: &mut Frame, area: Rect, s: &AppState) {
     f.render_widget(Paragraph::new(vec![
         Line::from(sel_text),
         Line::from(Span::styled(
-            "  [a]添加  [E]编辑  [d]删除  [t]启/禁  [r]重置流量  [u]复制订阅 URL  [s]打印订阅链接  [n]分配节点  [R]刷新",
+            "  [a]添加  [E]编辑  [d]删除  [t]启/禁  [r]重置  [T]token  [u]复制URL  [s]打印  [n]分配节点  [R]刷新",
             Style::default().fg(Color::DarkGray))),
     ]).block(Block::default().borders(Borders::ALL).title(" 操作 ")).wrap(Wrap{trim:true}), c[1]);
 }
