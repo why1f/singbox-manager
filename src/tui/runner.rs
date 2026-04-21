@@ -223,9 +223,9 @@ fn handle_modal_key(
             s.modal = None;
             spawn_edit_user(pool, cfg, ui_tx, name, quota, reset_day, expire);
         }
-        ModalAction::SubmitNode { tag, protocol, port, server_name, path } => {
+        ModalAction::SubmitNode { tag, protocol, port, server_name, path, port_reuse } => {
             s.modal = None;
-            spawn_add_node(cfg, ui_tx, tag, protocol, port, server_name, path);
+            spawn_add_node(cfg, ui_tx, tag, protocol, port, server_name, path, port_reuse);
         }
         ModalAction::SubmitNodeEdit { tag, port, server_name, path, port_reuse } => {
             s.modal = None;
@@ -854,10 +854,11 @@ fn spawn_delete_user(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_add_node(
     cfg: Arc<AppConfig>, tx: mpsc::Sender<UiEvent>,
     tag: String, protocol: String, port: u16,
-    server_name: Option<String>, path: Option<String>,
+    server_name: Option<String>, path: Option<String>, port_reuse: bool,
 ) {
     tokio::spawn(async move {
         let p = match crate::model::node::Protocol::try_from(protocol.as_str()) {
@@ -868,7 +869,7 @@ fn spawn_add_node(
             }
         };
         let req = crate::model::node::AddNodeRequest {
-            tag: tag.clone(), protocol: p, listen_port: port, server_name, path,
+            tag: tag.clone(), protocol: p, listen_port: port, server_name, path, port_reuse,
         };
         let mut cfg_json = match crate::core::config::load(&cfg.singbox.config_path) {
             Ok(v) => v,

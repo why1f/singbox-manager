@@ -32,4 +32,5 @@ pub struct AddNodeRequest {
     pub listen_port: u16,
     pub server_name: Option<String>,
     pub path: Option<String>,
+    pub port_reuse: bool,
 }

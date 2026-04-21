@@ -94,7 +94,14 @@ pub fn add_node(cfg: &mut Value, req: &AddNodeRequest) -> Result<AddNodeMeta> {
     if inbounds.iter().any(|ib| ib["tag"].as_str() == Some(&req.tag)) {
         anyhow::bail!("节点 tag 已存在: {}", req.tag);
     }
-    let (inbound, meta) = build_inbound(req)?;
+    let (mut inbound, meta) = build_inbound(req)?;
+    if req.port_reuse {
+        // 端口复用：inbound 只监听 127.0.0.1，由 nginx stream 做 SNI 分流回源
+        inbound["listen"] = json!("127.0.0.1");
+        let mut nm = get_node_meta(&req.tag).unwrap_or_default();
+        nm.port_reuse = true;
+        let _ = set_node_meta(&req.tag, nm);
+    }
     inbounds.push(inbound);
     Ok(meta)
 }

@@ -383,6 +383,7 @@ async fn run_node(cmd: cli::node::NodeCommands, cfg: &AppConfig) -> Result<()> {
                 listen_port: args.port,
                 server_name: args.server_name,
                 path: args.path,
+                port_reuse: args.port_reuse,
             };
             let meta = core::config::add_node(&mut config, &req)?;
             core::config::save(&cfg.singbox.config_path, &config)?;

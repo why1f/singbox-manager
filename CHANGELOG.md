@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## v0.3.2
+
+### Added
+
+- **节点列表表格新增"端口复用"列**：支持的协议（reality/trojan/anytls）显示 `● 开` / `○ 关`，不支持的（hy2/tuic/ss/*-ws）显示 `─ 不支持`
+- **添加节点表单同步加端口复用开关**（仅 reality/trojan/anytls 协议下显示）：
+  - 建节点时直接勾上，不用建完再编辑
+  - CLI `sb add-node` 新增 `--port-reuse` 标志
+- 添加表单底部动态提示"端口复用开启：listen→127.0.0.1，订阅端口写 443；需手动配 nginx stream SNI 分流"
+
 ## v0.3.1
 
 ### Added

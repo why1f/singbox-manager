@@ -45,6 +45,7 @@ fn add_fields(protocol: &str) -> Vec<NodeField> {
     let mut v = vec![NodeField::Tag, NodeField::Protocol, NodeField::Port];
     if protocol_uses_sni(protocol)  { v.push(NodeField::ServerName); }
     if protocol_uses_path(protocol) { v.push(NodeField::Path); }
+    if protocol_supports_port_reuse(protocol) { v.push(NodeField::PortReuse); }
     v
 }
 
@@ -73,6 +74,7 @@ pub struct NodeForm {
     pub port: String,
     pub server_name: String,
     pub path: String,
+    pub port_reuse: bool,
     pub focus: usize,
     pub error: Option<String>,
 }
@@ -124,7 +126,7 @@ pub enum ModalAction {
     Close,
     SubmitUser { name: String, quota: f64, reset_day: i64, expire: String },
     SubmitUserEdit { name: String, quota: Option<f64>, reset_day: Option<i64>, expire: Option<String> },
-    SubmitNode { tag: String, protocol: String, port: u16, server_name: Option<String>, path: Option<String> },
+    SubmitNode { tag: String, protocol: String, port: u16, server_name: Option<String>, path: Option<String>, port_reuse: bool },
     SubmitNodeEdit { tag: String, port: Option<u16>, server_name: Option<String>, path: Option<String>, port_reuse: Option<bool> },
     DeleteUser(String),
     DeleteNode(String),
@@ -346,6 +348,11 @@ fn handle_node(f: &mut NodeForm, k: KeyEvent) -> ModalAction {
             f.protocol_idx = (f.protocol_idx + 1) % PROTOCOLS.len();
             ModalAction::None
         }
+        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+            if focused == NodeField::PortReuse => {
+            f.port_reuse = !f.port_reuse;
+            ModalAction::None
+        }
         KeyCode::Enter => {
             let tag = f.tag.trim().to_string();
             if tag.is_empty() { f.error = Some("tag 必填".into()); return ModalAction::None; }
@@ -361,13 +368,14 @@ fn handle_node(f: &mut NodeForm, k: KeyEvent) -> ModalAction {
             let path = if protocol_uses_path(&protocol) && !f.path.trim().is_empty() {
                 Some(f.path.trim().to_string())
             } else { None };
-            ModalAction::SubmitNode { tag, protocol, port, server_name: sn, path }
+            let reuse = protocol_supports_port_reuse(&protocol) && f.port_reuse;
+            ModalAction::SubmitNode { tag, protocol, port, server_name: sn, path, port_reuse: reuse }
         }
-        KeyCode::Backspace if focused != NodeField::Protocol => {
+        KeyCode::Backspace if !matches!(focused, NodeField::Protocol | NodeField::PortReuse) => {
             if let Some(s) = node_field_mut(f, focused) { s.pop(); }
             ModalAction::None
         }
-        KeyCode::Char(c) if focused != NodeField::Protocol => {
+        KeyCode::Char(c) if !matches!(focused, NodeField::Protocol | NodeField::PortReuse) => {
             if let Some(s) = node_field_mut(f, focused) { s.push(c); }
             ModalAction::None
         }
@@ -497,12 +505,15 @@ fn render_node(f: &mut Frame, area: Rect, form: &NodeForm) {
             NodeField::Port       => ("端口 *必填 (默认 443)", form.port.clone()),
             NodeField::ServerName => ("server_name (SNI)",     form.server_name.clone()),
             NodeField::Path       => ("path (留空=默认)",      form.path.clone()),
-            NodeField::PortReuse  => continue,  // 添加时不暴露端口复用，留给编辑
+            NodeField::PortReuse  => (
+                "端口复用 (Space/←→ 切换)",
+                format!("◀ {} ▶", if form.port_reuse { "开" } else { "关" }),
+            ),
         };
         let style = if i == form.focus {
             Style::default().fg(Color::Black).bg(Color::Cyan)
         } else { Style::default().fg(Color::White) };
-        let cursor = if i == form.focus && *field != NodeField::Protocol { "_" } else { "" };
+        let cursor = if i == form.focus && !matches!(*field, NodeField::Protocol | NodeField::PortReuse) { "_" } else { "" };
         lines.push(Line::from(vec![
             Span::styled(format!(" {:<24}", label), Style::default().fg(Color::Yellow)),
             Span::styled(format!(" {}{}  ", val, cursor), style),
@@ -522,6 +533,12 @@ fn render_node(f: &mut Frame, area: Rect, form: &NodeForm) {
     };
     if !hint.is_empty() {
         lines.push(Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray))));
+    }
+    if protocol_supports_port_reuse(protocol) {
+        lines.push(Line::from(Span::styled(
+            "  端口复用开启：listen→127.0.0.1，订阅端口写 443；需手动配 nginx stream SNI 分流",
+            Style::default().fg(Color::DarkGray),
+        )));
     }
     lines.push(Line::from(Span::styled(
         "  Tab/↑↓ 切换   ←/→ 选协议   Enter 提交   Esc 取消",
