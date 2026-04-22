@@ -1,5 +1,26 @@
 # CHANGELOG
 
+## v0.3.9
+
+### Fixed
+
+- **流量重置后虚报峰值**：`reset_usage` / `reset_usage_manual` 不再清零 `last_live_up/down`。  
+  gRPC 流量计数器是自 sing-box 启动以来的累计值，清零会导致重置后下次同步 `calc_delta(gRPC累计, 0)` 把全部历史累计量重新计入 `used_bytes`，造成流量数值暴涨。保留旧累计值后，增量计算只统计重置后的新增量
+
+## v0.3.8
+
+### Fixed
+
+- **SS 节点 Clash 订阅消失**：`clash_ss` 读 `user["uuid"]` 而非 `user["password"]`（SS 用户条目无 uuid 字段），导致 Clash/Mihomo 订阅里 SS 节点始终为空
+- **手动重置污染月度自动重置**：新增 `reset_usage_manual`，手动重置不写 `last_reset_ym`，避免同月手动重置后当月定期重置被跳过
+- **月重置后超额用户永久禁用**：月重置执行后同时调用 `set_enabled(true)` 并 `continue`，确保超额被禁的用户在重置日自动解封
+- **TUI 模式 gRPC 失败时自动控制不执行**：TUI 后台重连循环的 `Err` 分支补调 `apply_automatic_controls`，与 daemon 模式行为对齐
+- **vless-ws 订阅链接 TLS 字段错误**：`vless_ws` 不再无条件写 `security=tls`，改为按 `tls.enabled` 动态生成 `tls/none`
+- **Clash 订阅缺 anytls 节点**：`generate_clash_yaml` 新增 `"anytls"` match 分支及 `clash_anytls` 函数
+- **profile-web-page-url 响应头错误**：改为 `{public_base}/sub/{token}` 完整路径，客户端点击跳转不再 404
+- **IPv6 服务器订阅链接格式非法**：`get_server_ip` 自动检测并为 IPv6 地址添加 `[...]` 包裹
+- **vmess 协议检测误判**：按 `transport.type` 区分 ws/tcp，非 ws 的 vmess 不再误报为 `vmess-ws`
+
 ## v0.3.7
 
 ### Fixed

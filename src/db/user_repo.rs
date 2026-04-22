@@ -67,8 +67,12 @@ pub async fn toggle_enabled(pool: &SqlitePool, name: &str) -> Result<Option<bool
 
 pub async fn reset_usage(pool: &SqlitePool, name: &str) -> Result<()> {
     let ym = Local::now().format("%Y-%m").to_string();
+    // 注意：不重置 last_live_up/down。
+    // gRPC 流量计数器是自 sing-box 启动以来的累计值，重置后若清零 last_live，
+    // 下次同步 calc_delta(gRPC累计值, 0) 会把历史累计量全部计入 used_bytes（虚报峰值）。
+    // 保留 last_live 可确保增量计算 delta = 新累计 - 旧累计，只统计重置后的新增量。
     sqlx::query(r#"UPDATE users SET used_up_bytes=0,used_down_bytes=0,manual_bytes=0,
-        last_live_up=0,last_live_down=0,last_reset_ym=? WHERE name=?"#)
+        last_reset_ym=? WHERE name=?"#)
         .bind(&ym).bind(name).execute(pool).await?;
     Ok(())
 }
@@ -76,9 +80,10 @@ pub async fn reset_usage(pool: &SqlitePool, name: &str) -> Result<()> {
 /// 手动重置：只清零流量，**不**更新 last_reset_ym。
 /// 区别于 reset_usage（自动月重置用），手动重置不会污染月度去重标记，
 /// 保证同月内手动重置后当月定期重置仍会在重置日正常触发。
+/// 同样不重置 last_live_up/down，原因同 reset_usage。
 pub async fn reset_usage_manual(pool: &SqlitePool, name: &str) -> Result<()> {
-    sqlx::query(r#"UPDATE users SET used_up_bytes=0,used_down_bytes=0,manual_bytes=0,
-        last_live_up=0,last_live_down=0 WHERE name=?"#)
+    sqlx::query(r#"UPDATE users SET used_up_bytes=0,used_down_bytes=0,manual_bytes=0
+        WHERE name=?"#)
         .bind(name).execute(pool).await?;
     Ok(())
 }

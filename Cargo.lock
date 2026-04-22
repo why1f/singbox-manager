@@ -1953,7 +1953,7 @@ dependencies = [
 
 [[package]]
 name = "singbox-manager"
-version = "0.3.7"
+version = "0.3.9"
 dependencies = [
  "anyhow",
  "axum",
