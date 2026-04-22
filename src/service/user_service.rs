@@ -88,7 +88,8 @@ pub async fn toggle_user(pool: &SqlitePool, name: &str) -> Result<bool> {
 }
 
 pub async fn reset_traffic(pool: &SqlitePool, name: &str) -> Result<()> {
-    user_repo::reset_usage(pool, name).await
+    // 手动重置：不写 last_reset_ym，避免污染本月定期重置的去重标记
+    user_repo::reset_usage_manual(pool, name).await
 }
 
 pub async fn update_package(pool: &SqlitePool, name: &str,
@@ -151,7 +152,11 @@ pub async fn apply_automatic_controls(pool: &SqlitePool) -> Result<Vec<String>> 
         let eff = match user.reset_day { 32 => last_d, d @ 1..=28 => d.min(last_d), _ => 0 };
         if eff > 0 && day == eff && user.last_reset_ym != ym {
             user_repo::reset_usage(pool, &user.name).await?;
+            // 同时恢复启用：超额被禁的用户在重置日应自动解封
+            // 注意：到期禁用的用户已在上面 continue 跳过，不会在这里被错误恢复
+            user_repo::set_enabled(pool, &user.name, true).await?;
             changed.push(format!("{}(月重置)", user.name));
+            continue; // 跳过本轮超额检查，流量刚清零不应立刻再被禁
         }
         if user.is_over_quota() && user.enabled {
             user_repo::set_enabled(pool, &user.name, false).await?;

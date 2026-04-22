@@ -119,10 +119,17 @@ async fn handle_sub(
         HeaderName::from_static("profile-update-interval"),
         HeaderValue::from_static("6"),
     );
-    out.insert(
-        HeaderName::from_static("profile-web-page-url"),
-        HeaderValue::from_str(&s.cfg.subscription.public_base).unwrap_or(HeaderValue::from_static("")),
-    );
+    // profile-web-page-url 应指向带 token 的订阅统计页，而非裸 public_base
+    if !s.cfg.subscription.public_base.is_empty() && !user.sub_token.is_empty() {
+        let web_url = format!(
+            "{}/sub/{}",
+            s.cfg.subscription.public_base.trim_end_matches('/'),
+            user.sub_token,
+        );
+        if let Ok(v) = HeaderValue::from_str(&web_url) {
+            out.insert(HeaderName::from_static("profile-web-page-url"), v);
+        }
+    }
     (StatusCode::OK, out, body)
 }
 

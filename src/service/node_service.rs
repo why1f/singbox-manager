@@ -32,7 +32,10 @@ fn detect(ib: &Value) -> Protocol {
             else if ib["transport"]["type"].as_str() == Some("ws")     { Protocol::VlessWs }
             else { Protocol::Unknown }
         }
-        "vmess"       => Protocol::VmessWs,
+        "vmess"       => {
+            if ib["transport"]["type"].as_str() == Some("ws") { Protocol::VmessWs }
+            else { Protocol::Unknown }
+        }
         "shadowsocks" => Protocol::Shadowsocks,
         "trojan"      => Protocol::Trojan,
         "tuic"        => Protocol::Tuic,
@@ -52,7 +55,14 @@ pub async fn get_server_ip() -> String {
         if let Ok(resp) = client.get(*url).send().await {
             if let Ok(text) = resp.text().await {
                 let t = text.trim();
-                if !t.is_empty() && t.len() <= 64 { return t.to_string(); }
+                if !t.is_empty() && t.len() <= 64 {
+                    // IPv6 地址在 URI 中必须用 [...] 包裹，否则订阅链接格式非法
+                    return if t.contains(':') && !t.starts_with('[') {
+                        format!("[{}]", t)
+                    } else {
+                        t.to_string()
+                    };
+                }
             }
         }
     }

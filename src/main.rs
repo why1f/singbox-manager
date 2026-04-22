@@ -208,7 +208,12 @@ async fn run_tui(pool: sqlx::SqlitePool, cfg: AppConfig) -> Result<()> {
                             tx_bg.clone(),
                         ).await;
                     }
-                    Err(e) => { let _ = tx_bg.send(TrafficEvent::GrpcError(e.to_string())).await; }
+                    Err(e) => {
+                        let _ = tx_bg.send(TrafficEvent::GrpcError(e.to_string())).await;
+                        // 与 daemon 模式对齐：gRPC 不通时仍执行自动控制
+                        // （月重置 / 超额禁用 / 到期禁用），避免纯 TUI 场景下这些逻辑失效
+                        let _ = service::user_service::apply_automatic_controls(&pool_bg).await;
+                    }
                 }
                 tokio::time::sleep(Duration::from_secs(backoff)).await;
                 backoff = (backoff * 2).min(60);

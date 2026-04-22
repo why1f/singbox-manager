@@ -88,6 +88,7 @@ pub fn generate_clash_yaml(cfg: &Value, username: &str, server: &str) -> Result<
             "trojan"      => clash_trojan(&mut out, ib, user, server, port, &proxy_name),
             "hysteria2"   => clash_hy2(&mut out, ib, user, server, port, &proxy_name),
             "tuic"        => clash_tuic(&mut out, ib, user, server, port, &proxy_name),
+            "anytls"      => clash_anytls(&mut out, ib, user, server, port, &proxy_name),
             _ => false,
         };
         if added { proxy_names.push(proxy_name); }
@@ -195,16 +196,15 @@ fn clash_vmess_ws(out: &mut String, ib: &Value, user: &Value, s: &str, p: u64, n
 
 fn clash_ss(out: &mut String, ib: &Value, user: &Value, s: &str, p: u64, name: &str) -> bool {
     use std::fmt::Write;
-    let Some(uuid) = user["uuid"].as_str() else { return false; };
-    // user.password 字段是 uuid 的 base64 后版（sync_users 那边就是这么写的）
-    let pw = STANDARD.encode(uuid::Uuid::parse_str(uuid).map(|u| *u.as_bytes()).unwrap_or([0u8;16]));
+    // SS inbound users 条目结构为 {name, password}；password 已是 base64(uuid bytes)
+    let Some(pw) = user["password"].as_str() else { return false; };
     let method = ib["method"].as_str().unwrap_or("2022-blake3-aes-128-gcm");
     writeln!(out, "  - name: {}", yaml_str(name)).ok();
     writeln!(out, "    type: ss").ok();
     writeln!(out, "    server: {}", s).ok();
     writeln!(out, "    port: {}", p).ok();
     writeln!(out, "    cipher: {}", yaml_str(method)).ok();
-    writeln!(out, "    password: {}", yaml_str(&pw)).ok();
+    writeln!(out, "    password: {}", yaml_str(pw)).ok();
     writeln!(out, "    udp: true").ok();
     true
 }
@@ -257,6 +257,20 @@ fn clash_tuic(out: &mut String, ib: &Value, user: &Value, s: &str, p: u64, name:
     true
 }
 
+fn clash_anytls(out: &mut String, ib: &Value, user: &Value, s: &str, p: u64, name: &str) -> bool {
+    use std::fmt::Write;
+    let Some(pw) = user["password"].as_str() else { return false; };
+    let sni = ib["tls"]["server_name"].as_str().unwrap_or(s);
+    writeln!(out, "  - name: {}", yaml_str(name)).ok();
+    writeln!(out, "    type: anytls").ok();
+    writeln!(out, "    server: {}", s).ok();
+    writeln!(out, "    port: {}", p).ok();
+    writeln!(out, "    password: {}", yaml_str(pw)).ok();
+    writeln!(out, "    sni: {}", yaml_str(sni)).ok();
+    writeln!(out, "    skip-cert-verify: true").ok();
+    true
+}
+
 fn find_user<'a>(ib: &'a Value, name: &str) -> Option<&'a Value> {
     ib["users"].as_array()?.iter().find(|u| u["name"].as_str() == Some(name))
 }
@@ -296,11 +310,17 @@ fn vless_ws(ib: &Value, user: &Value, s: &str, p: u64, tag: &str) -> Option<Stri
     let uuid = user["uuid"].as_str()?;
     let name = user["name"].as_str()?;
     let path = ib["transport"]["path"].as_str().unwrap_or("/");
+    let tls  = ib["tls"]["enabled"].as_bool().unwrap_or(false);
+    // security 根据 inbound 是否真正启用了 TLS 决定：
+    // - TLS 开启（后端直连 TLS）→ security=tls
+    // - TLS 未开启（nginx 等前代做终结）→ security=none，客户端明文连 sing-box
+    let security = if tls { "tls" } else { "none" };
     let sni  = ib["tls"]["server_name"].as_str().unwrap_or(s);
-    let insec = if insecure_flag(ib) { "&allowInsecure=1" } else { "" };
+    let sni_param = if tls { format!("&sni={}", sni) } else { String::new() };
+    let insec = if tls && insecure_flag(ib) { "&allowInsecure=1" } else { "" };
     Some(format!(
-        "vless://{}@{}:{}?encryption=none&security=tls&sni={}&type=ws&path={}{}#{}",
-        uuid, s, p, sni, urlencoding::encode(path), insec, fragment(tag, name)))
+        "vless://{}@{}:{}?encryption=none&security={}&type=ws&path={}{}{}#{}",
+        uuid, s, p, security, urlencoding::encode(path), sni_param, insec, fragment(tag, name)))
 }
 
 fn vmess_ws(ib: &Value, user: &Value, s: &str, p: u64, tag: &str) -> Option<String> {

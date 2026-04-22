@@ -73,6 +73,16 @@ pub async fn reset_usage(pool: &SqlitePool, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// 手动重置：只清零流量，**不**更新 last_reset_ym。
+/// 区别于 reset_usage（自动月重置用），手动重置不会污染月度去重标记，
+/// 保证同月内手动重置后当月定期重置仍会在重置日正常触发。
+pub async fn reset_usage_manual(pool: &SqlitePool, name: &str) -> Result<()> {
+    sqlx::query(r#"UPDATE users SET used_up_bytes=0,used_down_bytes=0,manual_bytes=0,
+        last_live_up=0,last_live_down=0 WHERE name=?"#)
+        .bind(name).execute(pool).await?;
+    Ok(())
+}
+
 /// 合并更新套餐：None 字段保留原值。
 pub async fn update_package(
     pool: &SqlitePool, name: &str,
