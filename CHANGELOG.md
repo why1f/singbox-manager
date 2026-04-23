@@ -1,5 +1,16 @@
 # CHANGELOG
 
+## v0.4.1
+
+### Fixed
+- **流量告警倍率口径统一**：配额告警改为与总量展示、超额封禁一致，按 `traffic_multiplier` 后的有效用量计算，避免双向计费场景下告警偏晚。
+- **备份恢复重启错误服务名**：恢复完成后改为重启正确的 `sb-manager` 服务，而非不存在的 `singbox-manager`。
+
+### Changed
+- **订阅服务公网 IP 查询增加缓存**：`/sub` 不再每次请求都实时探测公网 IP，减少外部依赖与响应延迟。
+- **备份恢复增加路径白名单校验**：恢复前先校验 tar 包内路径，只允许恢复 `manager / certs / config.json / nginx conf`。
+- **安装脚本补 shell fallback**：`install-release.sh` 在 `python3` 不可用时，仍会用 shell 方式更新 `config.toml` 里的路径字段。
+
 ## v0.4.0
 
 ### Added
