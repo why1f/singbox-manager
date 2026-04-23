@@ -431,7 +431,7 @@ fn ensure_self_signed_cert(tag: &str, sni: &str) -> Result<(String, String)> {
 
 /// 调用 `sing-box generate reality-keypair`，返回 (private_key, public_key)
 fn generate_reality_keypair() -> Result<(String, String)> {
-    let bin = ["/usr/local/bin/sing-box", "/usr/bin/sing-box"]
+    let bin = ["/etc/sing-box/bin/sing-box", "/usr/local/bin/sing-box", "/usr/bin/sing-box"]
         .iter().find(|p| std::path::Path::new(p).exists())
         .copied()
         .unwrap_or("sing-box");
