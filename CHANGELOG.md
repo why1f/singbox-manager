@@ -1,6 +1,6 @@
 # CHANGELOG
 
-## v0.3.11
+## v0.3.12
 
 ### Added
 
