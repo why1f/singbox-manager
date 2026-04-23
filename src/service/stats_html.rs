@@ -165,9 +165,9 @@ details svg {{ display:block; margin:10px auto 4px; background:#fff; padding:10p
     <div class="meta">
       <span>重置: <b>{reset}</b></span>
       <span>到期: <b>{expire}</b></span>
-      <span>计费: <b>{billing}</b></span>
       <span>上行: <b>{up}</b></span>
       <span>下行: <b>{down}</b></span>
+      <span>计费: <b>{billing}</b></span>
     </div>
   </div>
   <div class="card">
