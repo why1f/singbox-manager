@@ -1,10 +1,10 @@
 [singbox]
 config_path = "/etc/sing-box/config.json"
-binary_path = "/usr/local/bin/sing-box"
+binary_path = "/etc/sing-box/bin/sing-box"
 grpc_addr   = "127.0.0.1:18080"
 
 [db]
-path = "/var/lib/sing-box-manager/manager.db"
+path = "/etc/sing-box/manager/manager.db"
 
 [stats]
 sync_interval_secs   = 30
