@@ -102,8 +102,24 @@ if [ -f "$CONFIG_PATH" ]; then
 fi
 
 # 写入 config.toml
+patch_config_sed() {
+  [ -f "$CONFIG_PATH" ] || touch "$CONFIG_PATH"
+  sed_set() {
+    local key="$1" value="$2"
+    local esc
+    esc="$(printf '%s' "$value" | sed 's/[\/&]/\\&/g')"
+    if grep -q "^${key}[[:space:]]*=" "$CONFIG_PATH"; then
+      sed -i "s|^${key}[[:space:]]*=.*$|${key} = \"${esc}\"|" "$CONFIG_PATH"
+    else
+      printf '%s = "%s"\n' "$key" "$value" >> "$CONFIG_PATH"
+    fi
+  }
+  sed_set "binary_path" "$SB_BIN"
+  sed_set "config_path" "$SB_CONFIG"
+}
+
 if [ -n "$SB_BIN" ] && [ -n "$SB_CONFIG" ]; then
-  python3 - "$CONFIG_PATH" "$SB_BIN" "$SB_CONFIG" <<'PY' 2>/dev/null || true
+  python3 - "$CONFIG_PATH" "$SB_BIN" "$SB_CONFIG" <<'PY' 2>/dev/null || patch_config_sed
 import sys, re, pathlib
 path, binp, cfgp = sys.argv[1:]
 p = pathlib.Path(path); text = p.read_text() if p.exists() else ""
