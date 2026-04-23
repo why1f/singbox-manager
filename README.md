@@ -18,9 +18,9 @@ sudo systemctl start sb-manager
 ```
 
 脚本会：
-1. 下载最新 `sb` 二进制到 `/usr/local/bin/sb`
-2. 写 `/etc/sing-box-manager/config.toml`、`/etc/systemd/system/sb-manager.service`
-3. 建软链 `/usr/bin/sb` + 清 `/etc/profile.d/sb-manager.sh` 里的 stale alias
+1. 下载最新 `sb` 二进制到 `/etc/sing-box/bin/sb`
+2. 写 `/etc/sing-box/manager/config.toml`、`/etc/systemd/system/sb-manager.service`
+3. 建软链 `/usr/local/bin/sb` + 清 `/etc/profile.d/sb-manager.sh` 里的 stale alias
 4. `systemctl enable sb-manager`
 
 指定版本 / 自己的 fork：
@@ -262,9 +262,9 @@ sudo systemctl restart sb-manager
 
 ```bash
 sudo systemctl disable --now sb-manager
-sudo rm -f /usr/local/bin/sb /usr/bin/sb /etc/systemd/system/sb-manager.service /etc/profile.d/sb-manager.sh
+sudo rm -f /usr/local/bin/sb /etc/systemd/system/sb-manager.service /etc/profile.d/sb-manager.sh
 # 如要一并清数据：
-sudo rm -rf /etc/sing-box-manager /var/lib/sing-box-manager
+sudo rm -rf /etc/sing-box
 # 如要卸载 sing-box 本体，进 TUI 内核页按 u；或：
 sb kernel uninstall
 ```
@@ -275,12 +275,12 @@ sb kernel uninstall
 
 | 路径 | 用途 |
 |---|---|
-| `/usr/local/bin/sb` | sb-manager 主二进制 |
-| `/etc/sing-box-manager/config.toml` | sb-manager 配置 |
-| `/var/lib/sing-box-manager/manager.db` | SQLite 数据（用户、流量历史） |
+| `/etc/sing-box/bin/sb` | sb-manager 主二进制 |
+| `/etc/sing-box/manager/config.toml` | sb-manager 配置 |
+| `/etc/sing-box/manager/manager.db` | SQLite 数据（用户、流量历史） |
 | `/etc/systemd/system/sb-manager.service` | systemd unit |
 | `/etc/profile.d/sb-manager.sh` | 清 stale alias |
-| `/usr/local/bin/sing-box` | sing-box 内核二进制 |
+| `/etc/sing-box/bin/sing-box` | sing-box 内核二进制 |
 | `/etc/sing-box/config.json` | sing-box 配置 |
 | `/etc/systemd/system/sing-box.service` | sing-box systemd unit |
 
@@ -291,11 +291,11 @@ sb kernel uninstall
 ```toml
 [singbox]
 config_path = "/etc/sing-box/config.json"
-binary_path = "/usr/local/bin/sing-box"
+binary_path = "/etc/sing-box/bin/sing-box"
 grpc_addr   = "127.0.0.1:18080"
 
 [db]
-path = "/var/lib/sing-box-manager/manager.db"
+path = "/etc/sing-box/manager/manager.db"
 
 [stats]
 sync_interval_secs  = 30    # 流量同步间隔
