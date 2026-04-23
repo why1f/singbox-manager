@@ -745,6 +745,7 @@ fn spawn_save_nodes(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_edit_user(
     pool: Arc<sqlx::SqlitePool>, cfg: Arc<AppConfig>, tx: mpsc::Sender<UiEvent>,
     name: String, quota: Option<f64>, reset_day: Option<i64>, expire: Option<String>, multiplier: Option<f64>,
@@ -926,6 +927,7 @@ fn spawn_check(cfg: Arc<AppConfig>, tx: mpsc::Sender<UiEvent>) {
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_add_user(
     pool: Arc<sqlx::SqlitePool>, cfg: Arc<AppConfig>, tx: mpsc::Sender<UiEvent>,
     name: String, quota: f64, reset_day: i64, expire: String, multiplier: f64,

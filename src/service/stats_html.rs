@@ -40,10 +40,13 @@ pub fn render(cfg: &Value, user: &User, server: &str, base_url: &str) -> String 
 
     let reset_desc = match user.reset_day {
         0  => "不重置".into(),
-        32 => "每月 1 号".into(),
+        32 => "月末".into(),
         d  => format!("每月 {} 号", d),
     };
     let expire_desc = describe_expire(&user.expire_at);
+    let billing_str = if (user.traffic_multiplier - 2.0).abs() < 0.01 { "双向".to_string() }
+        else if (user.traffic_multiplier - 1.0).abs() < 0.01 { "单向".to_string() }
+        else { format!("{:.1}x", user.traffic_multiplier) };
 
     let sub_sing = format!("{}/sub/{}", base, user.sub_token);
     let sub_clash = format!("{}/sub/{}?type=clash", base, user.sub_token);
@@ -162,6 +165,7 @@ details svg {{ display:block; margin:10px auto 4px; background:#fff; padding:10p
     <div class="meta">
       <span>重置: <b>{reset}</b></span>
       <span>到期: <b>{expire}</b></span>
+      <span>计费: <b>{billing}</b></span>
       <span>上行: <b>{up}</b></span>
       <span>下行: <b>{down}</b></span>
     </div>
@@ -192,7 +196,7 @@ function copy(btn,text){{
         status_cls = status_cls, status_label = status_label, bar_cls = bar_cls,
         pct = pct.min(100.0),
         used = used_str, total = total_str,
-        reset = reset_desc, expire = expire_desc,
+        reset = reset_desc, expire = expire_desc, billing = billing_str,
         up = up_str, down = down_str,
         sub_rows = sub_rows, node_rows = node_rows,
         n_nodes = links.len(),
