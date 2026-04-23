@@ -32,6 +32,7 @@ pub enum UiEvent {
     NginxStatus(crate::core::nginx::NginxStatus),
     NginxBusy(Option<&'static str>),
     SysMetrics { cpu: u8, rx: u64, tx: u64 },
+    ShowBackupPicker(Vec<String>),
 }
 
 pub async fn run(
@@ -248,6 +249,9 @@ fn apply_ui_event(s: &mut AppState, ev: UiEvent) {
             s.set_status(format!("{} 的订阅已输出到日志页", name), StatusLevel::Warn);
             s.page = Page::Logs;
         }
+        UiEvent::ShowBackupPicker(files) => {
+            s.modal = Some(Modal::SelectRestore { files, cursor: 0 });
+        }
         UiEvent::Status { msg, level } => s.set_status(msg, level),
         UiEvent::KernelStatus(k) => {
             s.singbox_running = k.running;
@@ -353,6 +357,10 @@ fn handle_modal_key(
             s.modal = None;
             spawn_revoke_token(pool, ui_tx, name);
         }
+        ModalAction::RestoreBackup(file) => {
+            s.modal = None;
+            spawn_restore_backup(ui_tx, file);
+        }
     }
     false
 }
@@ -446,16 +454,16 @@ fn handle_page_key(
                 }));
             }
         },
-        KeyCode::Char('t') => if let Some(name) = s.selected_user().map(|u| u.name.clone()) {
+        KeyCode::Char('t') if s.page == Page::Users => if let Some(name) = s.selected_user().map(|u| u.name.clone()) {
             spawn_toggle(pool, cfg, ui_tx, name);
         },
-        KeyCode::Char('r') => if let Some(name) = s.selected_user().map(|u| u.name.clone()) {
+        KeyCode::Char('r') if s.page == Page::Users => if let Some(name) = s.selected_user().map(|u| u.name.clone()) {
             spawn_reset(pool, cfg, ui_tx, name);
         },
-        KeyCode::Char('s') => if let Some(name) = s.selected_user().map(|u| u.name.clone()) {
+        KeyCode::Char('s') if s.page == Page::Users => if let Some(name) = s.selected_user().map(|u| u.name.clone()) {
             spawn_export(cfg, ui_tx, name);
         },
-        KeyCode::Char('u') => if let Some(u) = s.selected_user() {
+        KeyCode::Char('u') if s.page == Page::Users => if let Some(u) = s.selected_user() {
             if u.sub_token.is_empty() {
                 s.set_status(format!("{} 无订阅 token", u.name), StatusLevel::Warn);
             } else if let Some(base) = s.sub_public_base.clone() {
@@ -485,6 +493,12 @@ fn handle_page_key(
         KeyCode::Char('U') if s.page == Page::Dashboard => {
             s.pending_cmd = Some(ExternalCmd::SelfUpdate);
         }
+        KeyCode::Char('b') if s.page == Page::Dashboard => {
+            spawn_create_backup(ui_tx);
+        }
+        KeyCode::Char('r') if s.page == Page::Dashboard => {
+            spawn_list_backups(ui_tx);
+        }
         KeyCode::Char('C') if s.page == Page::Nodes => {
             s.pending_cmd = Some(ExternalCmd::EditSingboxConfig);
         }
@@ -509,7 +523,7 @@ fn handle_kernel_key(s: &mut AppState, k: KeyEvent, ui_tx: mpsc::Sender<UiEvent>
         _ if s.kernel_busy.is_some() => {
             s.set_status("正在执行上一操作，请稍候", StatusLevel::Warn);
         }
-        KeyCode::Char('i') => spawn_kernel_op(ui_tx, "安装官方版 sing-box", crate::core::singbox::install_latest),
+        KeyCode::Char('i') => spawn_kernel_install_latest(ui_tx),
         KeyCode::Char('v') => spawn_kernel_install_v2rayapi(ui_tx, cfg.kernel.update_repo.clone()),
         KeyCode::Char('u') => spawn_kernel_op(ui_tx, "卸载 sing-box",       crate::core::singbox::uninstall),
         KeyCode::Char('s') => spawn_kernel_op(ui_tx, "启动 sing-box",       crate::core::singbox::start),
@@ -684,6 +698,24 @@ where F: FnOnce() -> anyhow::Result<()> + Send + 'static {
             }
         }
         // systemctl 返回后进程可能还没被 pgrep 看到，延迟 + 轮询
+        refresh_kernel_status_stable(&tx).await;
+    });
+}
+
+fn spawn_kernel_install_latest(tx: mpsc::Sender<UiEvent>) {
+    tokio::spawn(async move {
+        let label = "安装官方版 sing-box";
+        let _ = tx.send(UiEvent::KernelBusy(Some(label))).await;
+        let result = crate::core::singbox::install_latest().await;
+        let _ = tx.send(UiEvent::KernelBusy(None)).await;
+        match result {
+            Ok(()) => {
+                let _ = tx.send(UiEvent::Status { msg: format!("{} 成功（已自动 enable + restart）", label), level: StatusLevel::Warn }).await;
+            }
+            Err(e) => {
+                let _ = tx.send(UiEvent::Status { msg: format!("{} 失败: {}", label, e), level: StatusLevel::Error }).await;
+            }
+        }
         refresh_kernel_status_stable(&tx).await;
     });
 }
@@ -1063,5 +1095,48 @@ fn spawn_delete_node(
             None    => (format!("已删除节点 {}", tag), StatusLevel::Warn),
         };
         let _ = tx.send(UiEvent::Status { msg, level }).await;
+    });
+}
+
+fn spawn_create_backup(tx: mpsc::Sender<UiEvent>) {
+    tokio::spawn(async move {
+        match crate::core::backup::create_backup() {
+            Ok(file) => {
+                let _ = tx.send(UiEvent::Status { msg: format!("备份已创建: {}", file), level: StatusLevel::Warn }).await;
+            }
+            Err(e) => {
+                let _ = tx.send(UiEvent::Status { msg: format!("备份失败: {}", e), level: StatusLevel::Error }).await;
+            }
+        }
+    });
+}
+
+fn spawn_list_backups(tx: mpsc::Sender<UiEvent>) {
+    tokio::spawn(async move {
+        match crate::core::backup::list_backups() {
+            Ok(files) => {
+                if files.is_empty() {
+                    let _ = tx.send(UiEvent::Status { msg: "没有找到备份文件".into(), level: StatusLevel::Warn }).await;
+                } else {
+                    let _ = tx.send(UiEvent::ShowBackupPicker(files)).await;
+                }
+            }
+            Err(e) => {
+                let _ = tx.send(UiEvent::Status { msg: format!("获取备份列表失败: {}", e), level: StatusLevel::Error }).await;
+            }
+        }
+    });
+}
+
+fn spawn_restore_backup(tx: mpsc::Sender<UiEvent>, file: String) {
+    tokio::spawn(async move {
+        match crate::core::backup::restore_backup(&file) {
+            Ok(()) => {
+                let _ = tx.send(UiEvent::Status { msg: format!("已成功恢复备份: {}，若有路径更改建议重启服务", file), level: StatusLevel::Warn }).await;
+            }
+            Err(e) => {
+                let _ = tx.send(UiEvent::Status { msg: format!("恢复备份失败: {}", e), level: StatusLevel::Error }).await;
+            }
+        }
     });
 }

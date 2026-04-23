@@ -6,11 +6,11 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/etc/sing-box-manager
+WorkingDirectory=/etc/sing-box/manager
 Environment=RUST_LOG=info
-ExecStartPre=/usr/bin/test -f /etc/sing-box-manager/config.toml
-ExecStartPre=/usr/bin/test -x /usr/local/bin/sb
-ExecStart=/usr/local/bin/sb --config /etc/sing-box-manager/config.toml daemon
+ExecStartPre=/usr/bin/test -f /etc/sing-box/manager/config.toml
+ExecStartPre=/usr/bin/test -x /etc/sing-box/bin/sb
+ExecStart=/etc/sing-box/bin/sb --config /etc/sing-box/manager/config.toml daemon
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -28,7 +28,7 @@ RestrictSUIDSGID=true
 RestrictRealtime=true
 LockPersonality=true
 # 必须存在的可写路径
-ReadWritePaths=/var/lib/sing-box-manager /etc/sing-box-manager
+ReadWritePaths=/etc/sing-box
 # 可能不存在的可写路径（nginx/sing-box 尚未装时）— 前缀 "-" 表示不存在就跳过
 ReadWritePaths=-/etc/sing-box -/etc/nginx/conf.d -/etc/nginx/certs -/etc/systemd/system
 

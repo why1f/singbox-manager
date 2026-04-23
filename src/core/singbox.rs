@@ -52,9 +52,8 @@ pub fn status() -> KernelStatus {
 }
 
 fn locate_binary() -> Option<String> {
-    for p in ["/usr/local/bin/sing-box", "/usr/bin/sing-box"] {
-        if std::path::Path::new(p).exists() { return Some(p.into()); }
-    }
+    let p = "/etc/sing-box/bin/sing-box";
+    if std::path::Path::new(p).exists() { return Some(p.into()); }
     Command::new("sh").args(["-c", "command -v sing-box"]).output().ok()
         .and_then(|o| if o.status.success() {
             let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
@@ -86,41 +85,84 @@ pub fn start()   -> Result<()> { systemctl("start") }
 pub fn stop()    -> Result<()> { systemctl("stop") }
 pub fn restart() -> Result<()> { systemctl("restart") }
 
-/// 调用官方脚本安装最新 sing-box（优先 deb 源，失败回落通用脚本）。
-pub fn install_latest() -> Result<()> {
-    if Command::new("curl").arg("--version").output().map(|o| !o.status.success()).unwrap_or(true) {
-        return Err(anyhow!("未检测到 curl，请先安装"));
-    }
-    let script = r#"set -e
-bash -c "$(curl -fsSL https://sing-box.app/deb-install.sh)" \
-  || bash -c "$(curl -fsSL https://sing-box.app/install.sh)"
-"#;
-    let status = Command::new("bash").arg("-c").arg(script).status()?;
-    if !status.success() { return Err(anyhow!("sing-box 官方安装脚本执行失败")); }
+/// 从 Github 获取官方版 sing-box 二进制并安装到 /etc/sing-box/bin
+pub async fn install_latest() -> Result<()> {
+    let arch = match std::env::consts::ARCH {
+        "x86_64"  => "linux-amd64",
+        "aarch64" => "linux-arm64",
+        other     => return Err(anyhow::anyhow!("暂不支持的架构: {}", other)),
+    };
+
+    let client = reqwest::Client::builder()
+        .user_agent("sb-manager")
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+
+    let url = "https://api.github.com/repos/SagerNet/sing-box/releases/latest";
+    let body = client.get(url).send().await?
+        .error_for_status()?.text().await?;
+    let release: serde_json::Value = serde_json::from_str(&body)?;
+    
+    let tag = release["tag_name"].as_str().ok_or_else(|| anyhow::anyhow!("无法获取最新 tag"))?;
+    let version = tag.trim_start_matches('v');
+    let asset = format!("sing-box-{}-{}.tar.gz", version, arch);
+    let download_url = format!("https://github.com/SagerNet/sing-box/releases/download/{}/{}", tag, asset);
+
+    let tmp_dir = std::env::temp_dir().join(format!("sbm-singbox-{}", version));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir)?;
+
+    let tarball = tmp_dir.join(&asset);
+    let bytes = client.get(&download_url).send().await?
+        .error_for_status()?.bytes().await?;
+    std::fs::write(&tarball, &bytes)?;
+
+    let status = Command::new("tar")
+        .args(["xzf"])
+        .arg(&tarball)
+        .arg("-C").arg(&tmp_dir)
+        .status()?;
+    if !status.success() { return Err(anyhow::anyhow!("解压 tarball 失败")); }
+
+    let inner = tmp_dir.join(format!("sing-box-{}-{}", version, arch));
+    let src_bin = inner.join("sing-box");
+    if !src_bin.exists() { return Err(anyhow::anyhow!("tarball 内未找到 sing-box 二进制")); }
+
+    let _ = Command::new("systemctl").args(["stop", "sing-box"]).status();
+    std::fs::create_dir_all("/etc/sing-box/bin")?;
+    let dst = std::path::Path::new("/etc/sing-box/bin/sing-box");
+    std::fs::copy(&src_bin, dst)?;
+    set_executable(dst)?;
+
+    let unit_path = std::path::Path::new("/etc/systemd/system/sing-box.service");
+    std::fs::create_dir_all("/etc/systemd/system")?;
+    std::fs::write(unit_path, SINGBOX_UNIT)?;
+    let _ = Command::new("systemctl").arg("daemon-reload").status();
+    
+    let cfg_dir = std::path::Path::new("/etc/sing-box");
+    let cfg_file = cfg_dir.join("config.json");
+    if !cfg_file.exists() { std::fs::write(&cfg_file, DEFAULT_CONFIG_WITH_V2RAY_API)?; }
+
+    let _ = Command::new("systemctl").args(["enable", "--now", "sing-box"]).status();
+    
+    let _ = std::fs::remove_dir_all(&tmp_dir);
     Ok(())
 }
 
 /// 卸载：停服务、禁用、删二进制 / unit 文件、daemon-reload。
-/// 不删除 /etc/sing-box 与 /var/lib/sing-box（保留配置与状态）。
 pub fn uninstall() -> Result<()> {
     let _ = Command::new("systemctl").args(["stop", "sing-box"]).status();
     let _ = Command::new("systemctl").args(["disable", "sing-box"]).status();
     for p in [
+        "/etc/sing-box/bin/sing-box",
         "/usr/local/bin/sing-box",
-        "/usr/bin/sing-box",
         "/etc/systemd/system/sing-box.service",
-        "/lib/systemd/system/sing-box.service",
-        "/usr/lib/systemd/system/sing-box.service",
-        "/etc/apt/sources.list.d/sagernet.list",
-        "/etc/apt/keyrings/sagernet.gpg",
     ] { let _ = std::fs::remove_file(p); }
     let _ = Command::new("systemctl").arg("daemon-reload").status();
-    // 若是 apt 装的也尝试一下
-    let _ = Command::new("apt-get").args(["purge", "-y", "sing-box"]).status();
     Ok(())
 }
 
-/// 内嵌的 systemd 单元模板（与上游 sing-box release/config/sing-box.service 等价）
+/// 内嵌的 systemd 单元模板
 const SINGBOX_UNIT: &str = r#"[Unit]
 Description=sing-box service
 Documentation=https://sing-box.sagernet.org
@@ -129,7 +171,7 @@ After=network.target nss-lookup.target network-online.target
 [Service]
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
-ExecStart=/usr/local/bin/sing-box -D /var/lib/sing-box -C /etc/sing-box run
+ExecStart=/etc/sing-box/bin/sing-box -D /var/lib/sing-box -C /etc/sing-box run
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=10s
@@ -202,20 +244,14 @@ pub async fn install_v2rayapi(repo: &str) -> Result<()> {
 
     // 停服务 → 替换 → 启服务
     let _ = Command::new("systemctl").args(["stop", "sing-box"]).status();
-    std::fs::create_dir_all("/usr/local/bin")?;
-    let dst = std::path::Path::new("/usr/local/bin/sing-box");
+    std::fs::create_dir_all("/etc/sing-box/bin")?;
+    let dst = std::path::Path::new("/etc/sing-box/bin/sing-box");
     std::fs::copy(&src_bin, dst)?;
     set_executable(dst)?;
 
-    // 若 /usr/bin/sing-box 存在且不指向目标，留原样（避免 PATH 冲突由用户解决）；
-    // 若无 unit 则写一个
     let unit_path = std::path::Path::new("/etc/systemd/system/sing-box.service");
-    let lib_unit  = std::path::Path::new("/lib/systemd/system/sing-box.service");
-    let usr_unit  = std::path::Path::new("/usr/lib/systemd/system/sing-box.service");
-    if !unit_path.exists() && !lib_unit.exists() && !usr_unit.exists() {
-        std::fs::create_dir_all("/etc/systemd/system")?;
-        std::fs::write(unit_path, SINGBOX_UNIT)?;
-    }
+    std::fs::create_dir_all("/etc/systemd/system")?;
+    std::fs::write(unit_path, SINGBOX_UNIT)?;
     let _ = Command::new("systemctl").arg("daemon-reload").status();
 
     // 确保 /etc/sing-box/config.json 存在（用最小骨架）

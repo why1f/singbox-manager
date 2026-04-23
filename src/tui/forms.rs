@@ -99,6 +99,7 @@ pub enum Modal {
     NodePicker(NodePicker),
     SubUrl { name: String, singbox: String, mihomo: String },
     TokenManage { name: String, has_token: bool },
+    SelectRestore { files: Vec<String>, cursor: usize },
 }
 
 #[derive(Default)]
@@ -144,6 +145,7 @@ pub enum ModalAction {
     SaveNodePicker { user: String, all: bool, tags: Vec<String> },
     RegenToken(String),
     RevokeToken(String),
+    RestoreBackup(String),
 }
 
 impl Modal {
@@ -172,6 +174,24 @@ impl Modal {
             Modal::TokenManage { name, has_token } => match k.code {
                 KeyCode::Char('g') | KeyCode::Char('G') => ModalAction::RegenToken(name.clone()),
                 KeyCode::Char('v') | KeyCode::Char('V') if *has_token => ModalAction::RevokeToken(name.clone()),
+                _ => ModalAction::None,
+            },
+            Modal::SelectRestore { files, cursor } => match k.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    *cursor = if *cursor == 0 { files.len().saturating_sub(1) } else { *cursor - 1 };
+                    ModalAction::None
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if !files.is_empty() { *cursor = (*cursor + 1) % files.len(); }
+                    ModalAction::None
+                }
+                KeyCode::Enter => {
+                    if let Some(f) = files.get(*cursor) {
+                        ModalAction::RestoreBackup(f.clone())
+                    } else {
+                        ModalAction::None
+                    }
+                }
                 _ => ModalAction::None,
             },
         }
@@ -437,6 +457,9 @@ pub fn render(f: &mut Frame, area: Rect, modal: &Modal) {
         }
         Modal::TokenManage { name, has_token } => {
             render_token_manage(f, centered(area, 62, 10), name, *has_token);
+        }
+        Modal::SelectRestore { files, cursor } => {
+            render_select_restore(f, centered(area, 62, 16), files, *cursor);
         }
     }
 }
@@ -749,4 +772,27 @@ fn render_picker(f: &mut Frame, area: Rect, p: &NodePicker) {
         Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" 分配可用节点 ")),
         area,
     );
+}
+
+fn render_select_restore(f: &mut Frame, area: Rect, files: &[String], cursor: usize) {
+    let mut lines = Vec::new();
+    lines.push(Line::from(Span::styled("  选择要恢复的备份", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
+    lines.push(Line::from(""));
+    
+    if files.is_empty() {
+        lines.push(Line::from(Span::styled("  没有找到任何备份", Style::default().fg(Color::DarkGray))));
+    } else {
+        for (i, file) in files.iter().enumerate() {
+            let style = if i == cursor { Style::default().fg(Color::Black).bg(Color::Cyan) } else { Style::default().fg(Color::White) };
+            lines.push(Line::from(vec![
+                Span::raw(if i == cursor { " > " } else { "   " }),
+                Span::styled(format!("{:<40}", file), style),
+            ]));
+        }
+    }
+    
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled("  ↑↓ 选择   Enter 确认恢复   Esc 取消", Style::default().fg(Color::DarkGray))));
+    
+    f.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" 恢复备份 ")), area);
 }

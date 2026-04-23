@@ -44,6 +44,10 @@ fn render_status(f: &mut Frame, area: Rect, s: &AppState) {
             Span::raw(format!("   运行:{}s", s.uptime_secs)),
             Span::raw("   "),
             Span::styled("[U] 升级", Style::default().fg(Color::Cyan)),
+            Span::raw("   "),
+            Span::styled("[b] 备份", Style::default().fg(Color::LightBlue)),
+            Span::raw("   "),
+            Span::styled("[r] 恢复", Style::default().fg(Color::LightMagenta)),
         ]))
         .block(Block::default().borders(Borders::ALL).title(" sing-box 状态 ")),
         area,

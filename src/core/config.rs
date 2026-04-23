@@ -8,8 +8,8 @@ use std::process::Command;
 
 use crate::model::{node::{AddNodeRequest, Protocol}, user::User};
 
-const META_FILE: &str = "/etc/sing-box-manager/nodes.meta.json";
-pub const CERTS_DIR: &str = "/etc/sing-box-manager/certs";
+const META_FILE: &str = "/etc/sing-box/manager/nodes.meta.json";
+pub const CERTS_DIR: &str = "/etc/sing-box/certs";
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct NodesMeta {

@@ -66,10 +66,10 @@ impl Default for AppConfig {
         Self {
             singbox: SingboxConfig {
                 config_path: "/etc/sing-box/config.json".into(),
-                binary_path: "/usr/local/bin/sing-box".into(),
+                binary_path: "/etc/sing-box/bin/sing-box".into(),
                 grpc_addr:   "127.0.0.1:18080".into(),
             },
-            db:           DbConfig { path: "/var/lib/sing-box-manager/manager.db".into() },
+            db:           DbConfig { path: "/etc/sing-box/manager/manager.db".into() },
             stats:        StatsConfig { sync_interval_secs: 30, quota_alert_percent: 80 },
             kernel:       KernelConfig::default(),
             subscription: SubscriptionConfig::default(),

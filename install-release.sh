@@ -12,10 +12,10 @@ set -euo pipefail
 REPO="${REPO:-why1f/singbox-manager}"
 VERSION="${VERSION:-latest}"
 PREFIX="/usr/local"
-BIN_PATH="$PREFIX/bin/sb"
-CONFIG_DIR="/etc/sing-box-manager"
+BIN_PATH="/etc/sing-box/bin/sb"
+CONFIG_DIR="/etc/sing-box/manager"
 CONFIG_PATH="$CONFIG_DIR/config.toml"
-DATA_DIR="/var/lib/sing-box-manager"
+DATA_DIR="/etc/sing-box/manager"
 SERVICE_PATH="/etc/systemd/system/sb-manager.service"
 
 fail() { printf '错误: %s\n' "$1" >&2; exit 1; }
@@ -75,10 +75,13 @@ SRC_DIR="$TMP/sb-${VERSION}-${TARGET}"
 [ -x "$SRC_DIR/sb" ] || fail "包内未找到可执行 sb"
 
 # —— 真正把文件放到最终位置 ——
-install -d "$CONFIG_DIR" "$DATA_DIR" "$PREFIX/bin"
+install -d "$CONFIG_DIR" "$DATA_DIR" "/etc/sing-box/bin" "/etc/sing-box/certs" "/etc/sing-box/backup"
 install -m 0755 "$SRC_DIR/sb" "$BIN_PATH"
 [ -f "$CONFIG_PATH" ] || install -m 0644 "$SRC_DIR/config.toml" "$CONFIG_PATH"
 install -m 0644 "$SRC_DIR/sb-manager.service" "$SERVICE_PATH"
+
+# 修改 service 里的二进制路径
+sed -i "s|/usr/local/bin/sb|/etc/sing-box/bin/sb|g" "$SERVICE_PATH"
 
 # 探测 sing-box（不强制安装；缺失时进 TUI 内核页安装）
 SB_BIN=""
@@ -87,7 +90,7 @@ elif command -v sing-box >/dev/null 2>&1; then SB_BIN="$(command -v sing-box)"
 fi
 
 SB_CONFIG=""
-for c in /etc/sing-box/config.json /usr/local/etc/sing-box/config.json; do
+for c in /etc/sing-box/config.json; do
   [ -f "$c" ] && { SB_CONFIG="$c"; break; }
 done
 
@@ -119,7 +122,7 @@ done
 
 systemctl daemon-reload
 systemctl enable sb-manager.service
-ln -sf "$BIN_PATH" /usr/bin/sb 2>/dev/null || true
+ln -sf "$BIN_PATH" /usr/local/bin/sb 2>/dev/null || true
 hash -r 2>/dev/null || true
 
 # 升级场景：如果服务已经在跑，新二进制需要重启；初次安装也启动起来

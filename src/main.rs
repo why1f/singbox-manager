@@ -73,7 +73,7 @@ fn init_tracing() {
 fn resolve_config_path(arg: Option<&str>) -> PathBuf {
     if let Some(p) = arg { return PathBuf::from(p); }
     if let Ok(p) = std::env::var("SB_MANAGER_CONFIG") { return PathBuf::from(p); }
-    let etc = PathBuf::from("/etc/sing-box-manager/config.toml");
+    let etc = PathBuf::from("/etc/sing-box/manager/config.toml");
     if etc.exists() { return etc; }
     PathBuf::from("config.toml")
 }
@@ -474,7 +474,7 @@ async fn run_kernel(cmd: cli::kernel::KernelCommands, cfg: &AppConfig) -> Result
             });
             println!("自启:   {}", if s.enabled {"已启用"} else {"未启用"});
         }
-        K::Install          => { core::singbox::install_latest()?; println!("✓ 官方版 sing-box 已安装"); }
+        K::Install          => { core::singbox::install_latest().await?; println!("✓ 官方版 sing-box 已安装"); }
         K::InstallV2rayApi  => {
             core::singbox::install_v2rayapi(&cfg.kernel.update_repo).await?;
             println!("✓ v2ray_api 版 sing-box 已安装");
