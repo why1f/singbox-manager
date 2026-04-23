@@ -7,6 +7,7 @@ use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
 const SCHEMA_V1: &str = include_str!("migrations/001_init.sql");
 const SCHEMA_V2: &str = include_str!("migrations/002_allowed_nodes.sql");
 const SCHEMA_V3: &str = include_str!("migrations/003_sub_token.sql");
+const SCHEMA_V4: &str = include_str!("migrations/004_traffic_multiplier.sql");
 
 pub async fn init_pool(db_path: &str) -> Result<SqlitePool> {
     let url = format!("sqlite://{}?mode=rwc", db_path);
@@ -51,6 +52,15 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
             }
         }
         sqlx::query("PRAGMA user_version = 3").execute(pool).await?;
+    }
+    if version < 4 {
+        for stmt in split_sql(SCHEMA_V4) {
+            if let Err(e) = sqlx::query(&stmt).execute(pool).await {
+                let msg = e.to_string();
+                if !msg.contains("duplicate column") { return Err(e.into()); }
+            }
+        }
+        sqlx::query("PRAGMA user_version = 4").execute(pool).await?;
     }
     Ok(())
 }

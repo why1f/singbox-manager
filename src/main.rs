@@ -31,14 +31,14 @@ async fn main() -> Result<()> {
 
     match cli.command.unwrap_or(Commands::Tui) {
         Commands::Users          => run_user(cli::user::UserCommands::List, &pool, &cfg).await,
-        Commands::Add(a)         => run_user(cli::user::UserCommands::Add { name: a.name, quota: a.quota, reset_day: a.reset_day, expire: a.expire }, &pool, &cfg).await,
+        Commands::Add(a)         => run_user(cli::user::UserCommands::Add { name: a.name, quota: a.quota, reset_day: a.reset_day, expire: a.expire, multiplier: a.multiplier }, &pool, &cfg).await,
         Commands::Del { name }   => run_user(cli::user::UserCommands::Del { name }, &pool, &cfg).await,
         Commands::On { name }    => set_user_enabled(&pool, &name, true, &cfg).await,
         Commands::Off { name }   => set_user_enabled(&pool, &name, false, &cfg).await,
         Commands::Reset { name } => run_user(cli::user::UserCommands::Reset { name }, &pool, &cfg).await,
         Commands::Info { name }  => run_user(cli::user::UserCommands::Info { name }, &pool, &cfg).await,
         Commands::Sub { name }   => run_user(cli::user::UserCommands::Sub { name }, &pool, &cfg).await,
-        Commands::Pkg(a)         => run_user(cli::user::UserCommands::Package { name: a.name, quota: a.quota, reset_day: a.reset_day, expire: a.expire }, &pool, &cfg).await,
+        Commands::Pkg(a)         => run_user(cli::user::UserCommands::Package { name: a.name, quota: a.quota, reset_day: a.reset_day, expire: a.expire, multiplier: a.multiplier }, &pool, &cfg).await,
         Commands::Grant { name, tag }    => run_user(cli::user::UserCommands::Grant { name, tag }, &pool, &cfg).await,
         Commands::Revoke { name, tag }   => run_user(cli::user::UserCommands::Revoke { name, tag }, &pool, &cfg).await,
         Commands::GrantAll { name }      => run_user(cli::user::UserCommands::GrantAll { name }, &pool, &cfg).await,
@@ -260,14 +260,16 @@ async fn run_user(cmd: cli::user::UserCommands, pool: &sqlx::SqlitePool, cfg: &A
         UserCommands::Info { name } => {
             let u = db::user_repo::get(pool, &name).await?
                 .ok_or_else(|| anyhow::anyhow!("用户不存在: {}", name))?;
-            println!("用户名: {}\n状态:   {}\n上行:   {}\n下行:   {}\n总量:   {}\n配额:   {}\n已用%:  {:.1}%\n到期:   {}",
+            println!("用户名: {}\n状态:   {}\n上行:   {}\n下行:   {}\n总量:   {}\n配额:   {}\n已用%:  {:.1}%\n重置:   {}\n到期:   {}\n倍率:   {:.1}x",
                 u.name, if u.enabled {"启用"} else {"禁用"},
                 User::format_bytes(u.used_up_bytes),
                 User::format_bytes(u.used_down_bytes),
                 User::format_bytes(u.used_total_bytes()),
                 if u.quota_gb <= 0.0 {"不限".into()} else {format!("{} GB", u.quota_gb)},
                 u.quota_used_percent(),
-                if u.expire_at.is_empty() {"永久"} else {&u.expire_at});
+                if u.reset_day == 0 {"─".into()} else if u.reset_day == 32 {"月末".into()} else {format!("{}日", u.reset_day)},
+                if u.expire_at.is_empty() {"永久"} else {&u.expire_at},
+                u.traffic_multiplier);
             if u.allow_all_nodes {
                 println!("节点:   全部");
             } else {
@@ -277,8 +279,8 @@ async fn run_user(cmd: cli::user::UserCommands, pool: &sqlx::SqlitePool, cfg: &A
             }
             print_sub_url(&u, &cfg.subscription.public_base);
         }
-        UserCommands::Add { name, quota, reset_day, expire } => {
-            let u = user_service::add_user(pool, &name, quota, reset_day, &expire).await?;
+        UserCommands::Add { name, quota, reset_day, expire, multiplier } => {
+            let u = user_service::add_user(pool, &name, quota, reset_day, &expire, multiplier).await?;
             apply_runtime_changes(pool, cfg).await?;
             println!("✓ 用户 '{}' 已添加", name);
             print_sub_url(&u, &cfg.subscription.public_base);
@@ -298,8 +300,8 @@ async fn run_user(cmd: cli::user::UserCommands, pool: &sqlx::SqlitePool, cfg: &A
             apply_runtime_changes(pool, cfg).await?;
             println!("✓ '{}' 流量已重置", name);
         }
-        UserCommands::Package { name, quota, reset_day, expire } => {
-            user_service::update_package(pool, &name, quota, reset_day, expire.as_deref()).await?;
+        UserCommands::Package { name, quota, reset_day, expire, multiplier } => {
+            user_service::update_package(pool, &name, quota, reset_day, expire.as_deref(), multiplier).await?;
             apply_runtime_changes(pool, cfg).await?;
             println!("✓ '{}' 套餐已更新", name);
         }

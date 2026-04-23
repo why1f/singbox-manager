@@ -19,7 +19,7 @@ pub fn new_sub_token() -> String {
 }
 
 pub async fn add_user(pool: &SqlitePool, name: &str, quota_gb: f64,
-    reset_day: i64, expire_at: &str) -> Result<User> {
+    reset_day: i64, expire_at: &str, traffic_multiplier: f64) -> Result<User> {
     validate_username(name)?;
     if user_repo::get(pool, name).await?.is_some() {
         return Err(anyhow!("用户 '{}' 已存在", name));
@@ -37,6 +37,7 @@ pub async fn add_user(pool: &SqlitePool, name: &str, quota_gb: f64,
         created_at: Local::now().format("%Y-%m-%d").to_string(),
         allowed_nodes: "[]".into(),
         sub_token: new_sub_token(),
+        traffic_multiplier,
     };
     user_repo::insert(pool, &user).await?;
     Ok(user)
@@ -93,9 +94,9 @@ pub async fn reset_traffic(pool: &SqlitePool, name: &str) -> Result<()> {
 }
 
 pub async fn update_package(pool: &SqlitePool, name: &str,
-    quota_gb: Option<f64>, reset_day: Option<i64>, expire_at: Option<&str>) -> Result<()> {
-    if quota_gb.is_none() && reset_day.is_none() && expire_at.is_none() { return Ok(()); }
-    user_repo::update_package(pool, name, quota_gb, reset_day, expire_at).await
+    quota_gb: Option<f64>, reset_day: Option<i64>, expire_at: Option<&str>, traffic_multiplier: Option<f64>) -> Result<()> {
+    if quota_gb.is_none() && reset_day.is_none() && expire_at.is_none() && traffic_multiplier.is_none() { return Ok(()); }
+    user_repo::update_package(pool, name, quota_gb, reset_day, expire_at, traffic_multiplier).await
 }
 
 /// 允许用户访问指定节点 tag。若当前是全开状态，自动切换为按列表授权。

@@ -63,8 +63,18 @@ pub struct UserForm {
     pub quota: String,
     pub reset_day: String,
     pub expire: String,
+    pub multiplier: String,
     pub focus: usize,
     pub error: Option<String>,
+}
+
+impl UserForm {
+    pub fn new() -> Self {
+        Self {
+            multiplier: "2.0".into(),
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Default)]
@@ -97,6 +107,7 @@ pub struct UserEditForm {
     pub quota: String,
     pub reset_day: String,
     pub expire: String,
+    pub multiplier: String,
     pub focus: usize,
     pub error: Option<String>,
 }
@@ -124,8 +135,8 @@ pub struct NodePicker {
 pub enum ModalAction {
     None,
     Close,
-    SubmitUser { name: String, quota: f64, reset_day: i64, expire: String },
-    SubmitUserEdit { name: String, quota: Option<f64>, reset_day: Option<i64>, expire: Option<String> },
+    SubmitUser { name: String, quota: f64, reset_day: i64, expire: String, multiplier: f64 },
+    SubmitUserEdit { name: String, quota: Option<f64>, reset_day: Option<i64>, expire: Option<String>, multiplier: Option<f64> },
     SubmitNode { tag: String, protocol: String, port: u16, server_name: Option<String>, path: Option<String>, port_reuse: bool },
     SubmitNodeEdit { tag: String, port: Option<u16>, server_name: Option<String>, path: Option<String>, port_reuse: Option<bool> },
     DeleteUser(String),
@@ -168,7 +179,7 @@ impl Modal {
 }
 
 fn handle_user_edit(f: &mut UserEditForm, k: KeyEvent) -> ModalAction {
-    const FIELDS: usize = 3;
+    const FIELDS: usize = 4;
     f.error = None;
     match k.code {
         KeyCode::Tab | KeyCode::Down => { f.focus = (f.focus + 1) % FIELDS; ModalAction::None }
@@ -192,7 +203,13 @@ fn handle_user_edit(f: &mut UserEditForm, k: KeyEvent) -> ModalAction {
             let e = if f.expire.trim().is_empty() { None }
                 else if f.expire.trim() == "-" { Some(String::new()) }   // 清为永久
                 else { Some(f.expire.trim().to_string()) };
-            ModalAction::SubmitUserEdit { name: f.name.clone(), quota: q, reset_day: d, expire: e }
+            let m = if f.multiplier.trim().is_empty() { None } else {
+                match f.multiplier.trim().parse::<f64>() {
+                    Ok(v) if v >= 0.0 => Some(v),
+                    _ => { f.error = Some("倍率需为大于等于 0 的数字".into()); return ModalAction::None; }
+                }
+            };
+            ModalAction::SubmitUserEdit { name: f.name.clone(), quota: q, reset_day: d, expire: e, multiplier: m }
         }
         KeyCode::Backspace => { user_edit_field(f).pop(); ModalAction::None }
         KeyCode::Char(c) => { user_edit_field(f).push(c); ModalAction::None }
@@ -201,7 +218,7 @@ fn handle_user_edit(f: &mut UserEditForm, k: KeyEvent) -> ModalAction {
 }
 
 fn user_edit_field(f: &mut UserEditForm) -> &mut String {
-    match f.focus { 0 => &mut f.quota, 1 => &mut f.reset_day, _ => &mut f.expire }
+    match f.focus { 0 => &mut f.quota, 1 => &mut f.reset_day, 2 => &mut f.expire, _ => &mut f.multiplier }
 }
 
 fn handle_node_edit(f: &mut NodeEditForm, k: KeyEvent) -> ModalAction {
@@ -291,7 +308,7 @@ fn handle_picker(p: &mut NodePicker, k: KeyEvent) -> ModalAction {
 }
 
 fn handle_user(f: &mut UserForm, k: KeyEvent) -> ModalAction {
-    const FIELDS: usize = 4;
+    const FIELDS: usize = 5;
     f.error = None;
     match k.code {
         KeyCode::Tab | KeyCode::Down => { f.focus = (f.focus + 1) % FIELDS; ModalAction::None }
@@ -313,7 +330,12 @@ fn handle_user(f: &mut UserForm, k: KeyEvent) -> ModalAction {
                     _ => { f.error = Some("重置日需 0/1-28/32".into()); return ModalAction::None; }
                 }};
             let expire = f.expire.trim().to_string();
-            ModalAction::SubmitUser { name, quota, reset_day, expire }
+            let multiplier: f64 = if f.multiplier.trim().is_empty() { 2.0 }
+                else { match f.multiplier.trim().parse() {
+                    Ok(v) if v >= 0.0 => v,
+                    _ => { f.error = Some("倍率需为大于等于 0 的数字".into()); return ModalAction::None; }
+                }};
+            ModalAction::SubmitUser { name, quota, reset_day, expire, multiplier }
         }
         KeyCode::Backspace => { user_field(f).pop(); ModalAction::None }
         KeyCode::Char(c) => { user_field(f).push(c); ModalAction::None }
@@ -326,7 +348,8 @@ fn user_field(f: &mut UserForm) -> &mut String {
         0 => &mut f.name,
         1 => &mut f.quota,
         2 => &mut f.reset_day,
-        _ => &mut f.expire,
+        3 => &mut f.expire,
+        _ => &mut f.multiplier,
     }
 }
 
@@ -434,8 +457,8 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
 }
 
 fn render_user(f: &mut Frame, area: Rect, form: &UserForm, title: &str) {
-    let labels = ["用户名", "配额 GB (0=不限)", "重置日 (1-28/32/0)", "到期 (YYYY-MM-DD, 例: 2026-12-31)"];
-    let vals = [&form.name, &form.quota, &form.reset_day, &form.expire];
+    let labels = ["用户名", "配额 GB (0=不限)", "重置日 (1-28/32/0)", "到期 (YYYY-MM-DD, 例: 2026-12-31)", "流量倍率 (双倍=2.0, 单倍=1.0)"];
+    let vals = [&form.name, &form.quota, &form.reset_day, &form.expire, &form.multiplier];
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(""));
     for (i, (label, val)) in labels.iter().zip(vals).enumerate() {
@@ -463,8 +486,8 @@ fn render_user(f: &mut Frame, area: Rect, form: &UserForm, title: &str) {
 }
 
 fn render_user_edit(f: &mut Frame, area: Rect, form: &UserEditForm) {
-    let labels = ["配额 GB (留空不改)", "重置日 (留空不改)", "到期 (留空不改, - 清为永久, 例: 2026-12-31)"];
-    let vals = [&form.quota, &form.reset_day, &form.expire];
+    let labels = ["配额 GB (留空不改)", "重置日 (留空不改)", "到期 (留空不改, - 清为永久, 例: 2026-12-31)", "流量倍率 (留空不改, 双倍=2.0)"];
+    let vals = [&form.quota, &form.reset_day, &form.expire, &form.multiplier];
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(
         format!("  用户: {}  （name 不可改，删掉重建）", form.name),

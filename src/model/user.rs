@@ -21,11 +21,13 @@ pub struct User {
     pub allowed_nodes:   String,   // JSON 数组字符串：["tag1","tag2"]
     #[sqlx(default)]
     pub sub_token:       String,   // 32 字节 base64url，订阅 URL 用
+    #[sqlx(default)]
+    pub traffic_multiplier: f64,
 }
 
 impl User {
     pub fn used_total_bytes(&self) -> i64 {
-        self.used_up_bytes + self.used_down_bytes
+        ((self.used_up_bytes + self.used_down_bytes) as f64 * self.traffic_multiplier) as i64
     }
     pub fn quota_bytes(&self) -> i64 { (self.quota_gb * 1_073_741_824.0) as i64 }
     pub fn quota_used_percent(&self) -> f64 {

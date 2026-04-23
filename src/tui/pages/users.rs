@@ -6,7 +6,7 @@ use crate::{tui::app::AppState, model::user::User};
 pub fn render(f: &mut Frame, area: Rect, s: &AppState) {
     let c = Layout::default().direction(Direction::Vertical)
         .constraints([Constraint::Min(0),Constraint::Length(5)]).split(area);
-    let hdr = Row::new(["用户名","状态","上行","下行","用量","配额/进度","重置","到期","节点"]
+    let hdr = Row::new(["用户名","状态","上行","下行","用量","配额/进度","重置","到期","计费","节点"]
         .map(|h| Cell::from(h).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))).height(1);
     let rows: Vec<Row> = s.users.iter().enumerate().map(|(i,u)| {
         let sel = i==s.user_table.selected;
@@ -27,6 +27,9 @@ pub fn render(f: &mut Frame, area: Rect, s: &AppState) {
             let tags = u.allowed_tags();
             if tags.is_empty() { "─".into() } else { format!("{}个", tags.len()) }
         };
+        let billing = if (u.traffic_multiplier - 2.0).abs() < 0.01 { "双向".to_string() }
+            else if (u.traffic_multiplier - 1.0).abs() < 0.01 { "单向".to_string() }
+            else { format!("{:.1}x", u.traffic_multiplier) };
         Row::new(vec![
             Cell::from(u.name.clone()),
             Cell::from(if u.enabled{"● 启用"}else{"○ 禁用"}).style(Style::default().fg(sc)),
@@ -35,13 +38,14 @@ pub fn render(f: &mut Frame, area: Rect, s: &AppState) {
             Cell::from(User::format_bytes(u.used_total_bytes())),
             Cell::from(quota_str).style(Style::default().fg(sc)),
             Cell::from(reset),Cell::from(exp),
+            Cell::from(billing),
             Cell::from(nodes_cell),
         ]).style(bs)
     }).collect();
     f.render_widget(Table::new(rows,[
         Constraint::Length(14),Constraint::Length(8),Constraint::Length(10),Constraint::Length(10),
         Constraint::Length(10),Constraint::Length(24),Constraint::Length(8),Constraint::Length(12),
-        Constraint::Length(8),
+        Constraint::Length(8),Constraint::Length(8),
     ]).header(hdr).block(Block::default().borders(Borders::ALL).title(" 用户列表 ")), c[0]);
 
     let sel_text = s.users.get(s.user_table.selected)

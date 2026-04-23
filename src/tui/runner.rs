@@ -317,13 +317,13 @@ fn handle_modal_key(
     match modal.handle(k) {
         ModalAction::None => {}
         ModalAction::Close => s.modal = None,
-        ModalAction::SubmitUser { name, quota, reset_day, expire } => {
+        ModalAction::SubmitUser { name, quota, reset_day, expire, multiplier } => {
             s.modal = None;
-            spawn_add_user(pool, cfg, ui_tx, name, quota, reset_day, expire);
+            spawn_add_user(pool, cfg, ui_tx, name, quota, reset_day, expire, multiplier);
         }
-        ModalAction::SubmitUserEdit { name, quota, reset_day, expire } => {
+        ModalAction::SubmitUserEdit { name, quota, reset_day, expire, multiplier } => {
             s.modal = None;
-            spawn_edit_user(pool, cfg, ui_tx, name, quota, reset_day, expire);
+            spawn_edit_user(pool, cfg, ui_tx, name, quota, reset_day, expire, multiplier);
         }
         ModalAction::SubmitNode { tag, protocol, port, server_name, path, port_reuse } => {
             s.modal = None;
@@ -393,7 +393,7 @@ fn handle_page_key(
             _ => {}
         },
         KeyCode::Char('a') => match s.page {
-            Page::Users => s.modal = Some(Modal::AddUser(UserForm::default())),
+            Page::Users => s.modal = Some(Modal::AddUser(UserForm::new())),
             Page::Nodes => s.modal = Some(Modal::AddNode(NodeForm {
                 port: "443".into(),
                 ..NodeForm::default()
@@ -747,11 +747,11 @@ fn spawn_save_nodes(
 
 fn spawn_edit_user(
     pool: Arc<sqlx::SqlitePool>, cfg: Arc<AppConfig>, tx: mpsc::Sender<UiEvent>,
-    name: String, quota: Option<f64>, reset_day: Option<i64>, expire: Option<String>,
+    name: String, quota: Option<f64>, reset_day: Option<i64>, expire: Option<String>, multiplier: Option<f64>,
 ) {
     tokio::spawn(async move {
         if let Err(e) = crate::service::user_service::update_package(
-            &pool, &name, quota, reset_day, expire.as_deref()
+            &pool, &name, quota, reset_day, expire.as_deref(), multiplier
         ).await {
             let _ = tx.send(UiEvent::Status { msg: format!("更新失败: {}", e), level: StatusLevel::Error }).await;
             return;
@@ -928,10 +928,10 @@ fn spawn_check(cfg: Arc<AppConfig>, tx: mpsc::Sender<UiEvent>) {
 
 fn spawn_add_user(
     pool: Arc<sqlx::SqlitePool>, cfg: Arc<AppConfig>, tx: mpsc::Sender<UiEvent>,
-    name: String, quota: f64, reset_day: i64, expire: String,
+    name: String, quota: f64, reset_day: i64, expire: String, multiplier: f64,
 ) {
     tokio::spawn(async move {
-        match crate::service::user_service::add_user(&pool, &name, quota, reset_day, &expire).await {
+        match crate::service::user_service::add_user(&pool, &name, quota, reset_day, &expire, multiplier).await {
             Ok(_) => {
                 if let Err(e) = crate::apply_runtime_changes(&pool, &cfg).await {
                     let _ = tx.send(UiEvent::Status { msg: format!("配置同步失败: {}", e), level: StatusLevel::Error }).await;
