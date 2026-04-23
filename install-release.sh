@@ -83,16 +83,23 @@ install -m 0644 "$SRC_DIR/sb-manager.service" "$SERVICE_PATH"
 # 修改 service 里的二进制路径
 sed -i "s|/usr/local/bin/sb|/etc/sing-box/bin/sb|g" "$SERVICE_PATH"
 
-# 探测 sing-box（不强制安装；缺失时进 TUI 内核页安装）
-SB_BIN=""
-if [ -x /usr/local/bin/sing-box ]; then SB_BIN=/usr/local/bin/sing-box
-elif command -v sing-box >/dev/null 2>&1; then SB_BIN="$(command -v sing-box)"
+# 探测 sing-box
+SB_BIN="/etc/sing-box/bin/sing-box"
+if [ ! -x "$SB_BIN" ] && [ -x /usr/local/bin/sing-box ]; then
+  SB_BIN=/usr/local/bin/sing-box
+elif [ ! -x "$SB_BIN" ] && command -v sing-box >/dev/null 2>&1; then
+  SB_BIN="$(command -v sing-box)"
 fi
 
 SB_CONFIG=""
 for c in /etc/sing-box/config.json; do
   [ -f "$c" ] && { SB_CONFIG="$c"; break; }
 done
+
+# 强制将现有 config.toml 的 binary_path 指向 /etc/sing-box/bin/sing-box（如果是 v0.4.0 之前的默认路径）
+if [ -f "$CONFIG_PATH" ]; then
+  sed -i 's|binary_path = "/usr/local/bin/sing-box"|binary_path = "/etc/sing-box/bin/sing-box"|g' "$CONFIG_PATH"
+fi
 
 # 写入 config.toml
 if [ -n "$SB_BIN" ] && [ -n "$SB_CONFIG" ]; then
