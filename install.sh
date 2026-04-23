@@ -3,10 +3,10 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="/usr/local"
-BIN_PATH="$PREFIX/bin/sb"
-CONFIG_DIR="/etc/sing-box-manager"
+BIN_PATH="/etc/sing-box/bin/sb"
+CONFIG_DIR="/etc/sing-box/manager"
 CONFIG_PATH="$CONFIG_DIR/config.toml"
-DATA_DIR="/var/lib/sing-box-manager"
+DATA_DIR="/etc/sing-box/manager"
 SERVICE_PATH="/etc/systemd/system/sb-manager.service"
 SB_BIN=""
 SB_CONFIG=""
@@ -58,7 +58,8 @@ build_project() {
 }
 
 detect_singbox_binary() {
-  if [ -x "/usr/local/bin/sing-box" ]; then
+  SB_BIN="/etc/sing-box/bin/sing-box"
+  if [ ! -x "$SB_BIN" ] && [ -x /usr/local/bin/sing-box ]; then
     SB_BIN="/usr/local/bin/sing-box"; return
   fi
   if command -v sing-box >/dev/null 2>&1; then
@@ -69,19 +70,25 @@ detect_singbox_binary() {
 }
 
 detect_singbox_config() {
-  for candidate in /etc/sing-box/config.json /usr/local/etc/sing-box/config.json; do
+  for candidate in /etc/sing-box/config.json; do
     if [ -f "$candidate" ]; then SB_CONFIG="$candidate"; return; fi
   done
   SB_CONFIG=""
 }
 
 install_files() {
-  install -d "$CONFIG_DIR" "$DATA_DIR" "$PREFIX/bin"
+  install -d "$CONFIG_DIR" "$DATA_DIR" "/etc/sing-box/bin" "/etc/sing-box/certs" "/etc/sing-box/backup"
   install -m 0755 "$PROJECT_DIR/target/release/sb" "$BIN_PATH"
-  if [ ! -f "$CONFIG_PATH" ]; then
+  
+  # 强制将现有 config.toml 的 binary_path 指向 /etc/sing-box/bin/sing-box（如果是 v0.4.0 之前的默认路径）
+  if [ -f "$CONFIG_PATH" ]; then
+    sed -i 's|binary_path = "/usr/local/bin/sing-box"|binary_path = "/etc/sing-box/bin/sing-box"|g' "$CONFIG_PATH"
+  else
     install -m 0644 "$PROJECT_DIR/config.toml" "$CONFIG_PATH"
   fi
+  
   install -m 0644 "$PROJECT_DIR/sb-manager.service" "$SERVICE_PATH"
+  sed -i "s|/usr/local/bin/sb|/etc/sing-box/bin/sb|g" "$SERVICE_PATH"
 }
 
 # 用 sb 自身的原子重写代替 sed：生成最小覆盖配置，让下次启动采用新路径
@@ -145,7 +152,7 @@ EOF
 reload_systemd() {
   systemctl daemon-reload
   systemctl enable sb-manager.service
-  ln -sf "$BIN_PATH" /usr/bin/sb 2>/dev/null || true
+  ln -sf "$BIN_PATH" /usr/local/bin/sb 2>/dev/null || true
   hash -r 2>/dev/null || true
   note ""
   note "安装完成。可执行以下命令启动服务："
