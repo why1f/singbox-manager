@@ -108,7 +108,7 @@ async fn main() -> Result<()> {
         Commands::Check => run_check(&cfg),
         Commands::Start => run_start(&cfg),
         Commands::Stop => run_stop(&cfg).await,
-        Commands::Reload => run_reload(&cfg),
+        Commands::Reload => run_reload(&cfg).await,
         Commands::Status => run_status(&cfg).await,
         Commands::Doctor => run_doctor(&cfg_path, &cfg).await,
         Commands::User(a) => {
@@ -592,22 +592,21 @@ async fn run_user(
 
 async fn run_node(cmd: cli::node::NodeCommands, cfg: &AppConfig) -> Result<()> {
     use cli::node::NodeCommands;
-    if !Path::new(&cfg.singbox.config_path).exists() {
-        if matches!(cmd, NodeCommands::Add(_)) {
-            let empty = serde_json::json!({ "inbounds": [], "outbounds": [] });
-            if let Some(parent) = Path::new(&cfg.singbox.config_path).parent() {
-                std::fs::create_dir_all(parent).ok();
-            }
-            core::config::save(&cfg.singbox.config_path, &empty)?;
-        } else {
-            println!("config.json 不存在");
-            return Ok(());
-        }
+    if !Path::new(&cfg.singbox.config_path).exists() && !matches!(cmd, NodeCommands::Add(_)) {
+        println!("config.json 不存在");
+        return Ok(());
     }
-    let mut config = core::config::load(&cfg.singbox.config_path)?;
+    let config = if Path::new(&cfg.singbox.config_path).exists() {
+        Some(core::config::load(&cfg.singbox.config_path)?)
+    } else {
+        None
+    };
     match cmd {
         NodeCommands::List => {
-            let ns = service::node_service::list_nodes(&config);
+            let config = config
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("config.json 不存在"))?;
+            let ns = service::node_service::list_nodes(config);
             println!("{:<22}{:<16}{:<8}{:<8}", "Tag", "协议", "端口", "用户数");
             println!("{}", "─".repeat(56));
             for n in &ns {
@@ -618,10 +617,13 @@ async fn run_node(cmd: cli::node::NodeCommands, cfg: &AppConfig) -> Result<()> {
             }
         }
         NodeCommands::Export { name } => {
+            let config = config
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("config.json 不存在"))?;
             let server =
                 service::node_service::resolve_server_host(&cfg.subscription.public_base, None)
                     .await?;
-            let ls = service::sub_service::generate_links(&config, &name, &server)?;
+            let ls = service::sub_service::generate_links(config, &name, &server)?;
             println!(
                 "# 订阅 (Base64)\n{}",
                 service::sub_service::generate_subscription(&ls)
@@ -632,6 +634,7 @@ async fn run_node(cmd: cli::node::NodeCommands, cfg: &AppConfig) -> Result<()> {
             }
         }
         NodeCommands::Add(args) => {
+            let pool = open_pool(cfg).await?;
             let protocol = model::node::Protocol::try_from(args.protocol.as_str())?;
             let req = model::node::AddNodeRequest {
                 tag: args.tag,
@@ -641,16 +644,14 @@ async fn run_node(cmd: cli::node::NodeCommands, cfg: &AppConfig) -> Result<()> {
                 path: args.path,
                 port_reuse: args.port_reuse,
             };
-            let meta = core::config::add_node(&mut config, &req)?;
-            core::config::save(&cfg.singbox.config_path, &config)?;
-            let proc = core::singbox::SingboxProcess::new(
-                &cfg.singbox.binary_path,
+            let meta = service::runtime_service::mutate_config_locked(
+                &pool,
                 &cfg.singbox.config_path,
-            );
-            proc.check_config()?;
-            if matches!(proc.is_running(), Some(true)) {
-                proc.reload()?;
-            }
+                true,
+                |cfg_json| core::config::add_node(cfg_json, &req),
+            )
+            .await?;
+            service::runtime_service::validate_and_reload(&pool, cfg).await?;
             match meta {
                 core::config::AddNodeMeta::RealityKeys {
                     public_key,
@@ -665,39 +666,39 @@ async fn run_node(cmd: cli::node::NodeCommands, cfg: &AppConfig) -> Result<()> {
             }
         }
         NodeCommands::Edit(args) => {
-            core::config::edit_node(
-                &mut config,
-                &args.tag,
-                args.port,
-                args.server_name,
-                args.path,
-                args.port_reuse,
-            )?;
-            core::config::save(&cfg.singbox.config_path, &config)?;
-            let proc = core::singbox::SingboxProcess::new(
-                &cfg.singbox.binary_path,
+            let pool = open_pool(cfg).await?;
+            service::runtime_service::mutate_config_locked(
+                &pool,
                 &cfg.singbox.config_path,
-            );
-            proc.check_config()?;
-            if matches!(proc.is_running(), Some(true)) {
-                proc.reload()?;
-            }
+                false,
+                |cfg_json| {
+                    core::config::edit_node(
+                        cfg_json,
+                        &args.tag,
+                        args.port,
+                        args.server_name,
+                        args.path,
+                        args.port_reuse,
+                    )
+                },
+            )
+            .await?;
+            service::runtime_service::validate_and_reload(&pool, cfg).await?;
             println!("✓ 节点 '{}' 已更新", args.tag);
         }
         NodeCommands::Del { tag } => {
             let pool = open_pool(cfg).await?;
-            if !core::config::remove_node(&mut config, &tag) {
+            let removed = service::runtime_service::mutate_config_locked(
+                &pool,
+                &cfg.singbox.config_path,
+                false,
+                |cfg_json| Ok(core::config::remove_node(cfg_json, &tag)),
+            )
+            .await?;
+            if !removed {
                 anyhow::bail!("节点不存在: {}", tag);
             }
-            core::config::save(&cfg.singbox.config_path, &config)?;
-            let proc = core::singbox::SingboxProcess::new(
-                &cfg.singbox.binary_path,
-                &cfg.singbox.config_path,
-            );
-            proc.check_config()?;
-            if matches!(proc.is_running(), Some(true)) {
-                proc.reload()?;
-            }
+            service::runtime_service::validate_and_reload(&pool, cfg).await?;
             let cleaned =
                 service::user_service::remove_allowed_tag_from_all_users(&pool, &tag).await?;
             println!("✓ 节点 '{}' 已删除", tag);
@@ -779,11 +780,9 @@ async fn run_stop(cfg: &AppConfig) -> Result<()> {
     Ok(())
 }
 
-fn run_reload(cfg: &AppConfig) -> Result<()> {
-    let proc =
-        core::singbox::SingboxProcess::new(&cfg.singbox.binary_path, &cfg.singbox.config_path);
-    proc.check_config()?;
-    proc.reload()?;
+async fn run_reload(cfg: &AppConfig) -> Result<()> {
+    let pool = open_pool(cfg).await?;
+    service::runtime_service::validate_and_reload(&pool, cfg).await?;
     println!("✓ sing-box 已重载");
     Ok(())
 }
@@ -807,10 +806,16 @@ async fn run_kernel(cmd: cli::kernel::KernelCommands, cfg: &AppConfig) -> Result
             println!("自启:   {}", if s.enabled { "已启用" } else { "未启用" });
         }
         K::Install => {
+            if let Some(msg) = flush_live_traffic_before_kernel_action(cfg).await {
+                println!("{}", msg);
+            }
             core::singbox::install_latest().await?;
             println!("✓ 官方版 sing-box 已安装");
         }
         K::InstallV2rayApi => {
+            if let Some(msg) = flush_live_traffic_before_kernel_action(cfg).await {
+                println!("{}", msg);
+            }
             core::singbox::install_v2rayapi(&cfg.kernel.update_repo).await?;
             println!("✓ v2ray_api 版 sing-box 已安装");
         }

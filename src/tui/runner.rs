@@ -86,7 +86,7 @@ async fn event_loop(
         // 挂起 TUI 跑外部命令（编辑器 / 升级 / journalctl -f）。
         // 按键 handler 只写 pending_cmd，这里统一消费。跑完返回带一个 status 回显。
         if let Some(cmd) = s.pending_cmd.take() {
-            match run_external_suspended(term, cmd, &cfg) {
+            match run_external_suspended(term, cmd, &pool, &cfg).await {
                 Ok(Some((msg, level))) => s.set_status(msg, level),
                 Ok(None) => {}
                 Err(e) => s.set_status(format!("外部命令异常: {}", e), StatusLevel::Error),
@@ -151,9 +151,10 @@ fn is_quit(k: &KeyEvent) -> bool {
 
 /// 挂起 TUI → 让外部命令接管 TTY → 用户 Enter → 恢复 TUI。
 /// 同步阻塞调用当前 worker；后台 tokio 任务仍在另一个 worker 上跑。
-fn run_external_suspended(
+async fn run_external_suspended(
     term: &mut Terminal<CrosstermBackend<io::Stdout>>,
     cmd: ExternalCmd,
+    pool: &Arc<sqlx::SqlitePool>,
     cfg: &AppConfig,
 ) -> Result<Option<(String, StatusLevel)>> {
     // —— 让出 TTY ——
@@ -163,7 +164,7 @@ fn run_external_suspended(
 
     let post = match cmd {
         ExternalCmd::SelfUpdate => run_self_update(),
-        ExternalCmd::EditSingboxConfig => run_edit_singbox_config(cfg),
+        ExternalCmd::EditSingboxConfig => run_edit_singbox_config(pool, cfg).await,
         ExternalCmd::TailSingboxLog => run_tail_singbox_log(),
     };
 
@@ -200,7 +201,10 @@ fn run_self_update() -> Option<(String, StatusLevel)> {
     }
 }
 
-fn run_edit_singbox_config(cfg: &AppConfig) -> Option<(String, StatusLevel)> {
+async fn run_edit_singbox_config(
+    pool: &Arc<sqlx::SqlitePool>,
+    cfg: &AppConfig,
+) -> Option<(String, StatusLevel)> {
     let path = &cfg.singbox.config_path;
     println!();
     println!("=== 编辑 {} ===", path);
@@ -223,6 +227,11 @@ fn run_edit_singbox_config(cfg: &AppConfig) -> Option<(String, StatusLevel)> {
     match proc.check_config() {
         Ok(()) => {
             if matches!(proc.is_running(), Some(true)) {
+                let _ = crate::service::runtime_service::flush_current_traffic(
+                    pool,
+                    &cfg.singbox.grpc_addr,
+                )
+                .await;
                 match proc.reload() {
                     Ok(()) => Some((
                         "config.json 校验通过，已 reload sing-box".into(),
@@ -411,6 +420,7 @@ fn handle_modal_key(
         } => {
             s.modal = None;
             spawn_add_node(
+                pool,
                 cfg,
                 ui_tx,
                 tag,
@@ -429,7 +439,7 @@ fn handle_modal_key(
             port_reuse,
         } => {
             s.modal = None;
-            spawn_edit_node(cfg, ui_tx, tag, port, server_name, path, port_reuse);
+            spawn_edit_node(pool, cfg, ui_tx, tag, port, server_name, path, port_reuse);
         }
         ModalAction::DeleteUser(name) => {
             s.modal = None;
@@ -679,8 +689,11 @@ fn handle_kernel_key(
         _ if s.kernel_busy.is_some() => {
             s.set_status("正在执行上一操作，请稍候", StatusLevel::Warn);
         }
-        KeyCode::Char('i') => spawn_kernel_install_latest(ui_tx),
-        KeyCode::Char('v') => spawn_kernel_install_v2rayapi(ui_tx, cfg.kernel.update_repo.clone()),
+        KeyCode::Char('i') => spawn_kernel_install_latest(pool, cfg, ui_tx),
+        KeyCode::Char('v') => {
+            let repo = cfg.kernel.update_repo.clone();
+            spawn_kernel_install_v2rayapi(pool, cfg, ui_tx, repo)
+        }
         KeyCode::Char('u') => spawn_kernel_op_with_flush(
             pool,
             cfg,
@@ -1031,25 +1044,58 @@ fn spawn_kernel_op_with_flush<F>(
     });
 }
 
-fn spawn_kernel_install_latest(tx: mpsc::Sender<UiEvent>) {
+fn spawn_kernel_install_latest(
+    pool: Arc<sqlx::SqlitePool>,
+    cfg: Arc<AppConfig>,
+    tx: mpsc::Sender<UiEvent>,
+) {
     tokio::spawn(async move {
         let label = "安装官方版 sing-box";
         let _ = tx.send(UiEvent::KernelBusy(Some(label))).await;
+        let flush_msg = match crate::service::runtime_service::flush_current_traffic(
+            &pool,
+            &cfg.singbox.grpc_addr,
+        )
+        .await
+        {
+            Ok(deltas) if !deltas.is_empty() => {
+                let up: i64 = deltas.iter().map(|d| d.delta_up).sum();
+                let down: i64 = deltas.iter().map(|d| d.delta_down).sum();
+                Some(format!(
+                    "已预同步流量：{} 用户，上行 {}，下行 {}",
+                    deltas.len(),
+                    User::format_bytes(up),
+                    User::format_bytes(down)
+                ))
+            }
+            Ok(_) => None,
+            Err(e) => Some(format!("预同步流量失败（继续安装）: {}", e)),
+        };
         let result = crate::core::singbox::install_latest().await;
         let _ = tx.send(UiEvent::KernelBusy(None)).await;
         match result {
             Ok(()) => {
+                let msg = if let Some(flush_msg) = flush_msg {
+                    format!("{} 成功（已自动 enable + restart）；{}", label, flush_msg)
+                } else {
+                    format!("{} 成功（已自动 enable + restart）", label)
+                };
                 let _ = tx
                     .send(UiEvent::Status {
-                        msg: format!("{} 成功（已自动 enable + restart）", label),
+                        msg,
                         level: StatusLevel::Warn,
                     })
                     .await;
             }
             Err(e) => {
+                let msg = if let Some(flush_msg) = flush_msg {
+                    format!("{} 失败: {}（{}）", label, e, flush_msg)
+                } else {
+                    format!("{} 失败: {}", label, e)
+                };
                 let _ = tx
                     .send(UiEvent::Status {
-                        msg: format!("{} 失败: {}", label, e),
+                        msg,
                         level: StatusLevel::Error,
                     })
                     .await;
@@ -1059,25 +1105,59 @@ fn spawn_kernel_install_latest(tx: mpsc::Sender<UiEvent>) {
     });
 }
 
-fn spawn_kernel_install_v2rayapi(tx: mpsc::Sender<UiEvent>, repo: String) {
+fn spawn_kernel_install_v2rayapi(
+    pool: Arc<sqlx::SqlitePool>,
+    cfg: Arc<AppConfig>,
+    tx: mpsc::Sender<UiEvent>,
+    repo: String,
+) {
     tokio::spawn(async move {
         let label = "安装 v2ray_api 版 sing-box";
         let _ = tx.send(UiEvent::KernelBusy(Some(label))).await;
+        let flush_msg = match crate::service::runtime_service::flush_current_traffic(
+            &pool,
+            &cfg.singbox.grpc_addr,
+        )
+        .await
+        {
+            Ok(deltas) if !deltas.is_empty() => {
+                let up: i64 = deltas.iter().map(|d| d.delta_up).sum();
+                let down: i64 = deltas.iter().map(|d| d.delta_down).sum();
+                Some(format!(
+                    "已预同步流量：{} 用户，上行 {}，下行 {}",
+                    deltas.len(),
+                    User::format_bytes(up),
+                    User::format_bytes(down)
+                ))
+            }
+            Ok(_) => None,
+            Err(e) => Some(format!("预同步流量失败（继续安装）: {}", e)),
+        };
         let result = crate::core::singbox::install_v2rayapi(&repo).await;
         let _ = tx.send(UiEvent::KernelBusy(None)).await;
         match result {
             Ok(()) => {
+                let msg = if let Some(flush_msg) = flush_msg {
+                    format!("{} 成功（已自动 enable + restart）；{}", label, flush_msg)
+                } else {
+                    format!("{} 成功（已自动 enable + restart）", label)
+                };
                 let _ = tx
                     .send(UiEvent::Status {
-                        msg: format!("{} 成功（已自动 enable + restart）", label),
+                        msg,
                         level: StatusLevel::Warn,
                     })
                     .await;
             }
             Err(e) => {
+                let msg = if let Some(flush_msg) = flush_msg {
+                    format!("{} 失败: {}（{}）", label, e, flush_msg)
+                } else {
+                    format!("{} 失败: {}", label, e)
+                };
                 let _ = tx
                     .send(UiEvent::Status {
-                        msg: format!("{} 失败: {}", label, e),
+                        msg,
                         level: StatusLevel::Error,
                     })
                     .await;
@@ -1206,7 +1286,9 @@ fn spawn_edit_user(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_edit_node(
+    pool: Arc<sqlx::SqlitePool>,
     cfg: Arc<AppConfig>,
     tx: mpsc::Sender<UiEvent>,
     tag: String,
@@ -1216,20 +1298,15 @@ fn spawn_edit_node(
     port_reuse: Option<bool>,
 ) {
     tokio::spawn(async move {
-        let mut cfg_json = match crate::core::config::load(&cfg.singbox.config_path) {
-            Ok(v) => v,
-            Err(e) => {
-                let _ = tx
-                    .send(UiEvent::Status {
-                        msg: format!("读取配置失败: {}", e),
-                        level: StatusLevel::Error,
-                    })
-                    .await;
-                return;
-            }
-        };
-        if let Err(e) =
-            crate::core::config::edit_node(&mut cfg_json, &tag, port, server_name, path, port_reuse)
+        if let Err(e) = crate::service::runtime_service::mutate_config_locked(
+            &pool,
+            &cfg.singbox.config_path,
+            false,
+            |cfg_json| {
+                crate::core::config::edit_node(cfg_json, &tag, port, server_name, path, port_reuse)
+            },
+        )
+        .await
         {
             let _ = tx
                 .send(UiEvent::Status {
@@ -1239,28 +1316,11 @@ fn spawn_edit_node(
                 .await;
             return;
         }
-        if let Err(e) = crate::core::config::save(&cfg.singbox.config_path, &cfg_json) {
-            let _ = tx
-                .send(UiEvent::Status {
-                    msg: format!("保存失败: {}", e),
-                    level: StatusLevel::Error,
-                })
-                .await;
-            return;
-        }
-        let proc = crate::core::singbox::SingboxProcess::new(
-            &cfg.singbox.binary_path,
-            &cfg.singbox.config_path,
-        );
-        let check_msg = match proc.check_config() {
-            Ok(()) => {
-                if matches!(proc.is_running(), Some(true)) {
-                    let _ = proc.reload();
-                }
-                None
-            }
-            Err(e) => Some(format!("sing-box 校验/reload 失败: {}（改动已保存）", e)),
-        };
+        let check_msg =
+            match crate::service::runtime_service::validate_and_reload(&pool, &cfg).await {
+                Ok(()) => None,
+                Err(e) => Some(format!("sing-box 校验/reload 失败: {}（改动已保存）", e)),
+            };
         if let Ok(v) = crate::core::config::load(&cfg.singbox.config_path) {
             let _ = tx
                 .send(UiEvent::NodesRefreshed(
@@ -1571,6 +1631,7 @@ fn spawn_delete_user(
 
 #[allow(clippy::too_many_arguments)]
 fn spawn_add_node(
+    pool: Arc<sqlx::SqlitePool>,
     cfg: Arc<AppConfig>,
     tx: mpsc::Sender<UiEvent>,
     tag: String,
@@ -1601,12 +1662,14 @@ fn spawn_add_node(
             path,
             port_reuse,
         };
-        let mut cfg_json = match crate::core::config::load(&cfg.singbox.config_path) {
-            Ok(v) => v,
-            Err(_) => serde_json::json!({ "inbounds": [], "outbounds": [] }),
-        };
-        let add_result = crate::core::config::add_node(&mut cfg_json, &req);
-        let meta = match add_result {
+        let meta = match crate::service::runtime_service::mutate_config_locked(
+            &pool,
+            &cfg.singbox.config_path,
+            true,
+            |cfg_json| crate::core::config::add_node(cfg_json, &req),
+        )
+        .await
+        {
             Ok(m) => m,
             Err(e) => {
                 let _ = tx
@@ -1618,32 +1681,15 @@ fn spawn_add_node(
                 return;
             }
         };
-        if let Err(e) = crate::core::config::save(&cfg.singbox.config_path, &cfg_json) {
-            let _ = tx
-                .send(UiEvent::Status {
-                    msg: format!("保存配置失败: {}", e),
-                    level: StatusLevel::Error,
-                })
-                .await;
-            return;
-        }
         // 无论校验/reload 是否失败，都刷新节点列表（节点已经写入 config）
-        let proc = crate::core::singbox::SingboxProcess::new(
-            &cfg.singbox.binary_path,
-            &cfg.singbox.config_path,
-        );
-        let check_msg = match proc.check_config() {
-            Ok(()) => {
-                if matches!(proc.is_running(), Some(true)) {
-                    let _ = proc.reload();
-                }
-                None
-            }
-            Err(e) => Some(format!(
-                "sing-box 校验/reload 失败: {}（节点已保存到 config.json）",
-                e
-            )),
-        };
+        let check_msg =
+            match crate::service::runtime_service::validate_and_reload(&pool, &cfg).await {
+                Ok(()) => None,
+                Err(e) => Some(format!(
+                    "sing-box 校验/reload 失败: {}（节点已保存到 config.json）",
+                    e
+                )),
+            };
         if let Ok(v) = crate::core::config::load(&cfg.singbox.config_path) {
             let _ = tx
                 .send(UiEvent::NodesRefreshed(
@@ -1676,19 +1722,26 @@ fn spawn_delete_node(
     tag: String,
 ) {
     tokio::spawn(async move {
-        let mut cfg_json = match crate::core::config::load(&cfg.singbox.config_path) {
+        let removed = match crate::service::runtime_service::mutate_config_locked(
+            &pool,
+            &cfg.singbox.config_path,
+            false,
+            |cfg_json| Ok(crate::core::config::remove_node(cfg_json, &tag)),
+        )
+        .await
+        {
             Ok(v) => v,
             Err(e) => {
                 let _ = tx
                     .send(UiEvent::Status {
-                        msg: format!("读取配置失败: {}", e),
+                        msg: format!("读取/保存配置失败: {}", e),
                         level: StatusLevel::Error,
                     })
                     .await;
                 return;
             }
         };
-        if !crate::core::config::remove_node(&mut cfg_json, &tag) {
+        if !removed {
             let _ = tx
                 .send(UiEvent::Status {
                     msg: format!("未找到节点 {}", tag),
@@ -1697,31 +1750,14 @@ fn spawn_delete_node(
                 .await;
             return;
         }
-        if let Err(e) = crate::core::config::save(&cfg.singbox.config_path, &cfg_json) {
-            let _ = tx
-                .send(UiEvent::Status {
-                    msg: format!("保存失败: {}", e),
-                    level: StatusLevel::Error,
-                })
-                .await;
-            return;
-        }
-        let proc = crate::core::singbox::SingboxProcess::new(
-            &cfg.singbox.binary_path,
-            &cfg.singbox.config_path,
-        );
-        let check_msg = match proc.check_config() {
-            Ok(()) => {
-                if matches!(proc.is_running(), Some(true)) {
-                    let _ = proc.reload();
-                }
-                None
-            }
-            Err(e) => Some(format!(
-                "sing-box 校验/reload 失败: {}（节点已从 config.json 移除）",
-                e
-            )),
-        };
+        let check_msg =
+            match crate::service::runtime_service::validate_and_reload(&pool, &cfg).await {
+                Ok(()) => None,
+                Err(e) => Some(format!(
+                    "sing-box 校验/reload 失败: {}（节点已从 config.json 移除）",
+                    e
+                )),
+            };
         if let Ok(v) = crate::core::config::load(&cfg.singbox.config_path) {
             let _ = tx
                 .send(UiEvent::NodesRefreshed(

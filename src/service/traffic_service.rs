@@ -1,9 +1,6 @@
-use crate::core::{
-    grpc::{query_all_traffic, StatsClient},
-    traffic::calc_deltas,
-};
-use crate::db::{traffic_repo, user_repo};
-use crate::model::{config::AppConfig, traffic::TrafficDelta, user::User};
+use crate::core::grpc::StatsClient;
+use crate::db::traffic_repo;
+use crate::model::{config::AppConfig, traffic::TrafficDelta};
 use crate::service::{runtime_service, user_service::apply_automatic_controls};
 use anyhow::Result;
 use sqlx::SqlitePool;
@@ -95,8 +92,7 @@ pub async fn flush_current_traffic(
     pool: &SqlitePool,
     grpc_addr: &str,
 ) -> Result<Vec<TrafficDelta>> {
-    let mut grpc = crate::core::grpc::connect(grpc_addr).await?;
-    sync_current_traffic(pool, &mut grpc).await
+    runtime_service::flush_current_traffic(pool, grpc_addr).await
 }
 
 async fn sync_once(
@@ -106,7 +102,7 @@ async fn sync_once(
     alerted: &mut HashMap<String, u8>,
     tx: &mpsc::Sender<TrafficEvent>,
 ) -> Result<()> {
-    let (users, deltas) = sync_current_traffic_with_users(pool, grpc).await?;
+    let (users, deltas) = runtime_service::sync_current_traffic_with_users(pool, grpc).await?;
 
     // 告警去重：阈值档位变化才发送（80 / 90 / 100）
     for u in &users {
@@ -154,42 +150,4 @@ async fn sync_once(
         let _ = tx.send(TrafficEvent::Synced(deltas)).await;
     }
     Ok(())
-}
-
-async fn sync_current_traffic_with_users(
-    pool: &SqlitePool,
-    grpc: &mut StatsClient,
-) -> Result<(Vec<User>, Vec<TrafficDelta>)> {
-    let snaps = query_all_traffic(grpc, false).await?;
-    let users = user_repo::list_all(pool).await?;
-    let deltas = calc_deltas(&snaps, &users);
-    if !deltas.is_empty() {
-        let mut tx_db = pool.begin().await?;
-        for d in &deltas {
-            sqlx::query(
-                r#"UPDATE users SET used_up_bytes=used_up_bytes+?,
-                used_down_bytes=used_down_bytes+?,last_live_up=?,last_live_down=? WHERE name=?"#,
-            )
-            .bind(d.delta_up)
-            .bind(d.delta_down)
-            .bind(d.new_live_up)
-            .bind(d.new_live_down)
-            .bind(&d.username)
-            .execute(&mut *tx_db)
-            .await?;
-            sqlx::query("INSERT INTO traffic_history(username,up_bytes,down_bytes,recorded_at)VALUES(?,?,?,datetime('now'))")
-                .bind(&d.username).bind(d.delta_up).bind(d.delta_down)
-                .execute(&mut *tx_db).await?;
-        }
-        tx_db.commit().await?;
-    }
-    Ok((users, deltas))
-}
-
-async fn sync_current_traffic(
-    pool: &SqlitePool,
-    grpc: &mut StatsClient,
-) -> Result<Vec<TrafficDelta>> {
-    let (_, deltas) = sync_current_traffic_with_users(pool, grpc).await?;
-    Ok(deltas)
 }

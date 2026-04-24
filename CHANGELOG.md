@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## v0.4.7
+
+### Fixed
+- **流量同步与手动 flush 串行化**：后台周期同步和手动预同步现在共用同一把运行时锁，避免两次并发按同一份旧 `last_live_*` 计算增量，导致重复入账。
+- **`config.json` 修改路径加锁**：自动同步用户配置与 CLI/TUI 的节点增删改不再并发覆盖彼此的改动，避免 `load -> mutate -> save` 竞争写回。
+- **reload/install 相关路径补齐预同步流量**：`reload`、节点增删改触发的 reload、TUI 外部编辑 `config.json`、内核安装前都会先尽力 flush 当前流量，缩小 sing-box 重启或替换前的统计丢失窗口。
+
 ## v0.4.6
 
 ### Fixed
