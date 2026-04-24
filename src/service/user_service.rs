@@ -94,6 +94,9 @@ pub async fn delete_user(pool: &SqlitePool, name: &str) -> Result<()> {
     if name == "admin" {
         return Err(anyhow!("不能删除 admin"));
     }
+    if user_repo::get(pool, name).await?.is_none() {
+        return Err(anyhow!("用户不存在: {}", name));
+    }
     let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM users WHERE name=?")
         .bind(name)
@@ -115,6 +118,9 @@ pub async fn toggle_user(pool: &SqlitePool, name: &str) -> Result<bool> {
 
 pub async fn reset_traffic(pool: &SqlitePool, name: &str) -> Result<()> {
     // 手动重置：不写 last_reset_ym，避免污染本月定期重置的去重标记
+    if user_repo::get(pool, name).await?.is_none() {
+        return Err(anyhow!("用户不存在: {}", name));
+    }
     user_repo::reset_usage_manual(pool, name).await
 }
 
@@ -126,6 +132,9 @@ pub async fn update_package(
     expire_at: Option<&str>,
     traffic_multiplier: Option<f64>,
 ) -> Result<()> {
+    if user_repo::get(pool, name).await?.is_none() {
+        return Err(anyhow!("用户不存在: {}", name));
+    }
     if quota_gb.is_none()
         && reset_day.is_none()
         && expire_at.is_none()
@@ -323,9 +332,19 @@ fn last_day_of_month(d: chrono::NaiveDate) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        last_day_of_month, validate_expire, validate_multiplier, validate_quota, validate_reset_day,
+        delete_user, last_day_of_month, reset_traffic, update_package, validate_expire,
+        validate_multiplier, validate_quota, validate_reset_day,
     };
     use chrono::NaiveDate;
+    use std::path::PathBuf;
+    use uuid::Uuid;
+
+    async fn temp_pool() -> sqlx::SqlitePool {
+        let path: PathBuf = std::env::temp_dir().join(format!("sbm-test-{}.db", Uuid::new_v4()));
+        crate::db::init_pool(path.to_string_lossy().as_ref())
+            .await
+            .unwrap()
+    }
 
     #[test]
     fn reset_day_accepts_31() {
@@ -351,5 +370,28 @@ mod tests {
     fn last_day_of_month_handles_february() {
         let date = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
         assert_eq!(last_day_of_month(date), 28);
+    }
+
+    #[tokio::test]
+    async fn delete_missing_user_returns_error() {
+        let pool = temp_pool().await;
+        let err = delete_user(&pool, "missing").await.unwrap_err();
+        assert!(err.to_string().contains("用户不存在"));
+    }
+
+    #[tokio::test]
+    async fn reset_missing_user_returns_error() {
+        let pool = temp_pool().await;
+        let err = reset_traffic(&pool, "missing").await.unwrap_err();
+        assert!(err.to_string().contains("用户不存在"));
+    }
+
+    #[tokio::test]
+    async fn update_missing_user_returns_error() {
+        let pool = temp_pool().await;
+        let err = update_package(&pool, "missing", Some(1.0), None, None, None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("用户不存在"));
     }
 }
