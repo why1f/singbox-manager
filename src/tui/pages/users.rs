@@ -15,7 +15,8 @@ pub fn render(f: &mut Frame, area: Rect, s: &AppState) {
         let has_quota = u.quota_gb > 0.0;
         let quota_str = if has_quota {
             let bar = super::super::pages::dashboard::progress_bar(u.quota_used_percent() as u8, 10, true);
-            format!("{}G {} {:.0}%", u.quota_gb, bar, u.quota_used_percent())
+            let quota_label = format!("{:.0}G", u.quota_gb);
+            format!("{:<5} {} {:>3.0}%", quota_label, bar, u.quota_used_percent())
         } else {
             "不限".into()
         };
