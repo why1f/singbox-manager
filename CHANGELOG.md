@@ -1,5 +1,22 @@
 # CHANGELOG
 
+## v0.4.2
+
+### Added
+- **新增 `sb doctor` 自检命令**：统一检查配置文件、数据库、`sing-box check`、`v2ray_api`、gRPC、证书文件、订阅配置和 nginx 状态，部署后排障更直接。
+- **CLI 节点管理补齐编辑/删除**：`sb node edit` / `sb node del` 与 TUI 的节点操作基本对齐，脚本化运维不再只能进 TUI。
+
+### Fixed
+- **订阅生成失败不再静默返回空内容**：`/sub/<token>` 在节点地址解析或订阅导出失败时改为明确返回错误，避免客户端把服务端异常误判成“没有节点”。
+- **节点地址不再静默回退到 `127.0.0.1`**：优先使用 `subscription.public_base` 主机名或反代 `Host`，公网 IP 探测失败时直接报错，避免导出不可用节点。
+- **`subscription-userinfo` 口径对齐倍率计费**：订阅响应头中的上传/下载统计改为按 `traffic_multiplier` 后的有效流量输出。
+- **用户参数校验补齐**：新增配额、重置日、到期日、流量倍率的合法性校验，避免脏数据写入数据库。
+- **月重置日支持到 31 号**：之前 `29/30/31` 会被当成不重置，现改为按当月最后一天自动收敛。
+
+### Changed
+- **release workflow 增加版本元数据校验**：发 tag 时会先校验 `Cargo.toml`、`CHANGELOG.md` 与 tag 一致，减少发版漂移。
+- **release workflow 固定 `cross` 版本**：避免直接从 Git 仓库 HEAD 安装带来的构建不稳定。
+
 ## v0.4.1
 
 ### Fixed

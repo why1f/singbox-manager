@@ -216,8 +216,8 @@ fn handle_user_edit(f: &mut UserEditForm, k: KeyEvent) -> ModalAction {
             };
             let d  = if f.reset_day.trim().is_empty() { None } else {
                 match f.reset_day.trim().parse::<i64>() {
-                    Ok(v) if v == 0 || v == 32 || (1..=28).contains(&v) => Some(v),
-                    _ => { f.error = Some("重置日需 0/1-28/32".into()); return ModalAction::None; }
+                    Ok(v) if v == 0 || v == 32 || (1..=31).contains(&v) => Some(v),
+                    _ => { f.error = Some("重置日需 0/1-31/32".into()); return ModalAction::None; }
                 }
             };
             let e = if f.expire.trim().is_empty() { None }
@@ -346,8 +346,8 @@ fn handle_user(f: &mut UserForm, k: KeyEvent) -> ModalAction {
                 }};
             let reset_day: i64 = if f.reset_day.trim().is_empty() { 0 }
                 else { match f.reset_day.trim().parse::<i64>() {
-                    Ok(v) if v == 0 || v == 32 || (1..=28).contains(&v) => v,
-                    _ => { f.error = Some("重置日需 0/1-28/32".into()); return ModalAction::None; }
+                    Ok(v) if v == 0 || v == 32 || (1..=31).contains(&v) => v,
+                    _ => { f.error = Some("重置日需 0/1-31/32".into()); return ModalAction::None; }
                 }};
             let expire = f.expire.trim().to_string();
             let multiplier: f64 = if f.multiplier.trim().is_empty() { 2.0 }
@@ -480,7 +480,7 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
 }
 
 fn render_user(f: &mut Frame, area: Rect, form: &UserForm, title: &str) {
-    let labels = ["用户名", "配额 GB (0=不限)", "重置日 (1-28/32/0)", "到期 (YYYY-MM-DD, 例: 2026-12-31)", "流量倍率 (双倍=2.0, 单倍=1.0)"];
+    let labels = ["用户名", "配额 GB (0=不限)", "重置日 (1-31/32/0)", "到期 (YYYY-MM-DD, 例: 2026-12-31)", "流量倍率 (双倍=2.0, 单倍=1.0)"];
     let vals = [&form.name, &form.quota, &form.reset_day, &form.expire, &form.multiplier];
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(""));

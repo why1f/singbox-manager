@@ -21,6 +21,10 @@ pub fn new_sub_token() -> String {
 pub async fn add_user(pool: &SqlitePool, name: &str, quota_gb: f64,
     reset_day: i64, expire_at: &str, traffic_multiplier: f64) -> Result<User> {
     validate_username(name)?;
+    validate_quota(quota_gb)?;
+    validate_reset_day(reset_day)?;
+    validate_expire(expire_at)?;
+    validate_multiplier(traffic_multiplier)?;
     if user_repo::get(pool, name).await?.is_some() {
         return Err(anyhow!("用户 '{}' 已存在", name));
     }
@@ -96,6 +100,10 @@ pub async fn reset_traffic(pool: &SqlitePool, name: &str) -> Result<()> {
 pub async fn update_package(pool: &SqlitePool, name: &str,
     quota_gb: Option<f64>, reset_day: Option<i64>, expire_at: Option<&str>, traffic_multiplier: Option<f64>) -> Result<()> {
     if quota_gb.is_none() && reset_day.is_none() && expire_at.is_none() && traffic_multiplier.is_none() { return Ok(()); }
+    if let Some(v) = quota_gb { validate_quota(v)?; }
+    if let Some(v) = reset_day { validate_reset_day(v)?; }
+    if let Some(v) = expire_at { validate_expire(v)?; }
+    if let Some(v) = traffic_multiplier { validate_multiplier(v)?; }
     user_repo::update_package(pool, name, quota_gb, reset_day, expire_at, traffic_multiplier).await
 }
 
@@ -150,7 +158,7 @@ pub async fn apply_automatic_controls(pool: &SqlitePool) -> Result<Vec<String>> 
             changed.push(format!("{}(到期禁用)", user.name));
             continue;
         }
-        let eff = match user.reset_day { 32 => last_d, d @ 1..=28 => d.min(last_d), _ => 0 };
+        let eff = match user.reset_day { 32 => last_d, d @ 1..=31 => d.min(last_d), _ => 0 };
         if eff > 0 && day == eff && user.last_reset_ym != ym {
             user_repo::reset_usage(pool, &user.name).await?;
             // 同时恢复启用：超额被禁的用户在重置日应自动解封
@@ -177,6 +185,36 @@ fn validate_username(name: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_quota(quota_gb: f64) -> Result<()> {
+    if quota_gb < 0.0 {
+        return Err(anyhow!("配额不能为负数"));
+    }
+    Ok(())
+}
+
+fn validate_reset_day(reset_day: i64) -> Result<()> {
+    if reset_day == 0 || reset_day == 32 || (1..=31).contains(&reset_day) {
+        return Ok(());
+    }
+    Err(anyhow!("重置日需为 0 / 1-31 / 32(月末)"))
+}
+
+fn validate_expire(expire_at: &str) -> Result<()> {
+    if expire_at.is_empty() {
+        return Ok(());
+    }
+    chrono::NaiveDate::parse_from_str(expire_at, "%Y-%m-%d")
+        .map(|_| ())
+        .map_err(|_| anyhow!("到期日格式需为 YYYY-MM-DD"))
+}
+
+fn validate_multiplier(multiplier: f64) -> Result<()> {
+    if multiplier < 0.0 {
+        return Err(anyhow!("倍率不能为负数"));
+    }
+    Ok(())
+}
+
 fn last_day_of_month(d: chrono::NaiveDate) -> i64 {
     let next = if d.month() == 12 {
         chrono::NaiveDate::from_ymd_opt(d.year() + 1, 1, 1)
@@ -184,4 +222,36 @@ fn last_day_of_month(d: chrono::NaiveDate) -> i64 {
         chrono::NaiveDate::from_ymd_opt(d.year(), d.month() + 1, 1)
     };
     next.and_then(|n| n.pred_opt()).map(|d| d.day() as i64).unwrap_or(30)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{last_day_of_month, validate_expire, validate_multiplier, validate_quota, validate_reset_day};
+    use chrono::NaiveDate;
+
+    #[test]
+    fn reset_day_accepts_31() {
+        assert!(validate_reset_day(31).is_ok());
+        assert!(validate_reset_day(32).is_ok());
+        assert!(validate_reset_day(33).is_err());
+    }
+
+    #[test]
+    fn expire_requires_valid_date() {
+        assert!(validate_expire("").is_ok());
+        assert!(validate_expire("2026-12-31").is_ok());
+        assert!(validate_expire("2026-02-30").is_err());
+    }
+
+    #[test]
+    fn numeric_fields_reject_negative_values() {
+        assert!(validate_quota(-1.0).is_err());
+        assert!(validate_multiplier(-0.1).is_err());
+    }
+
+    #[test]
+    fn last_day_of_month_handles_february() {
+        let date = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+        assert_eq!(last_day_of_month(date), 28);
+    }
 }

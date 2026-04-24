@@ -15,11 +15,22 @@ pub struct AddNodeArgs {
     #[arg(long, default_value_t = false)] pub port_reuse: bool,
 }
 
+#[derive(Args, Debug)]
+pub struct EditNodeArgs {
+    pub tag: String,
+    #[arg(long)] pub port: Option<u16>,
+    #[arg(long)] pub server_name: Option<String>,
+    #[arg(long)] pub path: Option<String>,
+    #[arg(long)] pub port_reuse: Option<bool>,
+}
+
 #[derive(Subcommand, Debug)]
 pub enum NodeCommands {
     List,
     Export { name: String },
     Add(AddNodeArgs),
+    Edit(EditNodeArgs),
+    Del { tag: String },
 }
 
 impl TryFrom<&str> for Protocol {

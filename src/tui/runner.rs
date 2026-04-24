@@ -918,7 +918,13 @@ fn spawn_export(cfg: Arc<AppConfig>, tx: mpsc::Sender<UiEvent>, name: String) {
                 return;
             }
         };
-        let server = crate::service::node_service::get_server_ip().await;
+        let server = match crate::service::node_service::resolve_server_host(&cfg.subscription.public_base, None).await {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = tx.send(UiEvent::Status { msg: format!("导出失败: {}", e), level: StatusLevel::Error }).await;
+                return;
+            }
+        };
         match crate::service::sub_service::generate_links(&cfg_json, &name, &server) {
             Ok(links) if !links.is_empty() => {
                 let text = crate::service::sub_service::generate_subscription(&links);

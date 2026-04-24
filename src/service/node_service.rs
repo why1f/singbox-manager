@@ -1,3 +1,4 @@
+use anyhow::{anyhow, Result};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -49,8 +50,19 @@ fn detect(ib: &Value) -> Protocol {
     }
 }
 
-/// 查询本机公网 IP，带超时与 fallback。
-pub async fn get_server_ip() -> String {
+/// 优先级：public_base 主机 > 请求 Host > 公网 IP 探测。
+pub async fn resolve_server_host(public_base: &str, request_host: Option<&str>) -> Result<String> {
+    if let Some(host) = public_base_host(public_base) {
+        return Ok(host);
+    }
+    if let Some(host) = request_host.and_then(authority_host) {
+        return Ok(host);
+    }
+    get_server_ip().await
+}
+
+/// 查询本机公网 IP，带超时；失败时返回显式错误。
+pub async fn get_server_ip() -> Result<String> {
     if let Some(cached) = SERVER_IP_CACHE
         .get_or_init(|| Mutex::new(None))
         .lock()
@@ -65,13 +77,13 @@ pub async fn get_server_ip() -> String {
             })
         })
     {
-        return cached;
+        return Ok(cached);
     }
 
     let Ok(client) = reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
         .connect_timeout(Duration::from_secs(2))
-        .build() else { return "127.0.0.1".into(); };
+        .build() else { return Err(anyhow!("构建公网 IP 探测客户端失败")); };
     for url in &["https://api4.ipify.org", "https://ifconfig.me/ip"] {
         if let Ok(resp) = client.get(*url).send().await {
             if let Ok(text) = resp.text().await {
@@ -79,12 +91,39 @@ pub async fn get_server_ip() -> String {
                     if let Ok(mut guard) = SERVER_IP_CACHE.get_or_init(|| Mutex::new(None)).lock() {
                         *guard = Some((Instant::now(), ip.clone()));
                     }
-                    return ip;
+                    return Ok(ip);
                 }
             }
         }
     }
-    "127.0.0.1".into()
+    Err(anyhow!("无法探测公网 IP；请配置 subscription.public_base 或通过反代域名访问订阅"))
+}
+
+fn public_base_host(public_base: &str) -> Option<String> {
+    if public_base.trim().is_empty() {
+        return None;
+    }
+    let rest = public_base
+        .trim()
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(public_base.trim());
+    authority_host(rest.split('/').next().unwrap_or_default())
+}
+
+fn authority_host(authority: &str) -> Option<String> {
+    let authority = authority.trim();
+    if authority.is_empty() {
+        return None;
+    }
+
+    if authority.starts_with('[') {
+        let end = authority.find(']')?;
+        return normalize_server_ip(&authority[..=end]);
+    }
+
+    let host = authority.split(':').next().unwrap_or_default().trim();
+    normalize_server_ip(host)
 }
 
 fn normalize_server_ip(text: &str) -> Option<String> {
@@ -102,7 +141,7 @@ fn normalize_server_ip(text: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_server_ip;
+    use super::{authority_host, normalize_server_ip, public_base_host};
 
     #[test]
     fn ipv4_keeps_plain() {
@@ -112,5 +151,20 @@ mod tests {
     #[test]
     fn ipv6_gets_brackets() {
         assert_eq!(normalize_server_ip("2001:db8::1"), Some("[2001:db8::1]".into()));
+    }
+
+    #[test]
+    fn strips_port_from_domain_authority() {
+        assert_eq!(authority_host("sub.example.com:8443"), Some("sub.example.com".into()));
+    }
+
+    #[test]
+    fn keeps_bracketed_ipv6_without_port() {
+        assert_eq!(authority_host("[2001:db8::1]:443"), Some("[2001:db8::1]".into()));
+    }
+
+    #[test]
+    fn parses_host_from_public_base() {
+        assert_eq!(public_base_host("https://sub.example.com/path"), Some("sub.example.com".into()));
     }
 }

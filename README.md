@@ -150,6 +150,7 @@ sb kernel install-v2ray-api         # v2ray_api 版（推荐）
 sb kernel start / stop / restart
 sb kernel enable / disable          # 开机自启
 sb kernel uninstall
+sb doctor                           # 一键自检部署状态
 ```
 
 ### nginx 反代
@@ -169,7 +170,16 @@ sb nginx status
 sb status                           # sing-box + gRPC + 配置路径
 sb check                            # 校验 sing-box 配置
 sb reload                           # 重载 sing-box
+sb doctor                           # 检查 config / db / gRPC / v2ray_api / 证书 / nginx
 ```
+
+`sb doctor` 会输出 `OK / WARN / ERR` 三类结果，重点检查：
+- `config.toml` / `config.json` 是否存在且可解析
+- 数据库是否可读写
+- sing-box 二进制路径、`sing-box check`、gRPC 连通性
+- `experimental.v2ray_api` 是否启用且地址匹配
+- TLS 引用的证书/私钥文件是否存在
+- 订阅配置和 nginx `-t` 是否正常
 
 ---
 
@@ -194,6 +204,12 @@ sb reload                           # 重载 sing-box
 **nginx 页**：`[i]` 装 `[g]` 生成反代 conf `[t]` 语法检查 `[s/S/x]` 启/停/重启 `[r]` reload `[e/d]` 开/关自启
 
 添加节点后会自动 `sing-box check -c ... && systemctl reload sing-box`，校验不通过不会覆盖。
+
+## 维护建议
+
+- 发版前至少跑一次 `cargo fmt --all -- --check`
+- 确认 `cargo build --locked`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all` 都通过
+- 部署机上跑一次 `sb doctor`，比单独看 `sb status` 更容易发现缺失证书、gRPC 不通、`v2ray_api` 没开这类问题
 
 ---
 

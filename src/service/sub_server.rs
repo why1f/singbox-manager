@@ -68,6 +68,12 @@ async fn handle_sub(
     Query(q): Query<SubQuery>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
+    let ua = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let fmt = pick_format(q.ty.as_deref(), ua);
+
     // token 格式粗校验 + 空串直接 404（revoke 后的账号走这条路）
     if token.is_empty()
         || !token.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
@@ -84,13 +90,18 @@ async fn handle_sub(
         Ok(v) => v,
         Err(e) => {
             warn!("读取 sing-box 配置失败: {}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, HeaderMap::new(), Vec::new());
+            return error_response(fmt, StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
         }
     };
 
-    let server = node_service::get_server_ip().await;
-    let ua = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("");
-    let fmt = pick_format(q.ty.as_deref(), ua);
+    let request_host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
+    let server = match node_service::resolve_server_host(&s.cfg.subscription.public_base, request_host).await {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("解析订阅节点地址失败: {}", e);
+            return error_response(fmt, StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+        }
+    };
 
     let (body, ctype): (Vec<u8>, &str) = match fmt {
         Format::Stats => {
@@ -99,12 +110,16 @@ async fn handle_sub(
             (html.into_bytes(), "text/html; charset=utf-8")
         }
         Format::Yaml => {
-            let yaml = sub_service::generate_clash_yaml(&cfg_json, &user.name, &server)
-                .unwrap_or_else(|e| format!("# error: {}\n", e));
-            (yaml.into_bytes(), "text/yaml; charset=utf-8")
+            match sub_service::generate_clash_yaml(&cfg_json, &user.name, &server) {
+                Ok(yaml) => (yaml.into_bytes(), "text/yaml; charset=utf-8"),
+                Err(e) => return error_response(fmt, StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+            }
         }
         Format::Base64 => {
-            let links = sub_service::generate_links(&cfg_json, &user.name, &server).unwrap_or_default();
+            let links = match sub_service::generate_links(&cfg_json, &user.name, &server) {
+                Ok(links) => links,
+                Err(e) => return error_response(fmt, StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+            };
             let text = sub_service::generate_subscription(&links);
             (text.into_bytes(), "text/plain; charset=utf-8")
         }
@@ -167,8 +182,9 @@ fn resolve_base_url(public_base: &str, headers: &HeaderMap) -> String {
 
 /// subscription-userinfo 头：`upload=X; download=Y; total=Z; expire=T`
 fn userinfo_header(u: &User) -> String {
-    let upload   = u.used_up_bytes.max(0) as u64;
-    let download = u.used_down_bytes.max(0) as u64;
+    let mul = u.traffic_multiplier.max(0.0);
+    let upload = ((u.used_up_bytes.max(0) as f64) * mul) as u64;
+    let download = ((u.used_down_bytes.max(0) as f64) * mul) as u64;
     let total    = (u.quota_gb * 1_073_741_824.0) as u64;
     let expire = if u.expire_at.is_empty() {
         0
@@ -182,6 +198,34 @@ fn userinfo_header(u: &User) -> String {
     format!("upload={}; download={}; total={}; expire={}", upload, download, total, expire)
 }
 
+fn error_response(
+    fmt: Format,
+    status: StatusCode,
+    msg: &str,
+) -> (StatusCode, HeaderMap, Vec<u8>) {
+    let mut headers = HeaderMap::new();
+    let (ctype, body) = match fmt {
+        Format::Stats => (
+            "text/html; charset=utf-8",
+            format!(
+                "<!doctype html><html><body><h1>subscription error</h1><pre>{}</pre></body></html>",
+                html_escape(msg)
+            )
+            .into_bytes(),
+        ),
+        Format::Yaml => ("text/plain; charset=utf-8", format!("# error: {}\n", msg).into_bytes()),
+        Format::Base64 => ("text/plain; charset=utf-8", format!("error: {}\n", msg).into_bytes()),
+    };
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static_or_default(ctype));
+    (status, headers, body)
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 // 用 from_static_or_default 包装：如果静态字符串非 ASCII 就退回 text/plain
 trait HvExt {
     fn from_static_or_default(s: &'static str) -> HeaderValue;
@@ -189,5 +233,50 @@ trait HvExt {
 impl HvExt for HeaderValue {
     fn from_static_or_default(s: &'static str) -> HeaderValue {
         HeaderValue::try_from(s).unwrap_or_else(|_| HeaderValue::from_static("text/plain"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{pick_format, userinfo_header, Format};
+    use crate::model::user::User;
+
+    fn sample_user() -> User {
+        User {
+            name: "alice".into(),
+            uuid: "de909d94-1d92-4a2f-9da8-c5b52a52282c".into(),
+            password: "secret".into(),
+            enabled: true,
+            quota_gb: 100.0,
+            used_up_bytes: 10,
+            used_down_bytes: 20,
+            last_live_up: 0,
+            last_live_down: 0,
+            reset_day: 0,
+            last_reset_ym: String::new(),
+            expire_at: String::new(),
+            allow_all_nodes: true,
+            created_at: "2026-01-01".into(),
+            allowed_nodes: "[]".into(),
+            sub_token: "token".into(),
+            traffic_multiplier: 2.0,
+        }
+    }
+
+    #[test]
+    fn browser_defaults_to_stats() {
+        assert!(matches!(pick_format(None, "Mozilla/5.0"), Format::Stats));
+    }
+
+    #[test]
+    fn clash_ua_defaults_to_yaml() {
+        assert!(matches!(pick_format(None, "clash-verge/1.0"), Format::Yaml));
+    }
+
+    #[test]
+    fn userinfo_uses_effective_metered_bytes() {
+        let header = userinfo_header(&sample_user());
+        assert!(header.contains("upload=20"));
+        assert!(header.contains("download=40"));
     }
 }

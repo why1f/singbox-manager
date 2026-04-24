@@ -1,12 +1,9 @@
 use anyhow::{anyhow, Result};
-use std::process::Command;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const BACKUP_DIR: &str = "/etc/sing-box/backup";
-const ALLOWLIST_DIRS: &[&str] = &[
-    "/etc/sing-box/manager",
-    "/etc/sing-box/certs",
-];
+const ALLOWLIST_DIRS: &[&str] = &["/etc/sing-box/manager", "/etc/sing-box/certs"];
 const ALLOWLIST_FILES: &[&str] = &[
     "/etc/sing-box/config.json",
     "/etc/nginx/conf.d/sb-manager.conf",
@@ -48,7 +45,13 @@ fn rotate_backups() -> Result<()> {
         .filter(|p| p.is_file() && p.to_string_lossy().ends_with(".tar.gz"))
         .collect();
 
-    entries.sort_by_key(|a| std::cmp::Reverse(a.metadata().and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH)));
+    entries.sort_by_key(|a| {
+        std::cmp::Reverse(
+            a.metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+        )
+    });
 
     for old_file in entries.into_iter().skip(5) {
         let _ = std::fs::remove_file(old_file);
@@ -58,15 +61,31 @@ fn rotate_backups() -> Result<()> {
 }
 
 pub fn list_backups() -> Result<Vec<String>> {
-    if !Path::new(BACKUP_DIR).exists() { return Ok(vec![]); }
+    if !Path::new(BACKUP_DIR).exists() {
+        return Ok(vec![]);
+    }
     let mut entries: Vec<PathBuf> = std::fs::read_dir(BACKUP_DIR)?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.is_file() && p.to_string_lossy().ends_with(".tar.gz"))
         .collect();
-    
-    entries.sort_by_key(|a| std::cmp::Reverse(a.metadata().and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH)));
-    
-    Ok(entries.into_iter().map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned()).collect())
+
+    entries.sort_by_key(|a| {
+        std::cmp::Reverse(
+            a.metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+        )
+    });
+
+    Ok(entries
+        .into_iter()
+        .map(|p| {
+            p.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect())
 }
 
 pub fn restore_backup(filename: &str) -> Result<()> {
@@ -81,7 +100,9 @@ pub fn restore_backup(filename: &str) -> Result<()> {
     validate_backup_contents(&backup_path)?;
 
     let status = Command::new("tar")
-        .args(["xzf", backup_path.to_str().unwrap(), "-P"])
+        .arg("xzf")
+        .arg(&backup_path)
+        .arg("-P")
         .status()?;
 
     if !status.success() {
@@ -89,8 +110,12 @@ pub fn restore_backup(filename: &str) -> Result<()> {
     }
 
     // 重启相关服务
-    let _ = Command::new("systemctl").args(["restart", "sb-manager"]).status();
-    let _ = Command::new("systemctl").args(["restart", "sing-box"]).status();
+    let _ = Command::new("systemctl")
+        .args(["restart", "sb-manager"])
+        .status();
+    let _ = Command::new("systemctl")
+        .args(["restart", "sing-box"])
+        .status();
     let _ = Command::new("systemctl").args(["reload", "nginx"]).status();
 
     Ok(())
@@ -138,7 +163,9 @@ fn normalize_path(raw: &str) -> Option<String> {
 
 fn is_allowed_path(path: &str) -> bool {
     ALLOWLIST_FILES.contains(&path)
-        || ALLOWLIST_DIRS.iter().any(|dir| path == *dir || path.starts_with(&format!("{}/", dir)))
+        || ALLOWLIST_DIRS
+            .iter()
+            .any(|dir| path == *dir || path.starts_with(&format!("{}/", dir)))
 }
 
 #[cfg(test)]
@@ -147,7 +174,10 @@ mod tests {
 
     #[test]
     fn normalize_absolute_path() {
-        assert_eq!(normalize_path("/etc/sing-box/manager/manager.db"), Some("/etc/sing-box/manager/manager.db".into()));
+        assert_eq!(
+            normalize_path("/etc/sing-box/manager/manager.db"),
+            Some("/etc/sing-box/manager/manager.db".into())
+        );
     }
 
     #[test]
