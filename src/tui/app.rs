@@ -62,8 +62,6 @@ pub struct AppState {
     pub cpu_history: Vec<u8>,        // 0-100
     pub net_rx_history: Vec<u64>,    // 每秒新增字节
     pub net_tx_history: Vec<u64>,
-    pub dashboard_user_scroll: usize,
-    pub dashboard_node_scroll: usize,
     /// 按键处理设置后，主 loop 下一次 iteration 会挂起 TUI 执行它然后清空
     pub pending_cmd: Option<ExternalCmd>,
 }
@@ -94,8 +92,6 @@ impl AppState {
             cpu_history: Vec::new(),
             net_rx_history: Vec::new(),
             net_tx_history: Vec::new(),
-            dashboard_user_scroll: 0,
-            dashboard_node_scroll: 0,
             pending_cmd: None,
         }
     }

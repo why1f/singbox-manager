@@ -9,29 +9,20 @@ use ratatui::{
 use crate::{model::user::User, tui::app::AppState};
 
 pub fn render(f: &mut Frame, area: Rect, s: &AppState) {
-    let c = layout_chunks(area, s);
+    let c = Layout::default().direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),  // sing-box 状态
+            Constraint::Length(3),  // CPU gauge
+            Constraint::Length(8),  // 网速双曲线（braille）
+            Constraint::Min(6),     // 用户摘要
+            Constraint::Length(6),  // 节点摘要
+        ]).split(area);
 
     render_status(f, c[0], s);
     render_cpu(f, c[1], s);
     render_net(f, c[2], s);
     render_summary(f, c[3], s);
     render_nodes(f, c[4], s);
-}
-
-pub fn layout_chunks(area: Rect, s: &AppState) -> [Rect; 5] {
-    let fixed_top = 3 + 3 + 7;
-    let remaining = area.height.saturating_sub(fixed_top);
-    let user_h = summary_block_height(s, remaining);
-    let node_h = remaining.saturating_sub(user_h);
-    let c = Layout::default().direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(7),
-            Constraint::Length(user_h),
-            Constraint::Length(node_h),
-        ]).split(area);
-    [c[0], c[1], c[2], c[3], c[4]]
 }
 
 fn render_status(f: &mut Frame, area: Rect, s: &AppState) {
@@ -108,44 +99,6 @@ fn render_net_chart(f: &mut Frame, area: Rect, hist: &[u64], color: Color, title
 }
 
 fn render_summary(f: &mut Frame, area: Rect, s: &AppState) {
-    let content_width = area.width.saturating_sub(2);
-    let lines = build_summary_lines(s, content_width);
-    let inner_h = area.height.saturating_sub(2) as usize;
-    let max_scroll = lines.len().saturating_sub(inner_h);
-    let scroll = s.dashboard_user_scroll.min(max_scroll) as u16;
-
-    f.render_widget(
-        Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(" 用户摘要 "))
-            .scroll((scroll, 0))
-            .wrap(Wrap { trim: false }),
-        area,
-    );
-}
-
-fn render_nodes(f: &mut Frame, area: Rect, s: &AppState) {
-    let lines = build_node_lines(s);
-    let inner_h = area.height.saturating_sub(2) as usize;
-    let max_scroll = lines.len().saturating_sub(inner_h);
-    let scroll = s.dashboard_node_scroll.min(max_scroll) as u16;
-    f.render_widget(
-        Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(" 节点摘要 "))
-            .scroll((scroll, 0))
-            .wrap(Wrap { trim: false }),
-        area,
-    );
-}
-
-pub fn summary_line_count(s: &AppState, width: u16) -> usize {
-    build_summary_lines(s, width.saturating_sub(2)).len()
-}
-
-pub fn node_line_count(s: &AppState) -> usize {
-    build_node_lines(s).len()
-}
-
-fn build_summary_lines(s: &AppState, width: u16) -> Vec<Line<'static>> {
     let total = s.users.len();
     let en = s.users.iter().filter(|u| u.enabled).count();
     let over = s.users.iter().filter(|u| u.is_over_quota()).count();
@@ -156,7 +109,8 @@ fn build_summary_lines(s: &AppState, width: u16) -> Vec<Line<'static>> {
     let mut top: Vec<&User> = s.users.iter().collect();
     top.sort_by_key(|u| -(u.used_total_bytes()));
     let top: Vec<&User> = top.into_iter().take(5).collect();
-    let bar_width = (width.saturating_sub(50)).clamp(10, 30) as usize;
+
+    let bar_width = (area.width.saturating_sub(50)).clamp(10, 30) as usize;
 
     let mut lines: Vec<Line> = vec![
         Line::from(vec![
@@ -170,7 +124,6 @@ fn build_summary_lines(s: &AppState, width: u16) -> Vec<Line<'static>> {
         ]),
         Line::from(""),
     ];
-
     if top.is_empty() {
         lines.push(Line::from(Span::styled(
             "  （无用户，进用户页按 [a] 添加）",
@@ -200,10 +153,16 @@ fn build_summary_lines(s: &AppState, width: u16) -> Vec<Line<'static>> {
             ]));
         }
     }
-    lines
+
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(" 用户摘要 "))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
-fn build_node_lines(s: &AppState) -> Vec<Line<'static>> {
+fn render_nodes(f: &mut Frame, area: Rect, s: &AppState) {
     let mut lines: Vec<Line> = Vec::new();
     if s.nodes.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -216,7 +175,7 @@ fn build_node_lines(s: &AppState) -> Vec<Line<'static>> {
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             Span::styled("(Tab 或按 3 进入节点页)", Style::default().fg(Color::DarkGray)),
         ]));
-        for n in &s.nodes {
+        for n in s.nodes.iter().take(6) {
             lines.push(Line::from(vec![
                 Span::raw("  "),
                 Span::styled(format!("{:<18}", n.tag),      Style::default().fg(Color::Cyan)),
@@ -225,15 +184,19 @@ fn build_node_lines(s: &AppState) -> Vec<Line<'static>> {
                 Span::styled(format!(" 用户 {}", n.user_count), Style::default().fg(Color::Green)),
             ]));
         }
+        if s.nodes.len() > 6 {
+            lines.push(Line::from(Span::styled(
+                format!("  … 还有 {} 个，见节点页", s.nodes.len() - 6),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
     }
-    lines
-}
-
-fn summary_block_height(s: &AppState, remaining: u16) -> u16 {
-    let min_nodes = 7;
-    let available_for_user = remaining.saturating_sub(min_nodes);
-    let desired = (summary_line_count(s, 120) as u16).saturating_add(2).max(7);
-    desired.min(available_for_user.max(7))
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(" 节点摘要 "))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 /// 返回形如 `██████░░░░` 的进度条字符串；quota<=0 时返回空白占位
