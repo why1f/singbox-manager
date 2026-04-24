@@ -23,14 +23,16 @@ use tokio::net::TcpListener;
 use tracing::{info, warn};
 
 use crate::{
-    core, db::user_repo, model::{config::AppConfig, user::User},
+    core,
+    db::user_repo,
+    model::{config::AppConfig, user::User},
     service::{node_service, stats_html, sub_service},
 };
 
 #[derive(Clone)]
 struct SubState {
     pool: SqlitePool,
-    cfg:  Arc<AppConfig>,
+    cfg: Arc<AppConfig>,
 }
 
 #[derive(Deserialize)]
@@ -40,20 +42,30 @@ struct SubQuery {
 }
 
 #[derive(Copy, Clone)]
-enum Format { Stats, Yaml, Base64 }
+enum Format {
+    Stats,
+    Yaml,
+    Base64,
+}
 
 pub async fn run(pool: SqlitePool, cfg: Arc<AppConfig>) -> Result<()> {
-    let addr: SocketAddr = cfg.subscription.listen.parse()
-        .with_context(|| format!("解析 subscription.listen 失败: {}", cfg.subscription.listen))?;
+    let addr: SocketAddr =
+        cfg.subscription.listen.parse().with_context(|| {
+            format!("解析 subscription.listen 失败: {}", cfg.subscription.listen)
+        })?;
 
-    let state = SubState { pool, cfg: cfg.clone() };
+    let state = SubState {
+        pool,
+        cfg: cfg.clone(),
+    };
     let app = Router::new()
         .route("/sub/:token", get(handle_sub))
-        .route("/healthz",    get(|| async { "ok" }))
+        .route("/healthz", get(|| async { "ok" }))
         .fallback(|| async { (StatusCode::NOT_FOUND, "") })
         .with_state(state);
 
-    let listener = TcpListener::bind(addr).await
+    let listener = TcpListener::bind(addr)
+        .await
         .with_context(|| format!("订阅服务绑定 {} 失败", addr))?;
     info!("订阅 HTTP 服务监听 {}", addr);
     if let Err(e) = axum::serve(listener, app).await {
@@ -76,8 +88,11 @@ async fn handle_sub(
 
     // token 格式粗校验 + 空串直接 404（revoke 后的账号走这条路）
     if token.is_empty()
-        || !token.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        || !(16..=64).contains(&token.len()) {
+        || !token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        || !(16..=64).contains(&token.len())
+    {
         return (StatusCode::NOT_FOUND, HeaderMap::new(), Vec::new());
     }
 
@@ -95,7 +110,12 @@ async fn handle_sub(
     };
 
     let request_host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
-    let server = match node_service::resolve_server_host(&s.cfg.subscription.public_base, request_host).await {
+    let server = match node_service::resolve_server_host(
+        &s.cfg.subscription.public_base,
+        request_host,
+    )
+    .await
+    {
         Ok(v) => v,
         Err(e) => {
             warn!("解析订阅节点地址失败: {}", e);
@@ -109,16 +129,18 @@ async fn handle_sub(
             let html = stats_html::render(&cfg_json, &user, &server, &base);
             (html.into_bytes(), "text/html; charset=utf-8")
         }
-        Format::Yaml => {
-            match sub_service::generate_clash_yaml(&cfg_json, &user.name, &server) {
-                Ok(yaml) => (yaml.into_bytes(), "text/yaml; charset=utf-8"),
-                Err(e) => return error_response(fmt, StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Format::Yaml => match sub_service::generate_clash_yaml(&cfg_json, &user.name, &server) {
+            Ok(yaml) => (yaml.into_bytes(), "text/yaml; charset=utf-8"),
+            Err(e) => {
+                return error_response(fmt, StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())
             }
-        }
+        },
         Format::Base64 => {
             let links = match sub_service::generate_links(&cfg_json, &user.name, &server) {
                 Ok(links) => links,
-                Err(e) => return error_response(fmt, StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+                Err(e) => {
+                    return error_response(fmt, StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())
+                }
             };
             let text = sub_service::generate_subscription(&links);
             (text.into_bytes(), "text/plain; charset=utf-8")
@@ -126,7 +148,10 @@ async fn handle_sub(
     };
 
     let mut out = HeaderMap::new();
-    out.insert(header::CONTENT_TYPE, HeaderValue::from_static_or_default(ctype));
+    out.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static_or_default(ctype),
+    );
     if let Ok(v) = HeaderValue::from_str(&userinfo_header(&user)) {
         out.insert(HeaderName::from_static("subscription-userinfo"), v);
     }
@@ -152,18 +177,17 @@ async fn handle_sub(
 fn pick_format(ty: Option<&str>, ua: &str) -> Format {
     if let Some(t) = ty {
         return match t.to_ascii_lowercase().as_str() {
-            "stats" | "html"                       => Format::Stats,
-            "clash" | "mihomo" | "yaml"            => Format::Yaml,
-            _                                      => Format::Base64,
+            "stats" | "html" => Format::Stats,
+            "clash" | "mihomo" | "yaml" => Format::Yaml,
+            _ => Format::Base64,
         };
     }
     // UA 分流：主流代理客户端的 UA 都带自己的关键字；浏览器几乎必然以 Mozilla 开头
     let u = ua.to_ascii_lowercase();
-    if u.starts_with("mozilla/") { return Format::Stats; }
-    if u.contains("clash")
-        || u.contains("mihomo")
-        || u.contains("stash")
-        || u.contains("clashx") {
+    if u.starts_with("mozilla/") {
+        return Format::Stats;
+    }
+    if u.contains("clash") || u.contains("mihomo") || u.contains("stash") || u.contains("clashx") {
         return Format::Yaml;
     }
     Format::Base64
@@ -171,10 +195,18 @@ fn pick_format(ty: Option<&str>, ua: &str) -> Format {
 
 /// 订阅页里拼完整 URL 用的 base：public_base 优先，否则从 Host 头回退
 fn resolve_base_url(public_base: &str, headers: &HeaderMap) -> String {
-    if !public_base.is_empty() { return public_base.trim_end_matches('/').to_string(); }
-    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("");
-    if host.is_empty() { return String::new(); }
-    let scheme = headers.get("x-forwarded-proto")
+    if !public_base.is_empty() {
+        return public_base.trim_end_matches('/').to_string();
+    }
+    let host = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if host.is_empty() {
+        return String::new();
+    }
+    let scheme = headers
+        .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("https");
     format!("{}://{}", scheme, host)
@@ -185,7 +217,7 @@ fn userinfo_header(u: &User) -> String {
     let mul = u.traffic_multiplier.max(0.0);
     let upload = ((u.used_up_bytes.max(0) as f64) * mul) as u64;
     let download = ((u.used_down_bytes.max(0) as f64) * mul) as u64;
-    let total    = (u.quota_gb * 1_073_741_824.0) as u64;
+    let total = (u.quota_gb * 1_073_741_824.0) as u64;
     let expire = if u.expire_at.is_empty() {
         0
     } else {
@@ -195,14 +227,13 @@ fn userinfo_header(u: &User) -> String {
             .map(|dt| dt.and_utc().timestamp() as u64)
             .unwrap_or(0)
     };
-    format!("upload={}; download={}; total={}; expire={}", upload, download, total, expire)
+    format!(
+        "upload={}; download={}; total={}; expire={}",
+        upload, download, total, expire
+    )
 }
 
-fn error_response(
-    fmt: Format,
-    status: StatusCode,
-    msg: &str,
-) -> (StatusCode, HeaderMap, Vec<u8>) {
+fn error_response(fmt: Format, status: StatusCode, msg: &str) -> (StatusCode, HeaderMap, Vec<u8>) {
     let mut headers = HeaderMap::new();
     let (ctype, body) = match fmt {
         Format::Stats => (
@@ -213,10 +244,19 @@ fn error_response(
             )
             .into_bytes(),
         ),
-        Format::Yaml => ("text/plain; charset=utf-8", format!("# error: {}\n", msg).into_bytes()),
-        Format::Base64 => ("text/plain; charset=utf-8", format!("error: {}\n", msg).into_bytes()),
+        Format::Yaml => (
+            "text/plain; charset=utf-8",
+            format!("# error: {}\n", msg).into_bytes(),
+        ),
+        Format::Base64 => (
+            "text/plain; charset=utf-8",
+            format!("error: {}\n", msg).into_bytes(),
+        ),
     };
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static_or_default(ctype));
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static_or_default(ctype),
+    );
     (status, headers, body)
 }
 

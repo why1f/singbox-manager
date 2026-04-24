@@ -2,18 +2,33 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Protocol {
-    VlessReality, VlessWs, VmessWs, Shadowsocks,
-    Trojan, Tuic, Anytls, Hysteria2, Unknown,
+    VlessReality,
+    VlessWs,
+    VmessWs,
+    Shadowsocks,
+    Trojan,
+    Tuic,
+    Anytls,
+    Hysteria2,
+    Unknown,
 }
 impl std::fmt::Display for Protocol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", match self {
-            Protocol::VlessReality => "vless-reality", Protocol::VlessWs => "vless-ws",
-            Protocol::VmessWs     => "vmess-ws",       Protocol::Shadowsocks => "shadowsocks",
-            Protocol::Trojan      => "trojan",         Protocol::Tuic => "tuic",
-            Protocol::Anytls      => "anytls",         Protocol::Hysteria2 => "hysteria2",
-            Protocol::Unknown     => "unknown",
-        })
+        write!(
+            f,
+            "{}",
+            match self {
+                Protocol::VlessReality => "vless-reality",
+                Protocol::VlessWs => "vless-ws",
+                Protocol::VmessWs => "vmess-ws",
+                Protocol::Shadowsocks => "shadowsocks",
+                Protocol::Trojan => "trojan",
+                Protocol::Tuic => "tuic",
+                Protocol::Anytls => "anytls",
+                Protocol::Hysteria2 => "hysteria2",
+                Protocol::Unknown => "unknown",
+            }
+        )
     }
 }
 

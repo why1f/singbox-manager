@@ -1,27 +1,39 @@
-use clap::{Args, Subcommand};
 use crate::model::node::Protocol;
+use clap::{Args, Subcommand};
 
 #[derive(Args, Debug)]
-pub struct NodeArgs { #[command(subcommand)] pub command: NodeCommands }
+pub struct NodeArgs {
+    #[command(subcommand)]
+    pub command: NodeCommands,
+}
 
 #[derive(Args, Debug)]
 pub struct AddNodeArgs {
     pub tag: String,
-    #[arg(short, long)] pub protocol: String,
-    #[arg(short, long)] pub port: u16,
-    #[arg(long)] pub server_name: Option<String>,
-    #[arg(long)] pub path: Option<String>,
+    #[arg(short, long)]
+    pub protocol: String,
+    #[arg(short, long)]
+    pub port: u16,
+    #[arg(long)]
+    pub server_name: Option<String>,
+    #[arg(long)]
+    pub path: Option<String>,
     /// 端口复用：inbound listen 改 127.0.0.1，订阅 port 固定 443（仅 reality/trojan/anytls 有效）
-    #[arg(long, default_value_t = false)] pub port_reuse: bool,
+    #[arg(long, default_value_t = false)]
+    pub port_reuse: bool,
 }
 
 #[derive(Args, Debug)]
 pub struct EditNodeArgs {
     pub tag: String,
-    #[arg(long)] pub port: Option<u16>,
-    #[arg(long)] pub server_name: Option<String>,
-    #[arg(long)] pub path: Option<String>,
-    #[arg(long)] pub port_reuse: Option<bool>,
+    #[arg(long)]
+    pub port: Option<u16>,
+    #[arg(long)]
+    pub server_name: Option<String>,
+    #[arg(long)]
+    pub path: Option<String>,
+    #[arg(long)]
+    pub port_reuse: Option<bool>,
 }
 
 #[derive(Subcommand, Debug)]

@@ -34,9 +34,9 @@ pub fn generate_links(cfg: &Value, username: &str, server: &str) -> Result<Vec<S
             "vmess" => vmess_ws(ib, user, server, port, tag),
             "shadowsocks" => shadowsocks(ib, user, server, port, tag),
             "trojan" => trojan(ib, user, server, port, tag),
-            "hysteria2" => hysteria2(ib, user, server, port, tag, username),
-            "tuic" => tuic(ib, user, server, port, tag, username),
-            "anytls" => anytls(ib, user, server, port, tag, username),
+            "hysteria2" => hysteria2(ib, user, server, port, tag),
+            "tuic" => tuic(ib, user, server, port, tag),
+            "anytls" => anytls(ib, user, server, port, tag),
             _ => None,
         };
         if let Some(l) = link {
@@ -99,7 +99,7 @@ pub fn generate_clash_yaml(cfg: &Value, username: &str, server: &str) -> Result<
             continue;
         };
 
-        let proxy_name = format!("{}-{}", tag, username);
+        let proxy_name = tag.to_string();
         let added = match typ {
             "vless" => {
                 if ib["tls"]["reality"]["enabled"].as_bool() == Some(true) {
@@ -361,13 +361,12 @@ fn insecure_flag(ib: &Value) -> bool {
     }
 }
 
-fn fragment(tag: &str, name: &str) -> String {
-    urlencoding::encode(&format!("{}-{}", tag, name)).into_owned()
+fn fragment(tag: &str) -> String {
+    urlencoding::encode(tag).into_owned()
 }
 
 fn vless_reality(ib: &Value, user: &Value, s: &str, p: u64, tag: &str) -> Option<String> {
     let uuid = user["uuid"].as_str()?;
-    let name = user["name"].as_str()?;
     let sni = ib["tls"]["server_name"].as_str().unwrap_or("www.apple.com");
     let pk = crate::core::config::get_node_meta(tag)
         .and_then(|m| m.public_key)
@@ -379,12 +378,11 @@ fn vless_reality(ib: &Value, user: &Value, s: &str, p: u64, tag: &str) -> Option
         .unwrap_or("");
     Some(format!(
         "vless://{}@{}:{}?encryption=none&flow=xtls-rprx-vision&security=reality&sni={}&fp=chrome&pbk={}&sid={}&type=tcp#{}",
-        uuid, s, p, sni, pk, sid, fragment(tag, name)))
+        uuid, s, p, sni, pk, sid, fragment(tag)))
 }
 
 fn vless_ws(ib: &Value, user: &Value, s: &str, p: u64, tag: &str) -> Option<String> {
     let uuid = user["uuid"].as_str()?;
-    let name = user["name"].as_str()?;
     let path = ib["transport"]["path"].as_str().unwrap_or("/");
     let tls = ib["tls"]["enabled"].as_bool().unwrap_or(false);
     // security 根据 inbound 是否真正启用了 TLS 决定：
@@ -411,18 +409,17 @@ fn vless_ws(ib: &Value, user: &Value, s: &str, p: u64, tag: &str) -> Option<Stri
         urlencoding::encode(path),
         sni_param,
         insec,
-        fragment(tag, name)
+        fragment(tag)
     ))
 }
 
 fn vmess_ws(ib: &Value, user: &Value, s: &str, p: u64, tag: &str) -> Option<String> {
     let uuid = user["uuid"].as_str()?;
-    let name = user["name"].as_str()?;
     let path = ib["transport"]["path"].as_str().unwrap_or("/");
     let sni = ib["tls"]["server_name"].as_str().unwrap_or(s);
     let tls = ib["tls"]["enabled"].as_bool().unwrap_or(false);
     let obj = serde_json::json!({
-        "v":"2","ps":format!("{}-{}", tag, name),
+        "v":"2","ps":tag,
         "add":s,"port":p.to_string(),"id":uuid,"aid":"0",
         "net":"ws","type":"none","host":sni,"path":path,
         "tls": if tls {"tls"} else {""},
@@ -432,20 +429,18 @@ fn vmess_ws(ib: &Value, user: &Value, s: &str, p: u64, tag: &str) -> Option<Stri
 
 fn shadowsocks(ib: &Value, user: &Value, s: &str, p: u64, tag: &str) -> Option<String> {
     let pw = user["password"].as_str()?;
-    let name = user["name"].as_str()?;
     let m = ib["method"].as_str().unwrap_or("2022-blake3-aes-128-gcm");
     Some(format!(
         "ss://{}@{}:{}#{}",
         STANDARD.encode(format!("{}:{}", m, pw)),
         s,
         p,
-        fragment(tag, name)
+        fragment(tag)
     ))
 }
 
 fn trojan(ib: &Value, user: &Value, s: &str, p: u64, tag: &str) -> Option<String> {
     let pw = user["password"].as_str()?;
-    let name = user["name"].as_str()?;
     let sni = ib["tls"]["server_name"].as_str().unwrap_or(s);
     let insec = if insecure_flag(ib) {
         "&allowInsecure=1"
@@ -459,11 +454,11 @@ fn trojan(ib: &Value, user: &Value, s: &str, p: u64, tag: &str) -> Option<String
         p,
         sni,
         insec,
-        fragment(tag, name)
+        fragment(tag)
     ))
 }
 
-fn hysteria2(ib: &Value, user: &Value, s: &str, p: u64, tag: &str, name: &str) -> Option<String> {
+fn hysteria2(ib: &Value, user: &Value, s: &str, p: u64, tag: &str) -> Option<String> {
     let pw = user["password"].as_str()?;
     let sni = ib["tls"]["server_name"].as_str().unwrap_or(s);
     let insec = if insecure_flag(ib) { "&insecure=1" } else { "" };
@@ -474,11 +469,11 @@ fn hysteria2(ib: &Value, user: &Value, s: &str, p: u64, tag: &str, name: &str) -
         p,
         sni,
         insec,
-        fragment(tag, name)
+        fragment(tag)
     ))
 }
 
-fn tuic(ib: &Value, user: &Value, s: &str, p: u64, tag: &str, name: &str) -> Option<String> {
+fn tuic(ib: &Value, user: &Value, s: &str, p: u64, tag: &str) -> Option<String> {
     let uuid = user["uuid"].as_str()?;
     let pw = user["password"].as_str()?;
     let sni = ib["tls"]["server_name"].as_str().unwrap_or(s);
@@ -495,11 +490,11 @@ fn tuic(ib: &Value, user: &Value, s: &str, p: u64, tag: &str, name: &str) -> Opt
         p,
         sni,
         insec,
-        fragment(tag, name)
+        fragment(tag)
     ))
 }
 
-fn anytls(ib: &Value, user: &Value, s: &str, p: u64, tag: &str, name: &str) -> Option<String> {
+fn anytls(ib: &Value, user: &Value, s: &str, p: u64, tag: &str) -> Option<String> {
     let pw = user["password"].as_str()?;
     let sni = ib["tls"]["server_name"].as_str().unwrap_or(s);
     let insec = if insecure_flag(ib) {
@@ -514,7 +509,7 @@ fn anytls(ib: &Value, user: &Value, s: &str, p: u64, tag: &str, name: &str) -> O
         p,
         sni,
         insec,
-        fragment(tag, name)
+        fragment(tag)
     ))
 }
 
@@ -587,6 +582,30 @@ mod tests {
         let yaml = generate_clash_yaml(&cfg, "alice", "1.2.3.4").unwrap();
 
         assert!(yaml.contains("type: anytls"));
-        assert!(yaml.contains("name: anytls-1-alice"));
+        assert!(yaml.contains("name: anytls-1"));
+    }
+
+    #[test]
+    fn share_link_fragment_uses_tag_only() {
+        let cfg = json!({
+            "inbounds": [{
+                "type": "trojan",
+                "tag": "trojan-1",
+                "listen_port": 443,
+                "users": [{ "name": "alice", "password": "secret" }],
+                "tls": {
+                    "enabled": true,
+                    "server_name": "example.com",
+                    "certificate_path": "/etc/sing-box/certs/trojan-1.crt",
+                    "key_path": "/etc/sing-box/certs/trojan-1.key"
+                }
+            }]
+        });
+
+        let links = generate_links(&cfg, "alice", "1.2.3.4").unwrap();
+
+        assert_eq!(links.len(), 1);
+        assert!(links[0].link.ends_with("#trojan-1"));
+        assert!(!links[0].link.ends_with("#trojan-1-alice"));
     }
 }

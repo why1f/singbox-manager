@@ -2,51 +2,72 @@ use anyhow::{anyhow, Result};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use serde_json::Value;
 use crate::model::node::{InboundNode, Protocol};
+use serde_json::Value;
 
 const SERVER_IP_TTL: Duration = Duration::from_secs(600);
 static SERVER_IP_CACHE: OnceLock<Mutex<Option<(Instant, String)>>> = OnceLock::new();
 
 pub fn list_nodes(cfg: &Value) -> Vec<InboundNode> {
-    let Some(arr) = cfg["inbounds"].as_array() else { return vec![]; };
-    arr.iter().filter_map(|ib| {
-        let tag  = ib["tag"].as_str()?.to_string();
-        let port = ib["listen_port"].as_u64().unwrap_or(0) as u16;
-        let default_name = default_user_name_for_inbound(ib);
-        let uc = ib["users"].as_array().map(|u| {
-            u.iter().filter(|item| item["name"].as_str() != Some(default_name)).count()
-        }).unwrap_or(0);
-        Some(InboundNode { tag, protocol: detect(ib), listen_port: port, user_count: uc })
-    }).collect()
+    let Some(arr) = cfg["inbounds"].as_array() else {
+        return vec![];
+    };
+    arr.iter()
+        .filter_map(|ib| {
+            let tag = ib["tag"].as_str()?.to_string();
+            let port = ib["listen_port"].as_u64().unwrap_or(0) as u16;
+            let default_name = default_user_name_for_inbound(ib);
+            let uc = ib["users"]
+                .as_array()
+                .map(|u| {
+                    u.iter()
+                        .filter(|item| item["name"].as_str() != Some(default_name))
+                        .count()
+                })
+                .unwrap_or(0);
+            Some(InboundNode {
+                tag,
+                protocol: detect(ib),
+                listen_port: port,
+                user_count: uc,
+            })
+        })
+        .collect()
 }
 
 fn default_user_name_for_inbound(ib: &Value) -> &'static str {
     match ib["type"].as_str().unwrap_or("") {
         "hysteria2" => "hy2-default",
-        "tuic"      => "tuic-default",
-        "anytls"    => "anytls-default",
-        _           => "default",
+        "tuic" => "tuic-default",
+        "anytls" => "anytls-default",
+        _ => "default",
     }
 }
 
 fn detect(ib: &Value) -> Protocol {
     match ib["type"].as_str().unwrap_or("") {
         "vless" => {
-            if ib["tls"]["reality"]["enabled"].as_bool() == Some(true) { Protocol::VlessReality }
-            else if ib["transport"]["type"].as_str() == Some("ws")     { Protocol::VlessWs }
-            else { Protocol::Unknown }
+            if ib["tls"]["reality"]["enabled"].as_bool() == Some(true) {
+                Protocol::VlessReality
+            } else if ib["transport"]["type"].as_str() == Some("ws") {
+                Protocol::VlessWs
+            } else {
+                Protocol::Unknown
+            }
         }
-        "vmess"       => {
-            if ib["transport"]["type"].as_str() == Some("ws") { Protocol::VmessWs }
-            else { Protocol::Unknown }
+        "vmess" => {
+            if ib["transport"]["type"].as_str() == Some("ws") {
+                Protocol::VmessWs
+            } else {
+                Protocol::Unknown
+            }
         }
         "shadowsocks" => Protocol::Shadowsocks,
-        "trojan"      => Protocol::Trojan,
-        "tuic"        => Protocol::Tuic,
-        "anytls"      => Protocol::Anytls,
-        "hysteria2"   => Protocol::Hysteria2,
-        _             => Protocol::Unknown,
+        "trojan" => Protocol::Trojan,
+        "tuic" => Protocol::Tuic,
+        "anytls" => Protocol::Anytls,
+        "hysteria2" => Protocol::Hysteria2,
+        _ => Protocol::Unknown,
     }
 }
 
@@ -83,7 +104,10 @@ pub async fn get_server_ip() -> Result<String> {
     let Ok(client) = reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
         .connect_timeout(Duration::from_secs(2))
-        .build() else { return Err(anyhow!("构建公网 IP 探测客户端失败")); };
+        .build()
+    else {
+        return Err(anyhow!("构建公网 IP 探测客户端失败"));
+    };
     for url in &["https://api4.ipify.org", "https://ifconfig.me/ip"] {
         if let Ok(resp) = client.get(*url).send().await {
             if let Ok(text) = resp.text().await {
@@ -96,7 +120,9 @@ pub async fn get_server_ip() -> Result<String> {
             }
         }
     }
-    Err(anyhow!("无法探测公网 IP；请配置 subscription.public_base 或通过反代域名访问订阅"))
+    Err(anyhow!(
+        "无法探测公网 IP；请配置 subscription.public_base 或通过反代域名访问订阅"
+    ))
 }
 
 fn public_base_host(public_base: &str) -> Option<String> {
@@ -150,21 +176,33 @@ mod tests {
 
     #[test]
     fn ipv6_gets_brackets() {
-        assert_eq!(normalize_server_ip("2001:db8::1"), Some("[2001:db8::1]".into()));
+        assert_eq!(
+            normalize_server_ip("2001:db8::1"),
+            Some("[2001:db8::1]".into())
+        );
     }
 
     #[test]
     fn strips_port_from_domain_authority() {
-        assert_eq!(authority_host("sub.example.com:8443"), Some("sub.example.com".into()));
+        assert_eq!(
+            authority_host("sub.example.com:8443"),
+            Some("sub.example.com".into())
+        );
     }
 
     #[test]
     fn keeps_bracketed_ipv6_without_port() {
-        assert_eq!(authority_host("[2001:db8::1]:443"), Some("[2001:db8::1]".into()));
+        assert_eq!(
+            authority_host("[2001:db8::1]:443"),
+            Some("[2001:db8::1]".into())
+        );
     }
 
     #[test]
     fn parses_host_from_public_base() {
-        assert_eq!(public_base_host("https://sub.example.com/path"), Some("sub.example.com".into()));
+        assert_eq!(
+            public_base_host("https://sub.example.com/path"),
+            Some("sub.example.com".into())
+        );
     }
 }

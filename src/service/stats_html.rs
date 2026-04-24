@@ -33,20 +33,28 @@ pub fn render(cfg: &Value, user: &User, server: &str, base_url: &str) -> String 
         ("", "", "正常")
     };
 
-    let total_str = if quota_bytes <= 0 { "不限".into() } else { User::format_bytes(quota_bytes) };
-    let used_str  = User::format_bytes(used_total);
-    let up_str    = User::format_bytes(user.used_up_bytes.max(0));
-    let down_str  = User::format_bytes(user.used_down_bytes.max(0));
+    let total_str = if quota_bytes <= 0 {
+        "不限".into()
+    } else {
+        User::format_bytes(quota_bytes)
+    };
+    let used_str = User::format_bytes(used_total);
+    let up_str = User::format_bytes(user.used_up_bytes.max(0));
+    let down_str = User::format_bytes(user.used_down_bytes.max(0));
 
     let reset_desc = match user.reset_day {
-        0  => "不重置".into(),
+        0 => "不重置".into(),
         32 => "月末".into(),
-        d  => format!("每月 {} 号", d),
+        d => format!("每月 {} 号", d),
     };
     let expire_desc = describe_expire(&user.expire_at);
-    let billing_str = if (user.traffic_multiplier - 2.0).abs() < 0.01 { "双向".to_string() }
-        else if (user.traffic_multiplier - 1.0).abs() < 0.01 { "单向".to_string() }
-        else { format!("{:.1}x", user.traffic_multiplier) };
+    let billing_str = if (user.traffic_multiplier - 2.0).abs() < 0.01 {
+        "双向".to_string()
+    } else if (user.traffic_multiplier - 1.0).abs() < 0.01 {
+        "单向".to_string()
+    } else {
+        format!("{:.1}x", user.traffic_multiplier)
+    };
 
     let sub_sing = format!("{}/sub/{}", base, user.sub_token);
     let sub_clash = format!("{}/sub/{}?type=clash", base, user.sub_token);
@@ -62,17 +70,21 @@ pub fn render(cfg: &Value, user: &User, server: &str, base_url: &str) -> String 
   <code>{clash_h}</code>
   <button onclick="copy(this,'{clash_j}')">复制</button>
 </div>"#,
-        sing_h = html_escape(&sub_sing), sing_j = js_escape(&sub_sing),
-        clash_h = html_escape(&sub_clash), clash_j = js_escape(&sub_clash),
+        sing_h = html_escape(&sub_sing),
+        sing_j = js_escape(&sub_sing),
+        clash_h = html_escape(&sub_clash),
+        clash_j = js_escape(&sub_clash),
     );
 
     let node_rows = if links.is_empty() {
         r#"<div style="color:var(--muted);font-size:13px;">暂无可用节点。先在 TUI 节点页添加，并给本用户分配节点。</div>"#.to_string()
     } else {
-        links.iter().map(|l| {
-            let qr = qrcode_svg(&l.link);
-            format!(
-                r#"<div class="node">
+        links
+            .iter()
+            .map(|l| {
+                let qr = qrcode_svg(&l.link);
+                format!(
+                    r#"<div class="node">
   <div class="row">
     <span class="name">{tag_h} <span style="color:var(--muted);">· {proto_h}</span></span>
     <code>{link_h}</code>
@@ -80,11 +92,15 @@ pub fn render(cfg: &Value, user: &User, server: &str, base_url: &str) -> String 
   </div>
   <details><summary>QR</summary>{qr}</details>
 </div>"#,
-                tag_h = html_escape(&l.tag), proto_h = html_escape(&l.protocol),
-                link_h = html_escape(&l.link), link_j = js_escape(&l.link),
-                qr = qr,
-            )
-        }).collect::<Vec<_>>().join("\n")
+                    tag_h = html_escape(&l.tag),
+                    proto_h = html_escape(&l.protocol),
+                    link_h = html_escape(&l.link),
+                    link_j = js_escape(&l.link),
+                    qr = qr,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     };
 
     format!(
@@ -193,25 +209,38 @@ function copy(btn,text){{
 </body>
 </html>"#,
         name_h = html_escape(&user.name),
-        status_cls = status_cls, status_label = status_label, bar_cls = bar_cls,
+        status_cls = status_cls,
+        status_label = status_label,
+        bar_cls = bar_cls,
         pct = pct.min(100.0),
-        used = used_str, total = total_str,
-        reset = reset_desc, expire = expire_desc, billing = billing_str,
-        up = up_str, down = down_str,
-        sub_rows = sub_rows, node_rows = node_rows,
+        used = used_str,
+        total = total_str,
+        reset = reset_desc,
+        expire = expire_desc,
+        billing = billing_str,
+        up = up_str,
+        down = down_str,
+        sub_rows = sub_rows,
+        node_rows = node_rows,
         n_nodes = links.len(),
     )
 }
 
 fn describe_expire(expire_at: &str) -> String {
-    if expire_at.is_empty() { return "无限期".into(); }
+    if expire_at.is_empty() {
+        return "无限期".into();
+    }
     match chrono::NaiveDate::parse_from_str(expire_at, "%Y-%m-%d") {
         Ok(exp) => {
             let today = chrono::Local::now().date_naive();
-            let days  = (exp - today).num_days();
-            if days < 0   { format!("{} (已过期 {} 天)", exp, -days) }
-            else if days == 0 { format!("{} (今日到期)", exp) }
-            else              { format!("{} (还有 {} 天)", exp, days) }
+            let days = (exp - today).num_days();
+            if days < 0 {
+                format!("{} (已过期 {} 天)", exp, -days)
+            } else if days == 0 {
+                format!("{} (今日到期)", exp)
+            } else {
+                format!("{} (还有 {} 天)", exp, days)
+            }
         }
         Err(_) => expire_at.to_string(),
     }
@@ -219,7 +248,8 @@ fn describe_expire(expire_at: &str) -> String {
 
 fn qrcode_svg(data: &str) -> String {
     match QrCode::new(data.as_bytes()) {
-        Ok(code) => code.render::<svg::Color>()
+        Ok(code) => code
+            .render::<svg::Color>()
             .min_dimensions(200, 200)
             .dark_color(svg::Color("#0d1117"))
             .light_color(svg::Color("#ffffff"))
@@ -233,12 +263,12 @@ fn html_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
-            '<'  => out.push_str("&lt;"),
-            '>'  => out.push_str("&gt;"),
-            '&'  => out.push_str("&amp;"),
-            '"'  => out.push_str("&quot;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&#39;"),
-            c    => out.push(c),
+            c => out.push(c),
         }
     }
     out
@@ -253,8 +283,8 @@ fn js_escape(s: &str) -> String {
             '\'' => out.push_str("\\'"),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
-            '<'  => out.push_str("\\x3c"),  // 防止 </script> 截断
-            c    => out.push(c),
+            '<' => out.push_str("\\x3c"), // 防止 </script> 截断
+            c => out.push(c),
         }
     }
     out

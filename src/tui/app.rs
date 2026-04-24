@@ -13,26 +13,59 @@ pub enum ExternalCmd {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Page { Dashboard, Users, Nodes, Logs, Kernel, Nginx }
+pub enum Page {
+    Dashboard,
+    Users,
+    Nodes,
+    Logs,
+    Kernel,
+    Nginx,
+}
 impl Page {
     pub fn index(&self) -> usize {
         match self {
-            Page::Dashboard => 0, Page::Users => 1, Page::Nodes => 2,
-            Page::Logs => 3, Page::Kernel => 4, Page::Nginx => 5,
+            Page::Dashboard => 0,
+            Page::Users => 1,
+            Page::Nodes => 2,
+            Page::Logs => 3,
+            Page::Kernel => 4,
+            Page::Nginx => 5,
         }
     }
 }
 #[derive(Debug, Clone)]
-pub enum StatusLevel { Warn, Error }
+pub enum StatusLevel {
+    Warn,
+    Error,
+}
 
 #[derive(Default)]
-pub struct TableState { pub selected: usize }
+pub struct TableState {
+    pub selected: usize,
+}
 impl TableState {
-    pub fn next(&mut self, len: usize) { if len>0 { self.selected=(self.selected+1)%len; } }
-    pub fn prev(&mut self, len: usize) { if len>0 { self.selected=if self.selected==0{len-1}else{self.selected-1}; } }
+    pub fn next(&mut self, len: usize) {
+        if len > 0 {
+            self.selected = (self.selected + 1) % len;
+        }
+    }
+    pub fn prev(&mut self, len: usize) {
+        if len > 0 {
+            self.selected = if self.selected == 0 {
+                len - 1
+            } else {
+                self.selected - 1
+            };
+        }
+    }
     pub fn clamp(&mut self, len: usize) {
-        if len == 0 { self.selected = 0; return; }
-        if self.selected >= len { self.selected = len - 1; }
+        if len == 0 {
+            self.selected = 0;
+            return;
+        }
+        if self.selected >= len {
+            self.selected = len - 1;
+        }
     }
 }
 
@@ -48,7 +81,7 @@ pub struct AppState {
     pub status_set_at: Option<std::time::Instant>,
     pub user_table: TableState,
     pub node_table: TableState,
-    pub traffic_history: Vec<(i64,i64)>,
+    pub traffic_history: Vec<(i64, i64)>,
     pub uptime_secs: u64,
     pub last_subscription: Option<String>,
     pub modal: Option<Modal>,
@@ -59,29 +92,36 @@ pub struct AppState {
     pub nginx_public_base: Option<String>,
     pub sub_public_base: Option<String>,
     // 系统指标历史（TUI 仪表盘曲线）
-    pub cpu_history: Vec<u8>,        // 0-100
-    pub net_rx_history: Vec<u64>,    // 每秒新增字节
+    pub cpu_history: Vec<u8>,     // 0-100
+    pub net_rx_history: Vec<u64>, // 每秒新增字节
     pub net_tx_history: Vec<u64>,
     /// 按键处理设置后，主 loop 下一次 iteration 会挂起 TUI 执行它然后清空
     pub pending_cmd: Option<ExternalCmd>,
 }
 
 impl Default for AppState {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AppState {
     pub fn new() -> Self {
         Self {
             page: Page::Dashboard,
-            users: vec![], nodes: vec![],
-            singbox_running: None, grpc_connected: false,
-            last_sync_time: None, log_lines: vec![], status_msg: None,
+            users: vec![],
+            nodes: vec![],
+            singbox_running: None,
+            grpc_connected: false,
+            last_sync_time: None,
+            log_lines: vec![],
+            status_msg: None,
             status_set_at: None,
             user_table: TableState::default(),
             node_table: TableState::default(),
             traffic_history: vec![],
-            uptime_secs: 0, last_subscription: None,
+            uptime_secs: 0,
+            last_subscription: None,
             modal: None,
             kernel: None,
             kernel_busy: None,
@@ -103,7 +143,9 @@ impl AppState {
     }
     pub fn push_log(&mut self, s: String) {
         self.log_lines.push(s);
-        if self.log_lines.len()>500 { self.log_lines.drain(0..100); }
+        if self.log_lines.len() > 500 {
+            self.log_lines.drain(0..100);
+        }
     }
     pub fn set_status(&mut self, msg: impl Into<String>, level: StatusLevel) {
         self.status_msg = Some((msg.into(), level));
@@ -121,11 +163,11 @@ impl AppState {
     pub fn next_page(&mut self) {
         self.page = match self.page {
             Page::Dashboard => Page::Users,
-            Page::Users     => Page::Nodes,
-            Page::Nodes     => Page::Logs,
-            Page::Logs      => Page::Kernel,
-            Page::Kernel    => Page::Nginx,
-            Page::Nginx     => Page::Dashboard,
+            Page::Users => Page::Nodes,
+            Page::Nodes => Page::Logs,
+            Page::Logs => Page::Kernel,
+            Page::Kernel => Page::Nginx,
+            Page::Nginx => Page::Dashboard,
         };
     }
 }

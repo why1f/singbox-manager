@@ -1,7 +1,10 @@
 use clap::{Args, Subcommand};
 
 #[derive(Args, Debug)]
-pub struct NginxArgs { #[command(subcommand)] pub command: NginxCommands }
+pub struct NginxArgs {
+    #[command(subcommand)]
+    pub command: NginxCommands,
+}
 
 #[derive(Subcommand, Debug)]
 pub enum NginxCommands {

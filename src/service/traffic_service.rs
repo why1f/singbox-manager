@@ -1,13 +1,16 @@
+use crate::core::{
+    grpc::{query_all_traffic, StatsClient},
+    traffic::calc_deltas,
+};
+use crate::db::{traffic_repo, user_repo};
+use crate::model::traffic::TrafficDelta;
+use crate::service::user_service::apply_automatic_controls;
 use anyhow::Result;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{error, warn};
-use crate::core::{grpc::{StatsClient, query_all_traffic}, traffic::calc_deltas};
-use crate::db::{user_repo, traffic_repo};
-use crate::model::traffic::TrafficDelta;
-use crate::service::user_service::apply_automatic_controls;
 
 #[derive(Debug, Clone)]
 pub enum TrafficEvent {
@@ -31,7 +34,9 @@ pub async fn run_until_disconnect(
     let mut tiv = tokio::time::interval(Duration::from_secs(1));
     let mut civ = tokio::time::interval(Duration::from_secs(60));
     let mut hiv = tokio::time::interval(Duration::from_secs(3600));
-    siv.tick().await; civ.tick().await; hiv.tick().await;
+    siv.tick().await;
+    civ.tick().await;
+    hiv.tick().await;
 
     let mut alerted: HashMap<String, u8> = HashMap::new();
 
@@ -78,11 +83,17 @@ async fn sync_once(
     if !deltas.is_empty() {
         let mut tx_db = pool.begin().await?;
         for d in &deltas {
-            sqlx::query(r#"UPDATE users SET used_up_bytes=used_up_bytes+?,
-                used_down_bytes=used_down_bytes+?,last_live_up=?,last_live_down=? WHERE name=?"#)
-                .bind(d.delta_up).bind(d.delta_down)
-                .bind(d.new_live_up).bind(d.new_live_down)
-                .bind(&d.username).execute(&mut *tx_db).await?;
+            sqlx::query(
+                r#"UPDATE users SET used_up_bytes=used_up_bytes+?,
+                used_down_bytes=used_down_bytes+?,last_live_up=?,last_live_down=? WHERE name=?"#,
+            )
+            .bind(d.delta_up)
+            .bind(d.delta_down)
+            .bind(d.new_live_up)
+            .bind(d.new_live_down)
+            .bind(&d.username)
+            .execute(&mut *tx_db)
+            .await?;
             sqlx::query("INSERT INTO traffic_history(username,up_bytes,down_bytes,recorded_at)VALUES(?,?,?,datetime('now'))")
                 .bind(&d.username).bind(d.delta_up).bind(d.delta_down)
                 .execute(&mut *tx_db).await?;
@@ -92,16 +103,36 @@ async fn sync_once(
 
     // 告警去重：阈值档位变化才发送（80 / 90 / 100）
     for u in &users {
-        if u.quota_gb <= 0.0 { continue; }
-        let applied_up = u.used_up_bytes + deltas.iter()
-            .find(|d| d.username == u.name).map(|d| d.delta_up).unwrap_or(0);
-        let applied_dn = u.used_down_bytes + deltas.iter()
-            .find(|d| d.username == u.name).map(|d| d.delta_down).unwrap_or(0);
+        if u.quota_gb <= 0.0 {
+            continue;
+        }
+        let applied_up = u.used_up_bytes
+            + deltas
+                .iter()
+                .find(|d| d.username == u.name)
+                .map(|d| d.delta_up)
+                .unwrap_or(0);
+        let applied_dn = u.used_down_bytes
+            + deltas
+                .iter()
+                .find(|d| d.username == u.name)
+                .map(|d| d.delta_down)
+                .unwrap_or(0);
         let used = ((applied_up + applied_dn) as f64 * u.traffic_multiplier) as i64;
         let quota = (u.quota_gb * 1_073_741_824.0) as i64;
-        if quota <= 0 { continue; }
+        if quota <= 0 {
+            continue;
+        }
         let pct = ((used as f64 / quota as f64 * 100.0).min(100.0)) as u8;
-        let bucket = if pct >= 100 { 100 } else if pct >= 95 { 95 } else if pct >= alert_pct { alert_pct } else { 0 };
+        let bucket = if pct >= 100 {
+            100
+        } else if pct >= 95 {
+            95
+        } else if pct >= alert_pct {
+            alert_pct
+        } else {
+            0
+        };
         if bucket == 0 {
             alerted.remove(&u.name);
             continue;

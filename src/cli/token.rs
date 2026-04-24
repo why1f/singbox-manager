@@ -1,7 +1,10 @@
 use clap::{Args, Subcommand};
 
 #[derive(Args, Debug)]
-pub struct TokenArgs { #[command(subcommand)] pub command: TokenCommands }
+pub struct TokenArgs {
+    #[command(subcommand)]
+    pub command: TokenCommands,
+}
 
 #[derive(Subcommand, Debug)]
 pub enum TokenCommands {

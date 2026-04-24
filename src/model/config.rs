@@ -3,10 +3,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub singbox: SingboxConfig,
-    pub db:      DbConfig,
-    pub stats:   StatsConfig,
+    pub db: DbConfig,
+    pub stats: StatsConfig,
     #[serde(default)]
-    pub kernel:  KernelConfig,
+    pub kernel: KernelConfig,
     #[serde(default)]
     pub subscription: SubscriptionConfig,
 }
@@ -17,9 +17,14 @@ pub struct SingboxConfig {
     pub grpc_addr: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DbConfig { pub path: String }
+pub struct DbConfig {
+    pub path: String,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StatsConfig { pub sync_interval_secs: u64, pub quota_alert_percent: u8 }
+pub struct StatsConfig {
+    pub sync_interval_secs: u64,
+    pub quota_alert_percent: u8,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KernelConfig {
@@ -28,9 +33,15 @@ pub struct KernelConfig {
     pub update_repo: String,
 }
 impl Default for KernelConfig {
-    fn default() -> Self { Self { update_repo: default_update_repo() } }
+    fn default() -> Self {
+        Self {
+            update_repo: default_update_repo(),
+        }
+    }
 }
-fn default_update_repo() -> String { "why1f/singbox-manager".into() }
+fn default_update_repo() -> String {
+    "why1f/singbox-manager".into()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscriptionConfig {
@@ -57,9 +68,15 @@ impl Default for SubscriptionConfig {
         }
     }
 }
-fn default_sub_listen() -> String { "127.0.0.1:18081".into() }
-fn default_nginx_conf() -> String { "/etc/nginx/conf.d/sb-manager.conf".into() }
-fn default_true() -> bool { true }
+fn default_sub_listen() -> String {
+    "127.0.0.1:18081".into()
+}
+fn default_nginx_conf() -> String {
+    "/etc/nginx/conf.d/sb-manager.conf".into()
+}
+fn default_true() -> bool {
+    true
+}
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -67,11 +84,16 @@ impl Default for AppConfig {
             singbox: SingboxConfig {
                 config_path: "/etc/sing-box/config.json".into(),
                 binary_path: "/etc/sing-box/bin/sing-box".into(),
-                grpc_addr:   "127.0.0.1:18080".into(),
+                grpc_addr: "127.0.0.1:18080".into(),
             },
-            db:           DbConfig { path: "/etc/sing-box/manager/manager.db".into() },
-            stats:        StatsConfig { sync_interval_secs: 30, quota_alert_percent: 80 },
-            kernel:       KernelConfig::default(),
+            db: DbConfig {
+                path: "/etc/sing-box/manager/manager.db".into(),
+            },
+            stats: StatsConfig {
+                sync_interval_secs: 30,
+                quota_alert_percent: 80,
+            },
+            kernel: KernelConfig::default(),
             subscription: SubscriptionConfig::default(),
         }
     }

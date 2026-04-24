@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
 
@@ -189,11 +189,10 @@ pub fn edit_node(
     Ok(())
 }
 
-/// 将 managed 用户同步到所有用户型 inbound 的 users 数组。
-/// 安全边界：仅移除 name 命中 managed 集合的用户条目，不触碰未托管的默认/旧账号。
+/// 将数据库用户重建到所有用户型 inbound 的 users 数组。
+/// 安全边界：仅保留协议默认占位账号和无 name 的手工条目，其余命名用户条目由 manager 全量重建。
 /// 授权：`user.can_use_node(tag)` 为 false 的组合会被排除。
 pub fn sync_users(cfg: &mut Value, users: &[User], grpc_addr: &str) -> usize {
-    let managed: HashSet<&str> = users.iter().map(|u| u.name.as_str()).collect();
     let enabled: Vec<&User> = users
         .iter()
         .filter(|u| u.enabled && !u.is_expired() && !u.is_over_quota())
@@ -218,6 +217,7 @@ pub fn sync_users(cfg: &mut Value, users: &[User], grpc_addr: &str) -> usize {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
+            let default_name = default_user_name_for_type(&typ);
             let additions: Vec<Value> = enabled
                 .iter()
                 .filter(|u| u.can_use_node(&tag))
@@ -229,10 +229,7 @@ pub fn sync_users(cfg: &mut Value, users: &[User], grpc_addr: &str) -> usize {
                     .as_array_mut()
             });
             let Some(arr) = arr else { continue };
-            arr.retain(|item| match item.get("name").and_then(Value::as_str) {
-                Some(n) => !managed.contains(n),
-                None => true,
-            });
+            arr.retain(|item| should_preserve_user_entry(item, default_name));
             for value in additions {
                 arr.push(value);
                 synced += 1;
@@ -243,6 +240,22 @@ pub fn sync_users(cfg: &mut Value, users: &[User], grpc_addr: &str) -> usize {
     // v2ray_api.stats.users 仍包含所有启用用户（用于统计，不影响授权）
     sync_v2ray_api_users(cfg, &enabled, grpc_addr);
     synced
+}
+
+fn default_user_name_for_type(typ: &str) -> &'static str {
+    match typ {
+        "hysteria2" => "hy2-default",
+        "tuic" => "tuic-default",
+        "anytls" => "anytls-default",
+        _ => "default",
+    }
+}
+
+fn should_preserve_user_entry(item: &Value, default_name: &str) -> bool {
+    match item.get("name").and_then(Value::as_str) {
+        Some(name) => name == default_name,
+        None => true,
+    }
 }
 
 /// 读取 config.json 中全部 inbound tag 列表
@@ -700,5 +713,38 @@ mod tests {
         .unwrap();
 
         assert!(cfg["inbounds"][0]["tls"].get("server_name").is_none());
+    }
+
+    #[test]
+    fn sync_users_removes_stale_named_entries_but_keeps_default_user() {
+        let mut cfg = json!({
+            "inbounds": [{
+                "type": "trojan",
+                "tag": "trojan-1",
+                "listen": "::",
+                "listen_port": 443,
+                "users": [
+                    { "name": "alice", "password": "old-secret" },
+                    { "name": "bob", "password": "stale-secret" },
+                    { "name": "default", "password": "keep-me" }
+                ],
+                "tls": {
+                    "enabled": true,
+                    "server_name": "example.com",
+                    "certificate_path": "/etc/sing-box/certs/trojan-1.crt",
+                    "key_path": "/etc/sing-box/certs/trojan-1.key"
+                }
+            }]
+        });
+        let users = vec![sample_user("alice")];
+
+        let synced = sync_users(&mut cfg, &users, "127.0.0.1:18080");
+        let arr = cfg["inbounds"][0]["users"].as_array().unwrap();
+
+        assert_eq!(synced, 1);
+        assert_eq!(arr.len(), 2);
+        assert!(arr.iter().any(|item| item["name"] == "alice"));
+        assert!(arr.iter().any(|item| item["name"] == "default"));
+        assert!(!arr.iter().any(|item| item["name"] == "bob"));
     }
 }

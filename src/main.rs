@@ -463,6 +463,16 @@ async fn run_user(
             println!("✓ '{}' 套餐已更新", name);
         }
         UserCommands::Grant { name, tag } => {
+            let existing: Vec<String> = if Path::new(&cfg.singbox.config_path).exists() {
+                core::config::load(&cfg.singbox.config_path)
+                    .map(|v| core::config::list_tags(&v))
+                    .unwrap_or_default()
+            } else {
+                vec![]
+            };
+            if !existing.iter().any(|item| item == &tag) {
+                anyhow::bail!("节点不存在: {}", tag);
+            }
             user_service::grant_node(pool, &name, &tag).await?;
             apply_runtime_changes(pool, cfg).await?;
             println!("✓ '{}' 已获得节点 '{}' 的访问", name, tag);
@@ -508,7 +518,9 @@ async fn run_user(
                 return Ok(());
             }
             let config = core::config::load(&cfg.singbox.config_path)?;
-            let server = service::node_service::resolve_server_host(&cfg.subscription.public_base, None).await?;
+            let server =
+                service::node_service::resolve_server_host(&cfg.subscription.public_base, None)
+                    .await?;
             let links = service::sub_service::generate_links(&config, &name, &server)?;
             if links.is_empty() {
                 println!("用户 '{}' 无可用节点", name);
@@ -550,7 +562,9 @@ async fn run_node(cmd: cli::node::NodeCommands, cfg: &AppConfig) -> Result<()> {
             }
         }
         NodeCommands::Export { name } => {
-            let server = service::node_service::resolve_server_host(&cfg.subscription.public_base, None).await?;
+            let server =
+                service::node_service::resolve_server_host(&cfg.subscription.public_base, None)
+                    .await?;
             let ls = service::sub_service::generate_links(&config, &name, &server)?;
             println!(
                 "# 订阅 (Base64)\n{}",
@@ -604,7 +618,10 @@ async fn run_node(cmd: cli::node::NodeCommands, cfg: &AppConfig) -> Result<()> {
                 args.port_reuse,
             )?;
             core::config::save(&cfg.singbox.config_path, &config)?;
-            let proc = core::singbox::SingboxProcess::new(&cfg.singbox.binary_path, &cfg.singbox.config_path);
+            let proc = core::singbox::SingboxProcess::new(
+                &cfg.singbox.binary_path,
+                &cfg.singbox.config_path,
+            );
             proc.check_config()?;
             if matches!(proc.is_running(), Some(true)) {
                 proc.reload()?;
@@ -612,16 +629,25 @@ async fn run_node(cmd: cli::node::NodeCommands, cfg: &AppConfig) -> Result<()> {
             println!("✓ 节点 '{}' 已更新", args.tag);
         }
         NodeCommands::Del { tag } => {
+            let pool = open_pool(cfg).await?;
             if !core::config::remove_node(&mut config, &tag) {
                 anyhow::bail!("节点不存在: {}", tag);
             }
             core::config::save(&cfg.singbox.config_path, &config)?;
-            let proc = core::singbox::SingboxProcess::new(&cfg.singbox.binary_path, &cfg.singbox.config_path);
+            let proc = core::singbox::SingboxProcess::new(
+                &cfg.singbox.binary_path,
+                &cfg.singbox.config_path,
+            );
             proc.check_config()?;
             if matches!(proc.is_running(), Some(true)) {
                 proc.reload()?;
             }
+            let cleaned =
+                service::user_service::remove_allowed_tag_from_all_users(&pool, &tag).await?;
             println!("✓ 节点 '{}' 已删除", tag);
+            if cleaned > 0 {
+                println!("  已清理 {} 个用户的节点分配引用", cleaned);
+            }
         }
     }
     Ok(())
