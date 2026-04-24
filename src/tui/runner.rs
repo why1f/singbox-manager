@@ -1,10 +1,13 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event as CE, KeyCode, KeyEvent, KeyEventKind},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event as CE, KeyCode, KeyEvent,
+        KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{backend::CrosstermBackend, layout::{Constraint, Direction, Layout}, Terminal};
+use ratatui::{backend::CrosstermBackend, layout::{Constraint, Direction, Layout, Rect}, Terminal};
 use std::{io, sync::Arc, time::Duration};
 use tokio::sync::mpsc;
 
@@ -47,11 +50,11 @@ pub async fn run(
     s.nodes = nodes;
     enable_raw_mode()?;
     let mut out = io::stdout();
-    execute!(out, EnterAlternateScreen)?;
+    execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
     let mut term = Terminal::new(CrosstermBackend::new(out))?;
     let r = event_loop(&mut term, &mut s, &mut rx, Arc::new(pool), Arc::new(cfg)).await;
     disable_raw_mode()?;
-    execute!(term.backend_mut(), LeaveAlternateScreen)?;
+    execute!(term.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     term.show_cursor()?;
     r
 }
@@ -112,8 +115,8 @@ async fn event_loop(
             biased;
             _ = tokio::time::sleep(Duration::from_millis(50)) => {
                 if event::poll(Duration::from_millis(0))? {
-                    if let CE::Key(k) = event::read()? {
-                        if k.kind == KeyEventKind::Press {
+                    match event::read()? {
+                        CE::Key(k) if k.kind == KeyEventKind::Press => {
                             if s.modal.is_some() {
                                 if handle_modal_key(s, k, pool.clone(), cfg.clone(), ui_tx.clone()) {
                                     return Ok(());
@@ -123,6 +126,17 @@ async fn event_loop(
                                 handle_page_key(s, k, pool.clone(), cfg.clone(), ui_tx.clone());
                             }
                         }
+                        CE::Mouse(m) if s.modal.is_none() => {
+                            let size = term.size()?;
+                            handle_mouse_event(
+                                s,
+                                m,
+                                Rect::new(0, 0, size.width, size.height),
+                                ui_tx.clone(),
+                                cfg.clone(),
+                            );
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -138,6 +152,90 @@ fn is_quit(k: &KeyEvent) -> bool {
         || (matches!(k.code, KeyCode::Char('c')) && k.modifiers == KeyModifiers::CONTROL)
 }
 
+fn handle_mouse_event(
+    s: &mut AppState,
+    m: MouseEvent,
+    area: Rect,
+    ui_tx: mpsc::Sender<UiEvent>,
+    cfg: Arc<AppConfig>,
+) {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(0), Constraint::Length(1)])
+        .split(area);
+    let tab_area = layout[0];
+    let content_area = layout[1];
+
+    match m.kind {
+        MouseEventKind::ScrollUp => match s.page {
+            Page::Dashboard => handle_dashboard_scroll(s, content_area, m.column, m.row, true),
+            Page::Users => s.user_table.prev(s.users.len()),
+            Page::Nodes => s.node_table.prev(s.nodes.len()),
+            _ => {}
+        },
+        MouseEventKind::ScrollDown => match s.page {
+            Page::Dashboard => handle_dashboard_scroll(s, content_area, m.column, m.row, false),
+            Page::Users => s.user_table.next(s.users.len()),
+            Page::Nodes => s.node_table.next(s.nodes.len()),
+            _ => {}
+        },
+        MouseEventKind::Down(MouseButton::Left) => {
+            if let Some(idx) = widgets::tab_bar::hit_test(tab_area, m.column, m.row) {
+                set_page_from_index(s, idx);
+                maybe_refresh_kernel(s, &ui_tx);
+                maybe_refresh_nginx(s, &ui_tx, cfg);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_dashboard_scroll(
+    s: &mut AppState,
+    area: Rect,
+    column: u16,
+    row: u16,
+    upwards: bool,
+) {
+    let chunks = pages::dashboard::layout_chunks(area, s);
+    if point_in_rect(chunks[3], column, row) {
+        let inner_h = chunks[3].height.saturating_sub(2) as usize;
+        let max_scroll = pages::dashboard::summary_line_count(s, chunks[3].width)
+            .saturating_sub(inner_h);
+        adjust_scroll(&mut s.dashboard_user_scroll, upwards, max_scroll);
+    } else if point_in_rect(chunks[4], column, row) {
+        let inner_h = chunks[4].height.saturating_sub(2) as usize;
+        let max_scroll = pages::dashboard::node_line_count(s).saturating_sub(inner_h);
+        adjust_scroll(&mut s.dashboard_node_scroll, upwards, max_scroll);
+    }
+}
+
+fn point_in_rect(area: Rect, column: u16, row: u16) -> bool {
+    column >= area.x
+        && column < area.x.saturating_add(area.width)
+        && row >= area.y
+        && row < area.y.saturating_add(area.height)
+}
+
+fn adjust_scroll(offset: &mut usize, upwards: bool, max_scroll: usize) {
+    *offset = if upwards {
+        offset.saturating_sub(1)
+    } else {
+        (*offset + 1).min(max_scroll)
+    };
+}
+
+fn set_page_from_index(s: &mut AppState, idx: usize) {
+    s.page = match idx {
+        0 => Page::Dashboard,
+        1 => Page::Users,
+        2 => Page::Nodes,
+        3 => Page::Logs,
+        4 => Page::Kernel,
+        _ => Page::Nginx,
+    };
+}
+
 /// 挂起 TUI → 让外部命令接管 TTY → 用户 Enter → 恢复 TUI。
 /// 同步阻塞调用当前 worker；后台 tokio 任务仍在另一个 worker 上跑。
 fn run_external_suspended(
@@ -147,7 +245,7 @@ fn run_external_suspended(
 ) -> Result<Option<(String, StatusLevel)>> {
     // —— 让出 TTY ——
     disable_raw_mode()?;
-    execute!(term.backend_mut(), LeaveAlternateScreen)?;
+    execute!(term.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     term.show_cursor()?;
 
     let post = match cmd {
@@ -164,7 +262,7 @@ fn run_external_suspended(
 
     // —— 恢复 TUI ——
     enable_raw_mode()?;
-    execute!(term.backend_mut(), EnterAlternateScreen)?;
+    execute!(term.backend_mut(), EnterAlternateScreen, EnableMouseCapture)?;
     term.clear()?;
     Ok(post)
 }
