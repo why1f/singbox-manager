@@ -3,11 +3,12 @@ use crate::core::{
     traffic::calc_deltas,
 };
 use crate::db::{traffic_repo, user_repo};
-use crate::model::traffic::TrafficDelta;
-use crate::service::user_service::apply_automatic_controls;
+use crate::model::{config::AppConfig, traffic::TrafficDelta, user::User};
+use crate::service::{runtime_service, user_service::apply_automatic_controls};
 use anyhow::Result;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{error, warn};
@@ -19,6 +20,7 @@ pub enum TrafficEvent {
     AutoControl(Vec<String>),
     GrpcError(String),
     GrpcConnected,
+    RuntimeSyncError(String),
     Tick,
 }
 
@@ -28,6 +30,7 @@ pub async fn run_until_disconnect(
     mut grpc: StatsClient,
     sync_secs: u64,
     alert_pct: u8,
+    cfg: Arc<AppConfig>,
     tx: mpsc::Sender<TrafficEvent>,
 ) {
     let mut siv = tokio::time::interval(Duration::from_secs(sync_secs.max(1)));
@@ -39,6 +42,7 @@ pub async fn run_until_disconnect(
     hiv.tick().await;
 
     let mut alerted: HashMap<String, u8> = HashMap::new();
+    let mut runtime_sync_dirty = false;
 
     let _ = tx.send(TrafficEvent::GrpcConnected).await;
     loop {
@@ -56,9 +60,26 @@ pub async fn run_until_disconnect(
             }
             _ = civ.tick() => {
                 match apply_automatic_controls(&pool).await {
-                    Ok(c) if !c.is_empty() => { let _ = tx.send(TrafficEvent::AutoControl(c)).await; }
+                    Ok(c) => {
+                        if !c.is_empty() {
+                            runtime_sync_dirty = true;
+                        }
+                        if runtime_sync_dirty {
+                            match runtime_service::apply_user_runtime_changes(&pool, &cfg).await {
+                                Ok(()) => {
+                                    runtime_sync_dirty = false;
+                                    if !c.is_empty() {
+                                        let _ = tx.send(TrafficEvent::AutoControl(c)).await;
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("自动控制配置同步失败: {}", e);
+                                    let _ = tx.send(TrafficEvent::RuntimeSyncError(e.to_string())).await;
+                                }
+                            }
+                        }
+                    }
                     Err(e) => error!("自动控制: {}", e),
-                    _ => {}
                 }
             }
             _ = hiv.tick() => {
@@ -70,6 +91,14 @@ pub async fn run_until_disconnect(
     }
 }
 
+pub async fn flush_current_traffic(
+    pool: &SqlitePool,
+    grpc_addr: &str,
+) -> Result<Vec<TrafficDelta>> {
+    let mut grpc = crate::core::grpc::connect(grpc_addr).await?;
+    sync_current_traffic(pool, &mut grpc).await
+}
+
 async fn sync_once(
     pool: &SqlitePool,
     grpc: &mut StatsClient,
@@ -77,29 +106,7 @@ async fn sync_once(
     alerted: &mut HashMap<String, u8>,
     tx: &mpsc::Sender<TrafficEvent>,
 ) -> Result<()> {
-    let snaps = query_all_traffic(grpc, false).await?;
-    let users = user_repo::list_all(pool).await?;
-    let deltas = calc_deltas(&snaps, &users);
-    if !deltas.is_empty() {
-        let mut tx_db = pool.begin().await?;
-        for d in &deltas {
-            sqlx::query(
-                r#"UPDATE users SET used_up_bytes=used_up_bytes+?,
-                used_down_bytes=used_down_bytes+?,last_live_up=?,last_live_down=? WHERE name=?"#,
-            )
-            .bind(d.delta_up)
-            .bind(d.delta_down)
-            .bind(d.new_live_up)
-            .bind(d.new_live_down)
-            .bind(&d.username)
-            .execute(&mut *tx_db)
-            .await?;
-            sqlx::query("INSERT INTO traffic_history(username,up_bytes,down_bytes,recorded_at)VALUES(?,?,?,datetime('now'))")
-                .bind(&d.username).bind(d.delta_up).bind(d.delta_down)
-                .execute(&mut *tx_db).await?;
-        }
-        tx_db.commit().await?;
-    }
+    let (users, deltas) = sync_current_traffic_with_users(pool, grpc).await?;
 
     // 告警去重：阈值档位变化才发送（80 / 90 / 100）
     for u in &users {
@@ -147,4 +154,42 @@ async fn sync_once(
         let _ = tx.send(TrafficEvent::Synced(deltas)).await;
     }
     Ok(())
+}
+
+async fn sync_current_traffic_with_users(
+    pool: &SqlitePool,
+    grpc: &mut StatsClient,
+) -> Result<(Vec<User>, Vec<TrafficDelta>)> {
+    let snaps = query_all_traffic(grpc, false).await?;
+    let users = user_repo::list_all(pool).await?;
+    let deltas = calc_deltas(&snaps, &users);
+    if !deltas.is_empty() {
+        let mut tx_db = pool.begin().await?;
+        for d in &deltas {
+            sqlx::query(
+                r#"UPDATE users SET used_up_bytes=used_up_bytes+?,
+                used_down_bytes=used_down_bytes+?,last_live_up=?,last_live_down=? WHERE name=?"#,
+            )
+            .bind(d.delta_up)
+            .bind(d.delta_down)
+            .bind(d.new_live_up)
+            .bind(d.new_live_down)
+            .bind(&d.username)
+            .execute(&mut *tx_db)
+            .await?;
+            sqlx::query("INSERT INTO traffic_history(username,up_bytes,down_bytes,recorded_at)VALUES(?,?,?,datetime('now'))")
+                .bind(&d.username).bind(d.delta_up).bind(d.delta_down)
+                .execute(&mut *tx_db).await?;
+        }
+        tx_db.commit().await?;
+    }
+    Ok((users, deltas))
+}
+
+async fn sync_current_traffic(
+    pool: &SqlitePool,
+    grpc: &mut StatsClient,
+) -> Result<Vec<TrafficDelta>> {
+    let (_, deltas) = sync_current_traffic_with_users(pool, grpc).await?;
+    Ok(deltas)
 }

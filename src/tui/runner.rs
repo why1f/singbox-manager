@@ -348,6 +348,10 @@ fn apply_traffic_event(s: &mut AppState, ev: TrafficEvent) {
             s.push_log(format!("[ERROR] gRPC: {}", e));
             s.set_status(format!("gRPC 连接失败: {}", e), StatusLevel::Error);
         }
+        TrafficEvent::RuntimeSyncError(e) => {
+            s.push_log(format!("[ERROR] 自动控制同步失败: {}", e));
+            s.set_status(format!("自动控制同步失败: {}", e), StatusLevel::Error);
+        }
         TrafficEvent::QuotaAlert(n, p) => {
             s.push_log(format!("[WARN] {} 流量已用 {}%", n, p));
             s.set_status(format!("⚠ {} 用量 {}%", n, p), StatusLevel::Warn);
@@ -468,7 +472,7 @@ fn handle_page_key(
 ) {
     // 内核页/Nginx 页优先处理，避免与用户/节点页的 r/t/s 等按键冲突
     if s.page == Page::Kernel {
-        handle_kernel_key(s, k, ui_tx, cfg);
+        handle_kernel_key(s, k, pool, ui_tx, cfg);
         return;
     }
     if s.page == Page::Nginx {
@@ -652,6 +656,7 @@ fn handle_page_key(
 fn handle_kernel_key(
     s: &mut AppState,
     k: KeyEvent,
+    pool: Arc<sqlx::SqlitePool>,
     ui_tx: mpsc::Sender<UiEvent>,
     cfg: Arc<AppConfig>,
 ) {
@@ -676,14 +681,28 @@ fn handle_kernel_key(
         }
         KeyCode::Char('i') => spawn_kernel_install_latest(ui_tx),
         KeyCode::Char('v') => spawn_kernel_install_v2rayapi(ui_tx, cfg.kernel.update_repo.clone()),
-        KeyCode::Char('u') => {
-            spawn_kernel_op(ui_tx, "卸载 sing-box", crate::core::singbox::uninstall)
-        }
+        KeyCode::Char('u') => spawn_kernel_op_with_flush(
+            pool,
+            cfg,
+            ui_tx,
+            "卸载 sing-box",
+            crate::core::singbox::uninstall,
+        ),
         KeyCode::Char('s') => spawn_kernel_op(ui_tx, "启动 sing-box", crate::core::singbox::start),
-        KeyCode::Char('S') => spawn_kernel_op(ui_tx, "停止 sing-box", crate::core::singbox::stop),
-        KeyCode::Char('x') => {
-            spawn_kernel_op(ui_tx, "重启 sing-box", crate::core::singbox::restart)
-        }
+        KeyCode::Char('S') => spawn_kernel_op_with_flush(
+            pool,
+            cfg,
+            ui_tx,
+            "停止 sing-box",
+            crate::core::singbox::stop,
+        ),
+        KeyCode::Char('x') => spawn_kernel_op_with_flush(
+            pool,
+            cfg,
+            ui_tx,
+            "重启 sing-box",
+            crate::core::singbox::restart,
+        ),
         KeyCode::Char('e') => spawn_kernel_op(ui_tx, "启用开机自启", crate::core::singbox::enable),
         KeyCode::Char('d') => spawn_kernel_op(ui_tx, "关闭开机自启", crate::core::singbox::disable),
         _ => {}
@@ -928,6 +947,86 @@ where
             }
         }
         // systemctl 返回后进程可能还没被 pgrep 看到，延迟 + 轮询
+        refresh_kernel_status_stable(&tx).await;
+    });
+}
+
+fn spawn_kernel_op_with_flush<F>(
+    pool: Arc<sqlx::SqlitePool>,
+    cfg: Arc<AppConfig>,
+    tx: mpsc::Sender<UiEvent>,
+    label: &'static str,
+    op: F,
+) where
+    F: FnOnce() -> anyhow::Result<()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        let _ = tx.send(UiEvent::KernelBusy(Some(label))).await;
+        let flush_msg = match crate::service::traffic_service::flush_current_traffic(
+            &pool,
+            &cfg.singbox.grpc_addr,
+        )
+        .await
+        {
+            Ok(deltas) => {
+                if deltas.is_empty() {
+                    None
+                } else {
+                    let up: i64 = deltas.iter().map(|d| d.delta_up).sum();
+                    let down: i64 = deltas.iter().map(|d| d.delta_down).sum();
+                    Some(format!(
+                        "已预同步流量：{} 用户，上行 {}，下行 {}",
+                        deltas.len(),
+                        User::format_bytes(up),
+                        User::format_bytes(down)
+                    ))
+                }
+            }
+            Err(e) => Some(format!("预同步流量失败（继续执行内核操作）: {}", e)),
+        };
+        let result = tokio::task::spawn_blocking(op).await;
+        let _ = tx.send(UiEvent::KernelBusy(None)).await;
+        match result {
+            Ok(Ok(())) => {
+                let msg = if let Some(flush_msg) = flush_msg {
+                    format!("{} 成功；{}", label, flush_msg)
+                } else {
+                    format!("{} 成功", label)
+                };
+                let _ = tx
+                    .send(UiEvent::Status {
+                        msg,
+                        level: StatusLevel::Warn,
+                    })
+                    .await;
+            }
+            Ok(Err(e)) => {
+                let msg = if let Some(flush_msg) = flush_msg {
+                    format!("{} 失败: {}（{}）", label, e, flush_msg)
+                } else {
+                    format!("{} 失败: {}", label, e)
+                };
+                let _ = tx
+                    .send(UiEvent::Status {
+                        msg,
+                        level: StatusLevel::Error,
+                    })
+                    .await;
+            }
+            Err(e) => {
+                let msg = if let Some(flush_msg) = flush_msg {
+                    format!("{} 中断: {}（{}）", label, e, flush_msg)
+                } else {
+                    format!("{} 中断: {}", label, e)
+                };
+                let _ = tx
+                    .send(UiEvent::Status {
+                        msg,
+                        level: StatusLevel::Error,
+                    })
+                    .await;
+            }
+        }
         refresh_kernel_status_stable(&tx).await;
     });
 }

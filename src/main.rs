@@ -107,7 +107,7 @@ async fn main() -> Result<()> {
         Commands::Export { name } => run_node(cli::node::NodeCommands::Export { name }, &cfg).await,
         Commands::Check => run_check(&cfg),
         Commands::Start => run_start(&cfg),
-        Commands::Stop => run_stop(&cfg),
+        Commands::Stop => run_stop(&cfg).await,
         Commands::Reload => run_reload(&cfg),
         Commands::Status => run_status(&cfg).await,
         Commands::Doctor => run_doctor(&cfg_path, &cfg).await,
@@ -233,6 +233,9 @@ async fn run_daemon(pool: sqlx::SqlitePool, cfg: AppConfig) -> Result<()> {
                 }
                 TrafficEvent::GrpcConnected => tracing::info!("gRPC 已连接"),
                 TrafficEvent::GrpcError(e) => tracing::warn!(error = %e, "gRPC 同步失败"),
+                TrafficEvent::RuntimeSyncError(e) => {
+                    tracing::error!(error = %e, "自动控制后同步 sing-box 配置失败")
+                }
                 TrafficEvent::Tick => {}
             }
         }
@@ -240,6 +243,7 @@ async fn run_daemon(pool: sqlx::SqlitePool, cfg: AppConfig) -> Result<()> {
 
     // 带指数退避的重连循环
     let mut backoff_secs = 1u64;
+    let mut auto_sync_dirty = false;
     loop {
         match core::grpc::connect(&cfg.singbox.grpc_addr).await {
             Ok(client) => {
@@ -249,6 +253,7 @@ async fn run_daemon(pool: sqlx::SqlitePool, cfg: AppConfig) -> Result<()> {
                     client,
                     cfg.stats.sync_interval_secs,
                     cfg.stats.quota_alert_percent,
+                    std::sync::Arc::new(cfg.clone()),
                     tx.clone(),
                 )
                 .await;
@@ -256,8 +261,26 @@ async fn run_daemon(pool: sqlx::SqlitePool, cfg: AppConfig) -> Result<()> {
             }
             Err(e) => {
                 tracing::warn!(addr = %cfg.singbox.grpc_addr, error = %e, "连接 gRPC 失败");
-                if let Err(err) = service::user_service::apply_automatic_controls(&pool).await {
-                    tracing::error!(error = %err, "执行自动控制失败");
+                match service::user_service::apply_automatic_controls(&pool).await {
+                    Ok(changed) => {
+                        if !changed.is_empty() {
+                            auto_sync_dirty = true;
+                            for item in changed {
+                                tracing::info!(event = %item, "自动控制");
+                            }
+                        }
+                        if auto_sync_dirty {
+                            if let Err(err) =
+                                service::runtime_service::apply_user_runtime_changes(&pool, &cfg)
+                                    .await
+                            {
+                                tracing::error!(error = %err, "自动控制后同步 sing-box 配置失败");
+                            } else {
+                                auto_sync_dirty = false;
+                            }
+                        }
+                    }
+                    Err(err) => tracing::error!(error = %err, "执行自动控制失败"),
                 }
             }
         }
@@ -308,6 +331,7 @@ async fn run_tui(pool: sqlx::SqlitePool, cfg: AppConfig) -> Result<()> {
         let tx_bg = tx.clone();
         tokio::spawn(async move {
             let mut backoff = 1u64;
+            let mut auto_sync_dirty = false;
             loop {
                 match core::grpc::connect(&cfg_bg.singbox.grpc_addr).await {
                     Ok(client) => {
@@ -317,6 +341,7 @@ async fn run_tui(pool: sqlx::SqlitePool, cfg: AppConfig) -> Result<()> {
                             client,
                             cfg_bg.stats.sync_interval_secs,
                             cfg_bg.stats.quota_alert_percent,
+                            std::sync::Arc::new(cfg_bg.clone()),
                             tx_bg.clone(),
                         )
                         .await;
@@ -325,7 +350,38 @@ async fn run_tui(pool: sqlx::SqlitePool, cfg: AppConfig) -> Result<()> {
                         let _ = tx_bg.send(TrafficEvent::GrpcError(e.to_string())).await;
                         // 与 daemon 模式对齐：gRPC 不通时仍执行自动控制
                         // （月重置 / 超额禁用 / 到期禁用），避免纯 TUI 场景下这些逻辑失效
-                        let _ = service::user_service::apply_automatic_controls(&pool_bg).await;
+                        match service::user_service::apply_automatic_controls(&pool_bg).await {
+                            Ok(changed) => {
+                                if !changed.is_empty() {
+                                    auto_sync_dirty = true;
+                                    let _ = tx_bg.send(TrafficEvent::AutoControl(changed)).await;
+                                }
+                                if auto_sync_dirty {
+                                    if let Err(sync_err) =
+                                        service::runtime_service::apply_user_runtime_changes(
+                                            &pool_bg, &cfg_bg,
+                                        )
+                                        .await
+                                    {
+                                        let _ = tx_bg
+                                            .send(TrafficEvent::RuntimeSyncError(
+                                                sync_err.to_string(),
+                                            ))
+                                            .await;
+                                    } else {
+                                        auto_sync_dirty = false;
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                let _ = tx_bg
+                                    .send(TrafficEvent::RuntimeSyncError(format!(
+                                        "执行自动控制失败: {}",
+                                        err
+                                    )))
+                                    .await;
+                            }
+                        }
                     }
                 }
                 tokio::time::sleep(Duration::from_secs(backoff)).await;
@@ -654,20 +710,31 @@ async fn run_node(cmd: cli::node::NodeCommands, cfg: &AppConfig) -> Result<()> {
 }
 
 pub async fn apply_runtime_changes(pool: &sqlx::SqlitePool, cfg: &AppConfig) -> Result<()> {
-    if !Path::new(&cfg.singbox.config_path).exists() {
-        return Ok(());
+    service::runtime_service::apply_user_runtime_changes(pool, cfg).await
+}
+
+async fn flush_live_traffic_before_kernel_action(cfg: &AppConfig) -> Option<String> {
+    let pool = match open_pool(cfg).await {
+        Ok(pool) => pool,
+        Err(e) => return Some(format!("! 预同步流量失败：打开数据库失败: {}", e)),
+    };
+    match service::traffic_service::flush_current_traffic(&pool, &cfg.singbox.grpc_addr).await {
+        Ok(deltas) => {
+            if deltas.is_empty() {
+                None
+            } else {
+                let up: i64 = deltas.iter().map(|d| d.delta_up).sum();
+                let down: i64 = deltas.iter().map(|d| d.delta_down).sum();
+                Some(format!(
+                    "✓ 已预同步流量：{} 用户，上行 {}，下行 {}",
+                    deltas.len(),
+                    model::user::User::format_bytes(up),
+                    model::user::User::format_bytes(down)
+                ))
+            }
+        }
+        Err(e) => Some(format!("! 预同步流量失败（继续执行内核操作）: {}", e)),
     }
-    let mut config = core::config::load(&cfg.singbox.config_path)?;
-    let users = service::user_service::list_users(pool).await?;
-    core::config::sync_users(&mut config, &users, &cfg.singbox.grpc_addr);
-    core::config::save(&cfg.singbox.config_path, &config)?;
-    let proc =
-        core::singbox::SingboxProcess::new(&cfg.singbox.binary_path, &cfg.singbox.config_path);
-    proc.check_config()?;
-    if matches!(proc.is_running(), Some(true)) {
-        proc.reload()?;
-    }
-    Ok(())
 }
 
 async fn set_user_enabled(
@@ -702,7 +769,10 @@ fn run_start(cfg: &AppConfig) -> Result<()> {
     Ok(())
 }
 
-fn run_stop(cfg: &AppConfig) -> Result<()> {
+async fn run_stop(cfg: &AppConfig) -> Result<()> {
+    if let Some(msg) = flush_live_traffic_before_kernel_action(cfg).await {
+        println!("{}", msg);
+    }
     core::singbox::SingboxProcess::new(&cfg.singbox.binary_path, &cfg.singbox.config_path)
         .stop()?;
     println!("✓ sing-box 已停止");
@@ -745,6 +815,9 @@ async fn run_kernel(cmd: cli::kernel::KernelCommands, cfg: &AppConfig) -> Result
             println!("✓ v2ray_api 版 sing-box 已安装");
         }
         K::Uninstall => {
+            if let Some(msg) = flush_live_traffic_before_kernel_action(cfg).await {
+                println!("{}", msg);
+            }
             core::singbox::uninstall()?;
             println!("✓ sing-box 已卸载");
         }
@@ -753,10 +826,16 @@ async fn run_kernel(cmd: cli::kernel::KernelCommands, cfg: &AppConfig) -> Result
             println!("✓ sing-box 已启动");
         }
         K::Stop => {
+            if let Some(msg) = flush_live_traffic_before_kernel_action(cfg).await {
+                println!("{}", msg);
+            }
             core::singbox::stop()?;
             println!("✓ sing-box 已停止");
         }
         K::Restart => {
+            if let Some(msg) = flush_live_traffic_before_kernel_action(cfg).await {
+                println!("{}", msg);
+            }
             core::singbox::restart()?;
             println!("✓ sing-box 已重启");
         }
