@@ -90,7 +90,7 @@ pub async fn start(pool: SqlitePool, cfg: Arc<AppConfig>) -> Result<mpsc::Sender
     let offset = parse_timezone(&cfg.telegram.timezone).unwrap_or_else(|| {
         warn!(
             timezone = %cfg.telegram.timezone,
-            "无法解析时区，回落到 +08:00（仅支持 ±HH:MM 偏移和常用 IANA 别名如 Asia/Shanghai/Tokyo）"
+            "无法解析时区，回落到 +08:00。支持 ±HH:MM 偏移和无 DST 的 IANA 别名（Asia/Shanghai/Tokyo、Australia/Brisbane 等）；DST 时区（Europe/London、America/* 等）请用显式偏移如 +00:00 / -05:00"
         );
         FixedOffset::east_opt(8 * 3600).expect("8h 偏移恒定有效")
     });
@@ -659,7 +659,10 @@ async fn prompt_user_times(ctx: &TgContext, chat_id: i64) -> Result<()> {
     send_text(
         ctx,
         chat_id,
-        "请输入定时推送时间，支持多个。\n格式：HH:MM,HH:MM\n示例：09:00,21:30\n\n时区固定为 Asia/Shanghai",
+        &format!(
+            "请输入定时推送时间，支持多个。\n格式：HH:MM,HH:MM\n示例：09:00,21:30\n\n时区：{}",
+            timezone_label(ctx)
+        ),
         None,
     )
     .await
@@ -720,7 +723,10 @@ async fn prompt_admin_times(ctx: &TgContext, chat_id: i64) -> Result<()> {
     send_text(
         ctx,
         chat_id,
-        "请输入管理员汇总时间，支持多个。\n格式：HH:MM,HH:MM\n示例：09:00,13:00,21:30\n\n时区固定为 Asia/Shanghai",
+        &format!(
+            "请输入管理员汇总时间，支持多个。\n格式：HH:MM,HH:MM\n示例：09:00,13:00,21:30\n\n时区：{}",
+            timezone_label(ctx)
+        ),
         None,
     )
     .await
@@ -965,6 +971,20 @@ async fn bound_user(ctx: &TgContext, chat_id: i64) -> Result<User> {
 
 fn is_admin(ctx: &TgContext, chat_id: i64) -> bool {
     ctx.cfg.telegram.admin_chat_ids.contains(&chat_id)
+}
+
+/// 给 TG 提示文案用的时区标签：原样回显配置值；空串显示默认（+08:00）。
+/// 注意：用户在 config.toml 里填了无效字符串（如 `Europe/London`）时，此处仍
+/// 显示原值，但实际生效偏移已经是 fallback 的 +08:00（见 parse_timezone 的 warn）。
+/// 这是有意为之——管理员从 systemd 日志里看到 warn 才会去改配置，UI 文案
+/// 与 config 字面量一致便于排查。
+fn timezone_label(ctx: &TgContext) -> String {
+    let s = ctx.cfg.telegram.timezone.trim();
+    if s.is_empty() {
+        "Asia/Shanghai（默认）".into()
+    } else {
+        s.to_string()
+    }
 }
 
 fn local_now(ctx: &TgContext) -> DateTime<FixedOffset> {
@@ -1409,16 +1429,21 @@ fn parse_single_time(text: &str) -> Option<(u32, u32)> {
 
 /// 解析 telegram.timezone 配置。支持：
 /// - 空串 / "UTC" / "Z" → +00:00
-/// - 常用 IANA 别名（Asia/Shanghai 等）→ 写死的固定偏移
+/// - **不走 DST 的** IANA 别名（Asia/Shanghai、Asia/Tokyo、Asia/Dubai、
+///   Australia/Brisbane 等）→ 写死的固定偏移
 /// - "+HH:MM" / "-HH:MM" / "+HHMM" / "+HH"
 ///
-/// 不引入 chrono-tz 是为了不增加二进制体积，不处理 DST 是因为目标用户
-/// 几乎都在不走夏令时的时区。其他时区显式传 ±HH:MM 即可。
+/// 不引入 chrono-tz 是为了不增加二进制体积。会 DST 的时区
+/// （Europe/London、America/*、Australia/Sydney 等）**故意不在别名表里**——
+/// 给它们一个固定偏移会在夏令时期间整整偏 1 小时，比 fallback 到默认更危险。
+/// 这些时区请用显式偏移（如 `-05:00`）；用户填 `Europe/London` 等会回落到
+/// 默认偏移并打 warn 提示。
 fn parse_timezone(s: &str) -> Option<FixedOffset> {
     let s = s.trim();
     if s.is_empty() || s.eq_ignore_ascii_case("UTC") || s.eq_ignore_ascii_case("Z") {
         return FixedOffset::east_opt(0);
     }
+    // 仅保留全年无 DST 的 IANA 别名。其他时区一律走显式 ±HH:MM 偏移。
     let aliased_secs = match s {
         "Asia/Shanghai" | "Asia/Hong_Kong" | "Asia/Taipei" | "Asia/Singapore" | "Asia/Macau"
         | "Asia/Kuala_Lumpur" | "Asia/Manila" => Some(8 * 3600),
@@ -1426,15 +1451,7 @@ fn parse_timezone(s: &str) -> Option<FixedOffset> {
         "Asia/Bangkok" | "Asia/Ho_Chi_Minh" | "Asia/Jakarta" => Some(7 * 3600),
         "Asia/Kolkata" | "Asia/Calcutta" => Some(5 * 3600 + 30 * 60),
         "Asia/Dubai" => Some(4 * 3600),
-        "Europe/London" => Some(0),
-        "Europe/Paris" | "Europe/Berlin" | "Europe/Rome" | "Europe/Madrid" | "Europe/Amsterdam" => {
-            Some(3600)
-        }
-        "America/New_York" => Some(-5 * 3600),
-        "America/Chicago" => Some(-6 * 3600),
-        "America/Denver" => Some(-7 * 3600),
-        "America/Los_Angeles" => Some(-8 * 3600),
-        "Australia/Sydney" => Some(10 * 3600),
+        "Australia/Brisbane" | "Australia/Perth" => Some(10 * 3600),
         _ => None,
     };
     if let Some(secs) = aliased_secs {
@@ -1491,7 +1508,22 @@ mod tests {
             parse_timezone("Asia/Tokyo"),
             FixedOffset::east_opt(9 * 3600)
         );
-        assert_eq!(parse_timezone("Europe/London"), FixedOffset::east_opt(0));
+        assert_eq!(
+            parse_timezone("Australia/Brisbane"),
+            FixedOffset::east_opt(10 * 3600)
+        );
+    }
+
+    #[test]
+    fn parse_timezone_dst_aliases_rejected() {
+        // 这些时区有夏令时，给它们一个固定偏移会在 DST 期间整整偏 1 小时，
+        // 比 fallback 到默认 +08:00 + warn 更危险 —— 故意不在别名表里。
+        // 用户应该用显式偏移（如 -05:00）。
+        assert_eq!(parse_timezone("Europe/London"), None);
+        assert_eq!(parse_timezone("Europe/Paris"), None);
+        assert_eq!(parse_timezone("America/New_York"), None);
+        assert_eq!(parse_timezone("America/Los_Angeles"), None);
+        assert_eq!(parse_timezone("Australia/Sydney"), None);
     }
 
     #[test]
