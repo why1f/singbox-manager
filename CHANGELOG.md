@@ -1,5 +1,20 @@
 # CHANGELOG
 
+## v0.4.9
+
+### Fixed
+
+- **sing-box 内核下载强制 sha256 校验**：`install_latest` / `install_v2rayapi` 之前校验 sha 文件不可达时静默放行，等价于把"任意下载源"和"已校验源"画等号。改为先尝试 `<asset>.dgst`（SagerNet 官方），再回落 `<asset>.sha256`（自构建产物），都拿不到或哈希不匹配直接硬失败。需要绕过时设置 `SB_MANAGER_SKIP_DOWNLOAD_VERIFY=1`。
+- **`config.json` 与 `nodes.meta.json` 事务一致**：`add_node` / `edit_node` / `remove_node` 不再在闭包内部直接写 meta 文件；副作用收集到 `Vec<MetaOp>`，由 `mutate_config_locked` 在数据库锁 commit 成功 **之后** 统一 apply。之前若 config save 失败回滚，已落盘的 reality public_key 或证书残留会污染下次 add 同名节点。
+- **配置改动改在 `.tmp` 上预校验**：`mutate_config_locked` 与 `apply_user_runtime_changes` 改为 `save .tmp → sing-box check .tmp → atomic rename`。坏配置不会再覆盖主路径，校验失败时 `config.json` 保持上一个已验证状态。
+- **Telegram Bot 不再因 API 抖动而永久死亡**：`poll_updates_loop` 改为永远循环 + 1→60s 指数退避，单次 `getUpdates` 失败不会让整个轮询任务 spawn 退出（之前需要重启 daemon 才能恢复）。
+- **`telegram.timezone` 配置项现在真的生效**：之前硬编码 `+08:00`，配置改了也没用且 UI 还显示"时区：xxx"误导。新增 `parse_timezone` 支持 `±HH:MM` / `±HHMM` / `±HH` 偏移和常用 IANA 别名（Asia/Shanghai、Asia/Tokyo、Europe/London 等），解析失败回落 `+08:00` 并打 warn。
+- **Clash YAML 输出按 `insecure_flag()` 决定 `skip-cert-verify`**：之前 trojan / hy2 / tuic / anytls / vless-ws / vmess-ws 全部硬写 `skip-cert-verify: true`，等于配 acme 真证书的用户在 Clash 端依然绕过证书校验，与 share-link 路径行为不一致。改为复用 `insecure_flag()`（reality / acme / 用户自带证书 → false，托管目录下的自签证书 → true），并在 ws 协议未启用 TLS 时省略该字段。
+
+### Notes
+
+- 全部改动通过 `cargo test`（43 项，含新增的 9 项覆盖时区解析、sha256 / dgst 解析器、`MetaOp` 收集、Clash insecure 行为）和 `cargo clippy --all-targets -- -D warnings`。
+
 ## v0.4.8
 
 ### Added
