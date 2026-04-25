@@ -1260,10 +1260,7 @@ async fn build_export_payloads(
     )
     .await?;
     let links = crate::service::sub_service::generate_links(&cfg_json, &user.name, &server)?;
-    let plain_links = links
-        .iter()
-        .map(|item| format!("[{}] {}", item.protocol, item.link))
-        .collect::<Vec<_>>();
+    let plain_links = links.iter().map(|item| item.link.clone()).collect::<Vec<_>>();
     let base64 = crate::service::sub_service::generate_subscription(&links);
     let url = if !ctx.cfg.subscription.public_base.trim().is_empty() && !user.sub_token.is_empty() {
         Some(format!(
