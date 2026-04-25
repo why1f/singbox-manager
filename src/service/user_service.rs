@@ -20,6 +20,11 @@ pub fn new_sub_token() -> String {
     URL_SAFE_NO_PAD.encode(buf)
 }
 
+/// 生成较短的 TG 绑定码（16 字节，22 字符）
+pub fn new_tg_bind_token() -> String {
+    URL_SAFE_NO_PAD.encode(Uuid::new_v4().as_bytes())
+}
+
 pub async fn add_user(
     pool: &SqlitePool,
     name: &str,
@@ -54,6 +59,15 @@ pub async fn add_user(
         allowed_nodes: "[]".into(),
         sub_token: new_sub_token(),
         traffic_multiplier,
+        tg_chat_id: 0,
+        tg_bind_token: new_tg_bind_token(),
+        tg_notify_quota_80: true,
+        tg_notify_quota_90: true,
+        tg_notify_quota_100: true,
+        tg_schedule_enabled: true,
+        tg_schedule_times: "[]".into(),
+        tg_last_quota_level: 0,
+        tg_last_schedule_dates: "{}".into(),
     };
     user_repo::insert(pool, &user).await?;
     Ok(user)
@@ -84,6 +98,19 @@ pub async fn ensure_sub_tokens(pool: &SqlitePool) -> Result<usize> {
         if u.sub_token.is_empty() {
             let t = new_sub_token();
             user_repo::set_sub_token(pool, &u.name, &t).await?;
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+pub async fn ensure_tg_bind_tokens(pool: &SqlitePool) -> Result<usize> {
+    let users = user_repo::list_all(pool).await?;
+    let mut count = 0;
+    for u in &users {
+        if u.tg_bind_token.is_empty() {
+            let t = new_tg_bind_token();
+            user_repo::set_tg_bind_token(pool, &u.name, &t).await?;
             count += 1;
         }
     }

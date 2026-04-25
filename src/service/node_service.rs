@@ -82,6 +82,35 @@ pub async fn resolve_server_host(public_base: &str, request_host: Option<&str>) 
     get_server_ip().await
 }
 
+/// 导出订阅时节点 server 的优先级：
+/// 1. 若启用 use_public_base_as_server，则先取 public_base 主机
+/// 2. 公网 IP 探测
+/// 3. public_base 主机
+/// 4. 请求 Host
+pub async fn resolve_export_server(
+    use_public_base_as_server: bool,
+    public_base: &str,
+    request_host: Option<&str>,
+) -> Result<String> {
+    if use_public_base_as_server {
+        if let Some(host) = public_base_host(public_base) {
+            return Ok(host);
+        }
+    }
+    if let Ok(ip) = get_server_ip().await {
+        return Ok(ip);
+    }
+    if let Some(host) = public_base_host(public_base) {
+        return Ok(host);
+    }
+    if let Some(host) = request_host.and_then(authority_host) {
+        return Ok(host);
+    }
+    Err(anyhow!(
+        "无法解析订阅导出节点地址；请检查公网 IP 探测或配置 subscription.public_base"
+    ))
+}
+
 /// 查询本机公网 IP，带超时；失败时返回显式错误。
 pub async fn get_server_ip() -> Result<String> {
     if let Some(cached) = SERVER_IP_CACHE
@@ -167,7 +196,7 @@ fn normalize_server_ip(text: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{authority_host, normalize_server_ip, public_base_host};
+    use super::{authority_host, normalize_server_ip, public_base_host, resolve_export_server};
 
     #[test]
     fn ipv4_keeps_plain() {
@@ -203,6 +232,16 @@ mod tests {
         assert_eq!(
             public_base_host("https://sub.example.com/path"),
             Some("sub.example.com".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn export_server_defaults_to_public_base_when_enabled() {
+        assert_eq!(
+            resolve_export_server(true, "https://sub.example.com", Some("x"))
+                .await
+                .unwrap(),
+            "sub.example.com"
         );
     }
 }

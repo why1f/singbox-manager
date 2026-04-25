@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## v0.4.8
+
+### Added
+- **Telegram Bot 支持用户/管理员交互与通知**：新增 `/start`、`/bind`、`/usage`、`/usages` 及按钮卡片交互，支持用户阈值提醒、用户多时间定时播报、管理员阈值告警和管理员定时汇总。
+
+### Changed
+- **订阅导出的节点 `server` 默认改为公网 IP**：`sb sub`、`sb export`、HTTP 订阅与 TG 订阅导出不再默认跟随 `public_base` 域名，默认直接导出服务器公网 IP。
+- **新增 `use_public_base_as_server` 开关**：仅在明确开启时，订阅里的节点 `server` 才会改用 `public_base` 主机，订阅网页域名与节点连接地址彻底解耦。
+
 ## v0.4.7
 
 ### Fixed

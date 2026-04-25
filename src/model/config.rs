@@ -9,6 +9,8 @@ pub struct AppConfig {
     pub kernel: KernelConfig,
     #[serde(default)]
     pub subscription: SubscriptionConfig,
+    #[serde(default)]
+    pub telegram: TelegramConfig,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SingboxConfig {
@@ -51,6 +53,9 @@ pub struct SubscriptionConfig {
     /// 对外公开的基础 URL（用于拼订阅链接）。不设置则只输出 token，由管理员自己拼
     #[serde(default)]
     pub public_base: String,
+    /// 是否让订阅导出的节点 server 跟随 public_base 主机；默认 false，优先导出公网 IP
+    #[serde(default)]
+    pub use_public_base_as_server: bool,
     /// TUI 生成 nginx 配置时写入的文件路径
     #[serde(default = "default_nginx_conf")]
     pub nginx_conf: String,
@@ -63,6 +68,7 @@ impl Default for SubscriptionConfig {
         Self {
             listen: default_sub_listen(),
             public_base: String::new(),
+            use_public_base_as_server: false,
             nginx_conf: default_nginx_conf(),
             enabled: true,
         }
@@ -76,6 +82,75 @@ fn default_nginx_conf() -> String {
 }
 fn default_true() -> bool {
     true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelegramConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub bot_token: String,
+    #[serde(default = "default_timezone")]
+    pub timezone: String,
+    #[serde(default)]
+    pub admin_chat_ids: Vec<i64>,
+    #[serde(default = "default_poll_interval_secs")]
+    pub poll_interval_secs: u64,
+    #[serde(default = "default_request_timeout_secs")]
+    pub request_timeout_secs: u64,
+    #[serde(default = "default_true")]
+    pub default_notify_quota_80: bool,
+    #[serde(default = "default_true")]
+    pub default_notify_quota_90: bool,
+    #[serde(default = "default_true")]
+    pub default_notify_quota_100: bool,
+    #[serde(default = "default_true")]
+    pub default_schedule_enabled: bool,
+    #[serde(default = "default_schedule_times")]
+    pub default_schedule_times: Vec<String>,
+    #[serde(default = "default_true")]
+    pub admin_notify_quota: bool,
+    #[serde(default = "default_true")]
+    pub admin_schedule_enabled: bool,
+    #[serde(default = "default_schedule_times")]
+    pub admin_schedule_times: Vec<String>,
+}
+
+impl Default for TelegramConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bot_token: String::new(),
+            timezone: default_timezone(),
+            admin_chat_ids: Vec::new(),
+            poll_interval_secs: default_poll_interval_secs(),
+            request_timeout_secs: default_request_timeout_secs(),
+            default_notify_quota_80: true,
+            default_notify_quota_90: true,
+            default_notify_quota_100: true,
+            default_schedule_enabled: true,
+            default_schedule_times: default_schedule_times(),
+            admin_notify_quota: true,
+            admin_schedule_enabled: true,
+            admin_schedule_times: default_schedule_times(),
+        }
+    }
+}
+
+fn default_timezone() -> String {
+    "Asia/Shanghai".into()
+}
+
+fn default_poll_interval_secs() -> u64 {
+    2
+}
+
+fn default_request_timeout_secs() -> u64 {
+    10
+}
+
+fn default_schedule_times() -> Vec<String> {
+    vec!["09:00".into(), "21:30".into()]
 }
 
 impl Default for AppConfig {
@@ -95,6 +170,7 @@ impl Default for AppConfig {
             },
             kernel: KernelConfig::default(),
             subscription: SubscriptionConfig::default(),
+            telegram: TelegramConfig::default(),
         }
     }
 }

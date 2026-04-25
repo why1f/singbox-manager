@@ -663,6 +663,15 @@ mod tests {
             allowed_nodes: "[]".into(),
             sub_token: String::new(),
             traffic_multiplier: 1.0,
+            tg_chat_id: 0,
+            tg_bind_token: String::new(),
+            tg_notify_quota_80: true,
+            tg_notify_quota_90: true,
+            tg_notify_quota_100: true,
+            tg_schedule_enabled: true,
+            tg_schedule_times: "[]".into(),
+            tg_last_quota_level: 0,
+            tg_last_schedule_dates: "{}".into(),
         }
     }
 

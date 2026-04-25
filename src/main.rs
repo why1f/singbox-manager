@@ -195,6 +195,11 @@ async fn run_daemon(pool: sqlx::SqlitePool, cfg: AppConfig) -> Result<()> {
             tracing::info!(filled = n, "为历史用户补发订阅 token");
         }
     }
+    if let Ok(n) = service::user_service::ensure_tg_bind_tokens(&pool).await {
+        if n > 0 {
+            tracing::info!(filled = n, "为历史用户补发 TG 绑定码");
+        }
+    }
 
     // 订阅 HTTP 服务
     if cfg.subscription.enabled {
@@ -206,6 +211,21 @@ async fn run_daemon(pool: sqlx::SqlitePool, cfg: AppConfig) -> Result<()> {
             }
         });
     }
+
+    let tg_tx = if cfg.telegram.enabled {
+        match service::tg_service::start(pool.clone(), std::sync::Arc::new(cfg.clone())).await {
+            Ok(tx) => {
+                tracing::info!("Telegram Bot 已启动");
+                Some(tx)
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Telegram Bot 启动失败");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     let (tx, mut rx) = mpsc::channel::<TrafficEvent>(128);
 
@@ -224,7 +244,15 @@ async fn run_daemon(pool: sqlx::SqlitePool, cfg: AppConfig) -> Result<()> {
                     );
                 }
                 TrafficEvent::QuotaAlert(n, p) => {
-                    tracing::warn!(user = %n, used_percent = p, "达到流量阈值")
+                    tracing::warn!(user = %n, used_percent = p, "达到流量阈值");
+                    if let Some(tx) = &tg_tx {
+                        let _ = tx
+                            .send(service::tg_service::TgEvent::QuotaAlert {
+                                username: n.clone(),
+                                percent: p,
+                            })
+                            .await;
+                    }
                 }
                 TrafficEvent::AutoControl(c) => {
                     for item in c {
@@ -294,6 +322,7 @@ async fn run_tui(pool: sqlx::SqlitePool, cfg: AppConfig) -> Result<()> {
 
     // 给老库补订阅 token
     let _ = service::user_service::ensure_sub_tokens(&pool).await;
+    let _ = service::user_service::ensure_tg_bind_tokens(&pool).await;
 
     // 订阅 HTTP 服务（TUI 模式也开，方便开发测试）
     if cfg.subscription.enabled {
@@ -575,8 +604,12 @@ async fn run_user(
             }
             let config = core::config::load(&cfg.singbox.config_path)?;
             let server =
-                service::node_service::resolve_server_host(&cfg.subscription.public_base, None)
-                    .await?;
+                service::node_service::resolve_export_server(
+                    cfg.subscription.use_public_base_as_server,
+                    &cfg.subscription.public_base,
+                    None,
+                )
+                .await?;
             let links = service::sub_service::generate_links(&config, &name, &server)?;
             if links.is_empty() {
                 println!("用户 '{}' 无可用节点", name);
@@ -621,8 +654,12 @@ async fn run_node(cmd: cli::node::NodeCommands, cfg: &AppConfig) -> Result<()> {
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("config.json 不存在"))?;
             let server =
-                service::node_service::resolve_server_host(&cfg.subscription.public_base, None)
-                    .await?;
+                service::node_service::resolve_export_server(
+                    cfg.subscription.use_public_base_as_server,
+                    &cfg.subscription.public_base,
+                    None,
+                )
+                .await?;
             let ls = service::sub_service::generate_links(config, &name, &server)?;
             println!(
                 "# 订阅 (Base64)\n{}",
@@ -932,6 +969,9 @@ async fn run_token(
 }
 
 fn print_sub_url(u: &model::user::User, public_base: &str) {
+    if !u.tg_bind_token.is_empty() {
+        println!("TG绑定: /bind {}", u.tg_bind_token);
+    }
     if u.sub_token.is_empty() {
         println!("(该用户无 token，运行 sb token regen {} 生成)", u.name);
         return;

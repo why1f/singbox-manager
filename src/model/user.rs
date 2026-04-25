@@ -1,5 +1,6 @@
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct User {
@@ -23,6 +24,24 @@ pub struct User {
     pub sub_token: String, // 32 字节 base64url，订阅 URL 用
     #[sqlx(default)]
     pub traffic_multiplier: f64,
+    #[sqlx(default)]
+    pub tg_chat_id: i64,
+    #[sqlx(default)]
+    pub tg_bind_token: String,
+    #[sqlx(default)]
+    pub tg_notify_quota_80: bool,
+    #[sqlx(default)]
+    pub tg_notify_quota_90: bool,
+    #[sqlx(default)]
+    pub tg_notify_quota_100: bool,
+    #[sqlx(default)]
+    pub tg_schedule_enabled: bool,
+    #[sqlx(default)]
+    pub tg_schedule_times: String,
+    #[sqlx(default)]
+    pub tg_last_quota_level: i64,
+    #[sqlx(default)]
+    pub tg_last_schedule_dates: String,
 }
 
 impl User {
@@ -64,6 +83,19 @@ impl User {
         }
         self.allowed_tags().iter().any(|t| t == tag)
     }
+
+    pub fn tg_is_bound(&self) -> bool {
+        self.tg_chat_id != 0
+    }
+
+    pub fn tg_schedule_times(&self) -> Vec<String> {
+        serde_json::from_str(&self.tg_schedule_times).unwrap_or_default()
+    }
+
+    pub fn tg_last_schedule_dates(&self) -> BTreeMap<String, String> {
+        serde_json::from_str(&self.tg_last_schedule_dates).unwrap_or_default()
+    }
+
     pub fn format_bytes(bytes: i64) -> String {
         const TB: i64 = 1_099_511_627_776;
         const GB: i64 = 1_073_741_824;

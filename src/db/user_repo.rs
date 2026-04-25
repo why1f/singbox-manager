@@ -25,8 +25,10 @@ pub async fn insert(pool: &SqlitePool, u: &User) -> Result<()> {
     sqlx::query(
         r#"INSERT INTO users(name,uuid,password,enabled,quota_gb,used_up_bytes,used_down_bytes,
         last_live_up,last_live_down,reset_day,last_reset_ym,
-        expire_at,allow_all_nodes,created_at,allowed_nodes,sub_token,traffic_multiplier)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"#,
+        expire_at,allow_all_nodes,created_at,allowed_nodes,sub_token,traffic_multiplier,
+        tg_chat_id,tg_bind_token,tg_notify_quota_80,tg_notify_quota_90,tg_notify_quota_100,
+        tg_schedule_enabled,tg_schedule_times,tg_last_quota_level,tg_last_schedule_dates)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"#,
     )
     .bind(&u.name)
     .bind(&u.uuid)
@@ -45,6 +47,15 @@ pub async fn insert(pool: &SqlitePool, u: &User) -> Result<()> {
     .bind(&u.allowed_nodes)
     .bind(&u.sub_token)
     .bind(u.traffic_multiplier)
+    .bind(u.tg_chat_id)
+    .bind(&u.tg_bind_token)
+    .bind(u.tg_notify_quota_80)
+    .bind(u.tg_notify_quota_90)
+    .bind(u.tg_notify_quota_100)
+    .bind(u.tg_schedule_enabled)
+    .bind(&u.tg_schedule_times)
+    .bind(u.tg_last_quota_level)
+    .bind(&u.tg_last_schedule_dates)
     .execute(pool)
     .await?;
     Ok(())
@@ -66,6 +77,101 @@ pub async fn find_by_token(pool: &SqlitePool, token: &str) -> Result<Option<User
             .fetch_optional(pool)
             .await?,
     )
+}
+
+pub async fn set_tg_bind_token(pool: &SqlitePool, name: &str, token: &str) -> Result<()> {
+    sqlx::query("UPDATE users SET tg_bind_token=? WHERE name=?")
+        .bind(token)
+        .bind(name)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn find_by_tg_bind_token(pool: &SqlitePool, token: &str) -> Result<Option<User>> {
+    Ok(
+        sqlx::query_as::<_, User>("SELECT * FROM users WHERE tg_bind_token=? AND tg_bind_token != ''")
+            .bind(token)
+            .fetch_optional(pool)
+            .await?,
+    )
+}
+
+pub async fn find_by_tg_chat_id(pool: &SqlitePool, chat_id: i64) -> Result<Option<User>> {
+    Ok(
+        sqlx::query_as::<_, User>("SELECT * FROM users WHERE tg_chat_id=? AND tg_chat_id != 0")
+            .bind(chat_id)
+            .fetch_optional(pool)
+            .await?,
+    )
+}
+
+pub async fn set_tg_binding(pool: &SqlitePool, name: &str, chat_id: i64) -> Result<()> {
+    sqlx::query("UPDATE users SET tg_chat_id=? WHERE name=?")
+        .bind(chat_id)
+        .bind(name)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn clear_tg_binding_for_chat(pool: &SqlitePool, chat_id: i64) -> Result<()> {
+    sqlx::query("UPDATE users SET tg_chat_id=0 WHERE tg_chat_id=?")
+        .bind(chat_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn set_tg_notify_settings(
+    pool: &SqlitePool,
+    name: &str,
+    notify_80: bool,
+    notify_90: bool,
+    notify_100: bool,
+    schedule_enabled: bool,
+    schedule_times_json: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"UPDATE users SET
+        tg_notify_quota_80=?,
+        tg_notify_quota_90=?,
+        tg_notify_quota_100=?,
+        tg_schedule_enabled=?,
+        tg_schedule_times=?
+        WHERE name=?"#,
+    )
+    .bind(notify_80)
+    .bind(notify_90)
+    .bind(notify_100)
+    .bind(schedule_enabled)
+    .bind(schedule_times_json)
+    .bind(name)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn set_tg_last_quota_level(pool: &SqlitePool, name: &str, level: i64) -> Result<()> {
+    sqlx::query("UPDATE users SET tg_last_quota_level=? WHERE name=?")
+        .bind(level)
+        .bind(name)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn set_tg_last_schedule_dates(
+    pool: &SqlitePool,
+    name: &str,
+    dates_json: &str,
+) -> Result<()> {
+    sqlx::query("UPDATE users SET tg_last_schedule_dates=? WHERE name=?")
+        .bind(dates_json)
+        .bind(name)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 pub async fn set_allow_all_nodes(

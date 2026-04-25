@@ -20,4 +20,22 @@ listen      = "127.0.0.1:18081"
 # 对外 URL 基础，用于拼订阅链接和 nginx server_name
 # 设置后 TUI nginx 页 [g] 可以生成反代配置
 public_base = ""                                    # 例: "https://sub.example.com"
+# 是否让订阅里节点导出的 server 跟随 public_base 主机；默认 false，直接导出公网 IP
+use_public_base_as_server = false
 nginx_conf  = "/etc/nginx/conf.d/sb-manager.conf"
+
+[telegram]
+enabled = false
+bot_token = ""
+timezone = "Asia/Shanghai"
+admin_chat_ids = []
+poll_interval_secs = 2
+request_timeout_secs = 10
+default_notify_quota_80 = true
+default_notify_quota_90 = true
+default_notify_quota_100 = true
+default_schedule_enabled = true
+default_schedule_times = ["09:00", "21:30"]
+admin_notify_quota = true
+admin_schedule_enabled = true
+admin_schedule_times = ["09:00", "21:30"]

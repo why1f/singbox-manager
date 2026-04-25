@@ -110,7 +110,8 @@ async fn handle_sub(
     };
 
     let request_host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
-    let server = match node_service::resolve_server_host(
+    let server = match node_service::resolve_export_server(
+        s.cfg.subscription.use_public_base_as_server,
         &s.cfg.subscription.public_base,
         request_host,
     )
@@ -300,6 +301,15 @@ mod tests {
             allowed_nodes: "[]".into(),
             sub_token: "token".into(),
             traffic_multiplier: 2.0,
+            tg_chat_id: 0,
+            tg_bind_token: String::new(),
+            tg_notify_quota_80: true,
+            tg_notify_quota_90: true,
+            tg_notify_quota_100: true,
+            tg_schedule_enabled: true,
+            tg_schedule_times: "[]".into(),
+            tg_last_quota_level: 0,
+            tg_last_schedule_dates: "{}".into(),
         }
     }
 
