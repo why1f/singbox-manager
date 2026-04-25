@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## v0.4.16
+
+### Fixed
+
+- **TG update 处理不再容易整条链路卡死**：之前 `getUpdates -> handle_update` 是串行 `await`，只要某一个 callback 或命令处理卡住，后续 update 都会堆在 Telegram 服务器端，表现就是点按钮和发命令没反应，重启 `sb-manager` 后才一次性全跳出来。现在改成每个 update 独立任务处理，并发数限制为 8，同时给单个 update 加超时取消，避免单次卡死拖住整个机器人。
+- **callback 先应答再做页面切换**：按钮点击后会先发送 `answerCallbackQuery`，减少 Telegram 客户端长时间转圈和“像没点上”的观感。
+
+### Changed
+
+- **TG「全部用户流量 / 定时汇总」顶部汇总行补回 emoji 风格**：改成 `👥 人数 · 🚨 超额 · ⏳ 到期 · 📊 合计`，和首页视觉更统一。
+- **Base64 订阅 / 明文节点改为 `<code>` 分段发送**：超长内容会自动拆成多条，但每段节点内容都会包在 `<code>` 中，显示更规整，也更方便长按复制。
+
 ## v0.4.15
 
 ### Changed

@@ -10,7 +10,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Semaphore};
 use tracing::warn;
 
 use crate::{
@@ -177,17 +177,47 @@ async fn poll_updates_loop(ctx: TgContext) {
     let mut offset = 0i64;
     let mut backoff_secs = 1u64;
     let normal_secs = ctx.cfg.telegram.poll_interval_secs.max(1);
+    let update_timeout_secs = (ctx.cfg.telegram.request_timeout_secs.max(3) * 3).max(30);
+    let update_slots = Arc::new(Semaphore::new(8));
     loop {
         match get_updates(&ctx, offset).await {
             Ok(updates) => {
                 backoff_secs = 1;
+                let had_updates = !updates.is_empty();
                 for update in updates {
                     offset = update.update_id + 1;
-                    if let Err(e) = handle_update(&ctx, update).await {
-                        warn!("处理 Telegram update 失败: {}", e);
-                    }
+                    let ctx = ctx.clone();
+                    let update_slots = update_slots.clone();
+                    tokio::spawn(async move {
+                        let update_id = update.update_id;
+                        let _permit = match update_slots.acquire_owned().await {
+                            Ok(permit) => permit,
+                            Err(e) => {
+                                warn!(error = %e, update_id, "Telegram update 并发槽获取失败");
+                                return;
+                            }
+                        };
+                        match tokio::time::timeout(
+                            Duration::from_secs(update_timeout_secs),
+                            handle_update(&ctx, update),
+                        )
+                        .await
+                        {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => {
+                                warn!(error = %e, update_id, "处理 Telegram update 失败")
+                            }
+                            Err(_) => warn!(
+                                update_id,
+                                timeout_secs = update_timeout_secs,
+                                "处理 Telegram update 超时，已取消本次处理"
+                            ),
+                        }
+                    });
                 }
-                tokio::time::sleep(Duration::from_secs(normal_secs)).await;
+                if !had_updates {
+                    tokio::time::sleep(Duration::from_secs(normal_secs)).await;
+                }
             }
             Err(e) => {
                 warn!(
@@ -232,12 +262,12 @@ async fn handle_update(ctx: &TgContext, update: TgUpdate) -> Result<()> {
     }
     if let Some(cb) = update.callback_query {
         let cb_id = cb.id.clone();
+        let _ = answer_callback(ctx, &cb_id).await;
         if let Some(data) = cb.data.clone() {
             if let Some(msg) = cb.message.clone() {
                 handle_callback(ctx, msg.chat.id, msg.message_id, &data).await?;
             }
         }
-        let _ = answer_callback(ctx, &cb_id).await;
     }
     Ok(())
 }
@@ -775,10 +805,11 @@ async fn send_subscription_base64(
     // （editMessage 只能改一条），这里降级为新发：先 edit 一条"长文本即将到达"的占位，
     // 再走 send_long_text 顺序新发。简化：直接新发。
     let _ = edit;
-    send_long_text(
+    send_long_code_text(
         ctx,
         chat_id,
-        &format!("📋 Base64 订阅\n\n{}", export.base64),
+        "📋 <b>Base64 订阅</b>",
+        &export.base64,
         Some(subscription_back_keyboard(target)),
     )
     .await
@@ -797,13 +828,24 @@ async fn send_subscription_plain(
         export.plain_links.join("\n")
     };
     let _ = edit;
-    send_long_text(
-        ctx,
-        chat_id,
-        &format!("📋 明文节点\n\n{}", plain),
-        Some(subscription_back_keyboard(target)),
-    )
-    .await
+    if export.plain_links.is_empty() {
+        send_text(
+            ctx,
+            chat_id,
+            "📋 明文节点\n\n无可用节点",
+            Some(subscription_back_keyboard(target)),
+        )
+        .await
+    } else {
+        send_long_code_text(
+            ctx,
+            chat_id,
+            "📋 <b>明文节点</b>",
+            &plain,
+            Some(subscription_back_keyboard(target)),
+        )
+        .await
+    }
 }
 
 async fn send_user_settings(ctx: &TgContext, chat_id: i64, edit: Option<i64>) -> Result<()> {
@@ -1533,7 +1575,7 @@ fn all_usages_body(users: &[User]) -> String {
 
     let mut out = String::with_capacity(rows.len() * 96);
     out.push_str(&format!(
-        "{total} 人 · 超额 {over} · 到期 {expired} · 合计 <b>{total_used_b}</b>",
+        "👥 {total} 人 · 🚨 {over} · ⏳ {expired} · 📊 <b>{total_used_b}</b>",
         total = total,
         over = over,
         expired = expired,
@@ -1819,13 +1861,15 @@ async fn send_message(
     Ok(())
 }
 
-async fn send_long_text(
+async fn send_long_code_text(
     ctx: &TgContext,
     chat_id: i64,
-    text: &str,
+    title_html: &str,
+    code_text: &str,
     reply_markup: Option<Value>,
 ) -> Result<()> {
-    let chunks = split_message(text, 3500);
+    // HTML 转义后长度会膨胀，chunk 取保守值，保证包上 <code> 后仍低于 Telegram 限制。
+    let chunks = split_message(code_text, 3000);
     let last = chunks.len().saturating_sub(1);
     for (idx, chunk) in chunks.iter().enumerate() {
         let markup = if idx == last {
@@ -1833,7 +1877,12 @@ async fn send_long_text(
         } else {
             None
         };
-        send_text(ctx, chat_id, chunk, markup).await?;
+        let text = if idx == 0 {
+            format!("{title}\n\n<code>{body}</code>", title = title_html, body = h(chunk))
+        } else {
+            format!("<code>{}</code>", h(chunk))
+        };
+        send_html(ctx, chat_id, &text, markup).await?;
     }
     Ok(())
 }
