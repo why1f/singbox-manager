@@ -971,9 +971,8 @@ async fn run_token(
 }
 
 fn print_sub_url(u: &model::user::User, public_base: &str) {
-    if !u.tg_bind_token.is_empty() {
-        println!("TG绑定: /bind {}", u.tg_bind_token);
-    }
+    // 注意：TG 绑定码（tg_bind_token）的展示与管理已迁移至 TG admin 面板
+    // （admin user card → "TG 绑定"），CLI 不再显示。
     if u.sub_token.is_empty() {
         println!("(该用户无 token，运行 sb token regen {} 生成)", u.name);
         return;

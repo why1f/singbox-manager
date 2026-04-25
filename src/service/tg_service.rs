@@ -357,6 +357,20 @@ async fn handle_callback(ctx: &TgContext, chat_id: i64, data: &str) -> Result<()
             let name = data.trim_start_matches("admin:sub:plain:");
             send_subscription_plain(ctx, chat_id, Some(name)).await
         }
+        // 注意：更具体的 prefix（admin:bind:regen:/admin:bind:unbind:）必须放在
+        // admin:bind: 之前，否则会被它先吞掉。
+        _ if data.starts_with("admin:bind:regen:") => {
+            let name = data.trim_start_matches("admin:bind:regen:");
+            admin_bind_regen(ctx, chat_id, name).await
+        }
+        _ if data.starts_with("admin:bind:unbind:") => {
+            let name = data.trim_start_matches("admin:bind:unbind:");
+            admin_bind_unbind(ctx, chat_id, name).await
+        }
+        _ if data.starts_with("admin:bind:") => {
+            let name = data.trim_start_matches("admin:bind:");
+            send_admin_bind_card(ctx, chat_id, name).await
+        }
         _ => Ok(()),
     };
     if let Err(e) = result {
@@ -386,7 +400,7 @@ async fn send_start(ctx: &TgContext, chat_id: i64) -> Result<()> {
     match bound {
         Some(user) => {
             let text = user_home_text(&user);
-            send_text(ctx, chat_id, &text, Some(start_keyboard(true, admin))).await
+            send_html(ctx, chat_id, &text, Some(start_keyboard(true, admin))).await
         }
         None if admin => send_admin_home(ctx, chat_id).await,
         None => {
@@ -403,7 +417,7 @@ async fn send_start(ctx: &TgContext, chat_id: i64) -> Result<()> {
 
 async fn send_usage(ctx: &TgContext, chat_id: i64) -> Result<()> {
     let user = bound_user(ctx, chat_id).await?;
-    send_text(
+    send_html(
         ctx,
         chat_id,
         &user_usage_text(&user, false),
@@ -417,7 +431,7 @@ async fn send_all_usages(ctx: &TgContext, chat_id: i64) -> Result<()> {
         anyhow::bail!("仅管理员可查看全部用户流量");
     }
     let users = user_repo::list_all(&ctx.pool).await?;
-    send_text(
+    send_html(
         ctx,
         chat_id,
         &all_usages_text(&users),
@@ -471,11 +485,12 @@ async fn send_admin_user_card(ctx: &TgContext, chat_id: i64, username: &str) -> 
             ("查看订阅".into(), format!("admin:usubs:{}", user.name)),
         ],
         vec![
+            ("TG 绑定".into(), format!("admin:bind:{}", user.name)),
             ("刷新流量".into(), format!("admin:urefresh:{}", user.name)),
-            ("返回用户列表".into(), "admin:users".into()),
         ],
+        vec![("返回用户列表".into(), "admin:users".into())],
     ];
-    send_text(ctx, chat_id, &text, Some(inline_keyboard(rows))).await
+    send_html(ctx, chat_id, &text, Some(inline_keyboard(rows))).await
 }
 
 async fn send_admin_user_usage(ctx: &TgContext, chat_id: i64, username: &str) -> Result<()> {
@@ -492,13 +507,96 @@ async fn send_admin_user_usage(ctx: &TgContext, chat_id: i64, username: &str) ->
         ],
         vec![("返回用户列表".into(), "admin:users".into())],
     ];
-    send_text(
+    send_html(
         ctx,
         chat_id,
         &user_usage_text(&user, true),
         Some(inline_keyboard(rows)),
     )
     .await
+}
+
+async fn send_admin_bind_card(ctx: &TgContext, chat_id: i64, username: &str) -> Result<()> {
+    if !is_admin(ctx, chat_id) {
+        anyhow::bail!("仅管理员可管理 TG 绑定");
+    }
+    let user = user_repo::get(&ctx.pool, username)
+        .await?
+        .ok_or_else(|| anyhow!("用户不存在: {}", username))?;
+    let bound = user.tg_is_bound();
+    let body = if bound {
+        format!(
+            "🔗 TG 绑定管理 · <b>{name}</b>\n\n\
+             状态:  🟢 已绑定\n\
+             chat_id:  <code>{chat_id_v}</code>\n\n\
+             解绑后该用户在 TG 里发 <code>/bind &lt;新绑定码&gt;</code> 才能重新绑回。\n\
+             重置绑定码会立即失效旧码。",
+            name = h(&user.name),
+            chat_id_v = user.tg_chat_id,
+        )
+    } else if user.tg_bind_token.is_empty() {
+        format!(
+            "🔗 TG 绑定管理 · <b>{name}</b>\n\n\
+             状态:  ⚪ 未绑定\n\
+             绑定码:  <i>未生成</i>\n\n\
+             先「重置绑定码」生成一个，再让该用户在 TG 里发 <code>/bind &lt;码&gt;</code>。",
+            name = h(&user.name),
+        )
+    } else {
+        format!(
+            "🔗 TG 绑定管理 · <b>{name}</b>\n\n\
+             状态:  ⚪ 未绑定\n\
+             绑定码:  <code>{token}</code>\n\n\
+             让该用户在 TG 里发：<code>/bind {token}</code>",
+            name = h(&user.name),
+            token = h(&user.tg_bind_token),
+        )
+    };
+
+    let mut rows: Vec<Vec<(String, String)>> = Vec::new();
+    if bound {
+        rows.push(vec![(
+            "解绑当前账号".into(),
+            format!("admin:bind:unbind:{}", user.name),
+        )]);
+    }
+    rows.push(vec![(
+        "重置绑定码".into(),
+        format!("admin:bind:regen:{}", user.name),
+    )]);
+    rows.push(vec![
+        ("返回用户卡片".into(), format!("admin:user:{}", user.name)),
+        ("返回用户列表".into(), "admin:users".into()),
+    ]);
+
+    send_html(ctx, chat_id, &body, Some(inline_keyboard(rows))).await
+}
+
+async fn admin_bind_regen(ctx: &TgContext, chat_id: i64, username: &str) -> Result<()> {
+    if !is_admin(ctx, chat_id) {
+        anyhow::bail!("仅管理员可管理 TG 绑定");
+    }
+    user_repo::get(&ctx.pool, username)
+        .await?
+        .ok_or_else(|| anyhow!("用户不存在: {}", username))?;
+    let new_token = crate::service::user_service::new_tg_bind_token();
+    user_repo::set_tg_bind_token(&ctx.pool, username, &new_token).await?;
+    send_admin_bind_card(ctx, chat_id, username).await
+}
+
+async fn admin_bind_unbind(ctx: &TgContext, chat_id: i64, username: &str) -> Result<()> {
+    if !is_admin(ctx, chat_id) {
+        anyhow::bail!("仅管理员可管理 TG 绑定");
+    }
+    let user = user_repo::get(&ctx.pool, username)
+        .await?
+        .ok_or_else(|| anyhow!("用户不存在: {}", username))?;
+    if user.tg_is_bound() {
+        // chat_id=0 在 set_tg_binding 里其实可以接受，但 user 端"绑定"语义统一用
+        // user_repo::set_tg_binding(name, 0) 来标识"已解绑"。
+        user_repo::set_tg_binding(&ctx.pool, username, 0).await?;
+    }
+    send_admin_bind_card(ctx, chat_id, username).await
 }
 
 async fn send_subscription_menu(ctx: &TgContext, chat_id: i64, target: Option<&str>) -> Result<()> {
@@ -740,8 +838,8 @@ async fn refresh_and_send_usage(ctx: &TgContext, chat_id: i64, target: Option<&s
     )
     .await
     {
-        Ok(_) => "已刷新当前流量\n\n".to_string(),
-        Err(e) => format!("刷新失败（显示缓存数据）: {}\n\n", e),
+        Ok(_) => "✓ 已刷新当前流量\n\n".to_string(),
+        Err(e) => format!("⚠️ 刷新失败（显示缓存数据）: {}\n\n", h(&e.to_string())),
     };
     let user = user_repo::get(&ctx.pool, &username)
         .await?
@@ -757,7 +855,7 @@ async fn refresh_and_send_usage(ctx: &TgContext, chat_id: i64, target: Option<&s
     } else {
         user_usage_keyboard()
     };
-    send_text(
+    send_html(
         ctx,
         chat_id,
         &format!("{}{}", flush_msg, user_usage_text(&user, target.is_some())),
@@ -809,11 +907,11 @@ async fn run_due_schedules(ctx: &TgContext) -> Result<()> {
             continue;
         }
         let text = format!(
-            "定时流量播报\n时间：{}\n\n{}",
-            now.format("%Y-%m-%d %H:%M"),
+            "⏰ 定时流量播报\n时间: {}\n\n{}",
+            h(&now.format("%Y-%m-%d %H:%M").to_string()),
             user_usage_text(&user, false)
         );
-        send_text(ctx, user.tg_chat_id, &text, Some(user_usage_keyboard())).await?;
+        send_html(ctx, user.tg_chat_id, &text, Some(user_usage_keyboard())).await?;
         for item in due {
             dates.insert(item, today.clone());
         }
@@ -841,11 +939,11 @@ async fn run_due_schedules(ctx: &TgContext) -> Result<()> {
         }
         let users = user_repo::list_all(&ctx.pool).await?;
         let text = format!(
-            "定时流量汇总\n时间：{}\n\n{}",
-            now.format("%Y-%m-%d %H:%M"),
+            "⏰ 定时流量汇总\n时间: {}\n\n{}",
+            h(&now.format("%Y-%m-%d %H:%M").to_string()),
             all_usages_text(&users)
         );
-        send_text(ctx, prefs.chat_id, &text, Some(admin_overview_keyboard())).await?;
+        send_html(ctx, prefs.chat_id, &text, Some(admin_overview_keyboard())).await?;
         for item in due {
             dates.insert(item, today.clone());
         }
@@ -873,29 +971,45 @@ async fn handle_quota_alert(ctx: &TgContext, username: &str, percent: u8) -> Res
     }
 
     if user.tg_is_bound() && user_threshold_enabled(&user, level) {
+        let pct_f = user.quota_used_percent();
         let text = format!(
-            "流量提醒\n\n账号：{}\n套餐：{}\n已用：{}\n剩余：{}\n进度：{:.1}%\n重置：{}",
-            user.name,
-            package_label(&user),
-            User::format_bytes(user.used_total_bytes()),
-            remaining_label(&user),
-            user.quota_used_percent(),
-            reset_label(user.reset_day)
+            "{emoji} 流量提醒\n\n\
+             账号:  <b>{name}</b>\n\
+             套餐:  <b>{quota}</b>（{billing}）\n\
+             已用:  <b>{used}</b> / {total} ({pct:.0}%)\n\
+             剩余:  <b>{remain}</b>\n\
+             进度:  <code>{bar} {pct_f:.1}%</code>\n\
+             重置:  {reset}",
+            emoji = quota_alert_emoji(level),
+            name = h(&user.name),
+            quota = h(&quota_label(user.quota_gb)),
+            billing = h(&billing_label(user.traffic_multiplier)),
+            used = h(&User::format_bytes(user.used_total_bytes())),
+            total = h(&quota_label(user.quota_gb)),
+            pct = percent,
+            remain = h(&remaining_label(&user)),
+            bar = progress_bar(pct_f),
+            pct_f = pct_f,
+            reset = h(&reset_label(user.reset_day)),
         );
-        send_text(ctx, user.tg_chat_id, &text, Some(user_alert_keyboard())).await?;
+        send_html(ctx, user.tg_chat_id, &text, Some(user_alert_keyboard())).await?;
     }
 
     let admins = tg_repo::list_admin_prefs(&ctx.pool, &ctx.cfg.telegram.admin_chat_ids).await?;
     for admin in admins.into_iter().filter(|a| a.notify_quota) {
         let text = format!(
-            "用户流量提醒\n\n{} 达到 {}%\n已用：{} / {}\n剩余：{}",
-            user.name,
-            level,
-            User::format_bytes(user.used_total_bytes()),
-            quota_label(user.quota_gb),
-            remaining_label(&user)
+            "{emoji} 用户流量提醒\n\n\
+             <b>{name}</b> 达到 <b>{level}%</b>\n\
+             已用:  {used} / {quota}\n\
+             剩余:  {remain}",
+            emoji = quota_alert_emoji(level),
+            name = h(&user.name),
+            level = level,
+            used = h(&User::format_bytes(user.used_total_bytes())),
+            quota = h(&quota_label(user.quota_gb)),
+            remain = h(&remaining_label(&user)),
         );
-        send_text(ctx, admin.chat_id, &text, Some(admin_overview_keyboard())).await?;
+        send_html(ctx, admin.chat_id, &text, Some(admin_overview_keyboard())).await?;
     }
 
     user_repo::set_tg_last_quota_level(&ctx.pool, &user.name, i64::from(level)).await?;
@@ -1057,14 +1171,6 @@ fn on_off(v: bool) -> &'static str {
     }
 }
 
-fn package_label(user: &User) -> String {
-    format!(
-        "{}（{}）",
-        quota_label(user.quota_gb),
-        billing_label(user.traffic_multiplier)
-    )
-}
-
 fn billing_label(multiplier: f64) -> String {
     if (multiplier - 2.0).abs() < 0.01 {
         "双向".into()
@@ -1100,59 +1206,115 @@ fn remaining_label(user: &User) -> String {
 }
 
 fn user_home_text(user: &User) -> String {
+    let pct = user.quota_used_percent();
+    let bar = progress_bar(pct);
+    let expire = if user.expire_at.is_empty() {
+        "永久".to_string()
+    } else {
+        h(&user.expire_at)
+    };
     format!(
-        "账号：{}\n状态：{}\n套餐：{}\n已用：{}\n剩余：{}\n进度：{:.1}%\n重置：{}\n到期：{}",
-        user.name,
-        if user.enabled { "启用" } else { "禁用" },
-        package_label(user),
-        User::format_bytes(user.used_total_bytes()),
-        remaining_label(user),
-        user.quota_used_percent(),
-        reset_label(user.reset_day),
-        if user.expire_at.is_empty() {
-            "永久"
-        } else {
-            &user.expire_at
-        }
+        "📊 我的账号\n\n\
+         账号:  <b>{name}</b>\n\
+         状态:  {se} {sw}\n\
+         套餐:  <b>{quota}</b>（{billing}）\n\
+         已用:  <b>{used}</b> / {total}\n\
+         剩余:  <b>{remain}</b>\n\
+         进度:  <code>{bar} {pct:.1}%</code>\n\
+         重置:  {reset}\n\
+         到期:  {expire}",
+        name = h(&user.name),
+        se = status_emoji(user.enabled),
+        sw = if user.enabled { "启用" } else { "禁用" },
+        quota = h(&quota_label(user.quota_gb)),
+        billing = h(&billing_label(user.traffic_multiplier)),
+        used = h(&User::format_bytes(user.used_total_bytes())),
+        total = h(&quota_label(user.quota_gb)),
+        remain = h(&remaining_label(user)),
+        bar = bar,
+        pct = pct,
+        reset = h(&reset_label(user.reset_day)),
+        expire = expire,
     )
 }
 
 fn user_usage_text(user: &User, admin_view: bool) -> String {
+    let pct = user.quota_used_percent();
+    let bar = progress_bar(pct);
     let title = if admin_view {
-        format!("用户 {} 流量信息", user.name)
+        format!("👤 用户 <b>{}</b> 流量", h(&user.name))
     } else {
-        format!("{} 流量信息", user.name)
+        "📊 流量信息".to_string()
+    };
+    let expire = if user.expire_at.is_empty() {
+        "永久".to_string()
+    } else {
+        h(&user.expire_at)
     };
     format!(
-        "{}\n\n上行：{}\n下行：{}\n计费用量：{} / {}\n剩余：{}\n进度：{:.1}%\n重置：{}\n到期：{}\n状态：{}",
-        title,
-        User::format_bytes(user.used_up_bytes),
-        User::format_bytes(user.used_down_bytes),
-        User::format_bytes(user.used_total_bytes()),
-        quota_label(user.quota_gb),
-        remaining_label(user),
-        user.quota_used_percent(),
-        reset_label(user.reset_day),
-        if user.expire_at.is_empty() { "永久" } else { &user.expire_at },
-        if user.enabled { "启用" } else { "禁用" }
+        "{title}\n\n\
+         状态:  {se} {sw}\n\
+         上行:  {up}\n\
+         下行:  {down}\n\
+         计费用量:  <b>{used}</b> / {total}\n\
+         剩余:  <b>{remain}</b>\n\
+         进度:  <code>{bar} {pct:.1}%</code>\n\
+         重置:  {reset}\n\
+         到期:  {expire}",
+        title = title,
+        se = status_emoji(user.enabled),
+        sw = if user.enabled { "启用" } else { "禁用" },
+        up = h(&User::format_bytes(user.used_up_bytes)),
+        down = h(&User::format_bytes(user.used_down_bytes)),
+        used = h(&User::format_bytes(user.used_total_bytes())),
+        total = h(&quota_label(user.quota_gb)),
+        remain = h(&remaining_label(user)),
+        bar = bar,
+        pct = pct,
+        reset = h(&reset_label(user.reset_day)),
+        expire = expire,
     )
 }
 
 fn admin_user_card_text(user: &User) -> String {
+    let pct = user.quota_used_percent();
+    let bar = progress_bar(pct);
+    let bind_line = if user.tg_is_bound() {
+        format!(
+            "TG:    🟢 已绑定 (chat_id <code>{}</code>)",
+            user.tg_chat_id
+        )
+    } else {
+        "TG:    ⚪ 未绑定".to_string()
+    };
+    let expire = if user.expire_at.is_empty() {
+        "永久".to_string()
+    } else {
+        h(&user.expire_at)
+    };
     format!(
-        "用户：{}\n状态：{}\n套餐：{}\n已用：{}\n剩余：{}\n进度：{:.1}%\n重置：{}\n到期：{}",
-        user.name,
-        if user.enabled { "启用" } else { "禁用" },
-        package_label(user),
-        User::format_bytes(user.used_total_bytes()),
-        remaining_label(user),
-        user.quota_used_percent(),
-        reset_label(user.reset_day),
-        if user.expire_at.is_empty() {
-            "永久"
-        } else {
-            &user.expire_at
-        }
+        "👤 用户 <b>{name}</b>\n\n\
+         状态:  {se} {sw}\n\
+         套餐:  <b>{quota}</b>（{billing}）\n\
+         已用:  <b>{used}</b> / {total}\n\
+         剩余:  <b>{remain}</b>\n\
+         进度:  <code>{bar} {pct:.1}%</code>\n\
+         重置:  {reset}\n\
+         到期:  {expire}\n\
+         {bind_line}",
+        name = h(&user.name),
+        se = status_emoji(user.enabled),
+        sw = if user.enabled { "启用" } else { "禁用" },
+        quota = h(&quota_label(user.quota_gb)),
+        billing = h(&billing_label(user.traffic_multiplier)),
+        used = h(&User::format_bytes(user.used_total_bytes())),
+        total = h(&quota_label(user.quota_gb)),
+        remain = h(&remaining_label(user)),
+        bar = bar,
+        pct = pct,
+        reset = h(&reset_label(user.reset_day)),
+        expire = expire,
+        bind_line = bind_line,
     )
 }
 
@@ -1163,17 +1325,32 @@ fn all_usages_text(users: &[User]) -> String {
             .cmp(&a.used_total_bytes())
             .then_with(|| a.name.cmp(&b.name))
     });
-    let mut out = String::from("全部用户流量\n\n");
-    for user in rows {
-        out.push_str(&format!(
-            "{:<12} {:>8} / {:<6} {:>5.1}%\n",
-            user.name,
+    // 用 <pre> 包成等宽块，列对齐才不会被 Telegram 折叠空格。
+    let mut body = String::with_capacity(rows.len() * 64);
+    body.push_str("用户          已用       / 配额      百分比\n");
+    body.push_str("──────────────────────────────────────\n");
+    for user in &rows {
+        body.push_str(&format!(
+            "{:<12} {:>9} / {:<6} {:>6.1}%\n",
+            // 限制 name 在 12 字符以内，避免一个超长用户名把整行撑出 Telegram 的宽度
+            truncate_for_table(&user.name, 12),
             User::format_bytes(user.used_total_bytes()),
             quota_label(user.quota_gb),
             user.quota_used_percent()
         ));
     }
-    out.trim_end().to_string()
+    format!("📋 全部用户流量\n\n<pre>{}</pre>", h(body.trim_end()))
+}
+
+/// 截断 ASCII 安全的窄宽截断；中文/emoji 因为是宽字符可能仍会撑列，
+/// 但比之前完全不限至少能挡住极端情况。
+fn truncate_for_table(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max_chars - 1).collect();
+    out.push('…');
+    out
 }
 
 fn start_keyboard(bound: bool, admin: bool) -> Value {
@@ -1297,11 +1474,34 @@ async fn send_text(
     text: &str,
     reply_markup: Option<Value>,
 ) -> Result<()> {
+    send_message(ctx, chat_id, text, reply_markup, false).await
+}
+
+/// HTML 模式发送：开启 parse_mode=HTML，调用方负责给所有用户输入做 HTML 转义。
+async fn send_html(
+    ctx: &TgContext,
+    chat_id: i64,
+    text: &str,
+    reply_markup: Option<Value>,
+) -> Result<()> {
+    send_message(ctx, chat_id, text, reply_markup, true).await
+}
+
+async fn send_message(
+    ctx: &TgContext,
+    chat_id: i64,
+    text: &str,
+    reply_markup: Option<Value>,
+    html: bool,
+) -> Result<()> {
     let mut payload = json!({
         "chat_id": chat_id,
         "text": text,
         "disable_web_page_preview": true,
     });
+    if html {
+        payload["parse_mode"] = json!("HTML");
+    }
     if let Some(markup) = reply_markup {
         payload["reply_markup"] = markup;
     }
@@ -1427,6 +1627,61 @@ fn parse_single_time(text: &str) -> Option<(u32, u32)> {
     }
 }
 
+/// HTML 转义：所有用户输入嵌入 HTML 文案前必须走这个，避免 `<`/`>`/`&`
+/// 让 Telegram 解析失败或被错误渲染。Telegram HTML 模式只识别少量标签
+/// （b/i/u/s/code/pre/a 等），其它都按字面量处理，所以三字符就够。
+fn h(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// 20 格文本进度条：每格 5%，整格 █，半格（cell 余量 ≥ 0.5）▓，空格 ░。
+fn progress_bar(pct: f64) -> String {
+    let pct = pct.clamp(0.0, 100.0);
+    const CELLS: usize = 20;
+    let exact = pct * CELLS as f64 / 100.0;
+    let filled = exact.floor() as usize;
+    let remainder = exact - filled as f64;
+    let mut s = String::with_capacity(CELLS * 4 + 2);
+    s.push('[');
+    for i in 0..CELLS {
+        if i < filled {
+            s.push('█');
+        } else if i == filled && remainder >= 0.5 {
+            s.push('▓');
+        } else {
+            s.push('░');
+        }
+    }
+    s.push(']');
+    s
+}
+
+fn status_emoji(enabled: bool) -> &'static str {
+    if enabled {
+        "✅"
+    } else {
+        "⛔"
+    }
+}
+
+fn quota_alert_emoji(level: u8) -> &'static str {
+    match level {
+        100 => "🚨",
+        90 => "⚠️",
+        80 => "🔔",
+        _ => "📊",
+    }
+}
+
 /// 解析 telegram.timezone 配置。支持：
 /// - 空串 / "UTC" / "Z" → +00:00
 /// - **不走 DST 的** IANA 别名（Asia/Shanghai、Asia/Tokyo、Asia/Dubai、
@@ -1481,7 +1736,7 @@ fn parse_timezone(s: &str) -> Option<FixedOffset> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalized_schedule_vec, parse_schedule_input, parse_timezone};
+    use super::{h, normalized_schedule_vec, parse_schedule_input, parse_timezone, progress_bar};
     use chrono::FixedOffset;
 
     #[test]
@@ -1549,5 +1804,35 @@ mod tests {
         assert_eq!(parse_timezone("invalid"), None);
         assert_eq!(parse_timezone("+25:00"), None);
         assert_eq!(parse_timezone("+abc"), None);
+    }
+
+    #[test]
+    fn progress_bar_boundaries() {
+        assert_eq!(progress_bar(0.0), "[░░░░░░░░░░░░░░░░░░░░]");
+        assert_eq!(progress_bar(50.0), "[██████████░░░░░░░░░░]");
+        assert_eq!(progress_bar(100.0), "[████████████████████]");
+    }
+
+    #[test]
+    fn progress_bar_half_cell_when_remainder_at_least_half() {
+        // 23.4% × 20 = 4.68 → 4 整 + 0.68 余 (≥0.5) → ▓ + 15 ░
+        assert_eq!(progress_bar(23.4), "[████▓░░░░░░░░░░░░░░░]");
+        // 22% × 20 = 4.4 → 4 整 + 0.4 余 (<0.5) → ░
+        assert_eq!(progress_bar(22.0), "[████░░░░░░░░░░░░░░░░]");
+    }
+
+    #[test]
+    fn progress_bar_clamps_overflow() {
+        assert_eq!(progress_bar(150.0), "[████████████████████]");
+        assert_eq!(progress_bar(-5.0), "[░░░░░░░░░░░░░░░░░░░░]");
+    }
+
+    #[test]
+    fn html_escape_replaces_dangerous_chars() {
+        assert_eq!(h("a<b>&c"), "a&lt;b&gt;&amp;c");
+        // 单/双引号在 Telegram HTML 文本中是安全的，不必 escape
+        assert_eq!(h("\"'"), "\"'");
+        // 用户名里夹 HTML 标签会被打散成字面量
+        assert_eq!(h("<script>x</script>"), "&lt;script&gt;x&lt;/script&gt;");
     }
 }
