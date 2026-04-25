@@ -448,7 +448,11 @@ async fn fetch_text_optional(client: &Client, url: &str) -> Result<Option<String
     if !status.is_success() {
         return Err(anyhow!("{} 返回 {}", url, status));
     }
-    Ok(Some(resp.text().await.with_context(|| format!("读取 {} 响应体失败", url))?))
+    Ok(Some(
+        resp.text()
+            .await
+            .with_context(|| format!("读取 {} 响应体失败", url))?,
+    ))
 }
 
 /// 解析 SagerNet 风格 `.dgst` 文件，找 `SHA256(...)= <hex>` 行。

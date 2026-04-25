@@ -1,5 +1,5 @@
-pub mod traffic_repo;
 pub mod tg_repo;
+pub mod traffic_repo;
 pub mod user_repo;
 
 use anyhow::{Context, Result};

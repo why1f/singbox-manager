@@ -82,7 +82,9 @@ pub async fn start(pool: SqlitePool, cfg: Arc<AppConfig>) -> Result<mpsc::Sender
     }
 
     let client = Client::builder()
-        .connect_timeout(Duration::from_secs(cfg.telegram.request_timeout_secs.max(3)))
+        .connect_timeout(Duration::from_secs(
+            cfg.telegram.request_timeout_secs.max(3),
+        ))
         .build()
         .context("构建 Telegram HTTP 客户端失败")?;
     let offset = parse_timezone(&cfg.telegram.timezone).unwrap_or_else(|| {
@@ -242,15 +244,7 @@ async fn handle_message(ctx: &TgContext, chat_id: i64, text: &str) -> Result<()>
             Ok(()) => Ok(()),
             Err(e) => send_text(ctx, chat_id, &e.to_string(), None).await,
         },
-        _ => {
-            send_text(
-                ctx,
-                chat_id,
-                "可用命令：/start /bind <绑定码> /usage",
-                None,
-            )
-            .await
-        }
+        _ => send_text(ctx, chat_id, "可用命令：/start /bind <绑定码> /usage", None).await,
     }
 }
 
@@ -266,10 +260,7 @@ async fn handle_pending_input(
             send_text(
                 ctx,
                 chat_id,
-                &format!(
-                    "时间格式无效: {}\n请输入 HH:MM,HH:MM，例如 09:00,21:30",
-                    e
-                ),
+                &format!("时间格式无效: {}\n请输入 HH:MM,HH:MM，例如 09:00,21:30", e),
                 None,
             )
             .await?;
@@ -463,13 +454,7 @@ async fn send_user_picker(ctx: &TgContext, chat_id: i64) -> Result<()> {
         rows.push(vec![(u.name.clone(), format!("admin:user:{}", u.name))]);
     }
     rows.push(vec![("返回管理员首页".into(), "admin:home".into())]);
-    send_text(
-        ctx,
-        chat_id,
-        "选择用户",
-        Some(inline_keyboard(rows)),
-    )
-    .await
+    send_text(ctx, chat_id, "选择用户", Some(inline_keyboard(rows))).await
 }
 
 async fn send_admin_user_card(ctx: &TgContext, chat_id: i64, username: &str) -> Result<()> {
@@ -516,17 +501,19 @@ async fn send_admin_user_usage(ctx: &TgContext, chat_id: i64, username: &str) ->
     .await
 }
 
-async fn send_subscription_menu(
-    ctx: &TgContext,
-    chat_id: i64,
-    target: Option<&str>,
-) -> Result<()> {
+async fn send_subscription_menu(ctx: &TgContext, chat_id: i64, target: Option<&str>) -> Result<()> {
     let target_name = resolve_target_user(ctx, chat_id, target).await?.name;
     let rows = if target.is_some() {
         vec![
             vec![("URL 订阅".into(), format!("admin:sub:url:{}", target_name))],
-            vec![("Base64 订阅".into(), format!("admin:sub:b64:{}", target_name))],
-            vec![("明文节点".into(), format!("admin:sub:plain:{}", target_name))],
+            vec![(
+                "Base64 订阅".into(),
+                format!("admin:sub:b64:{}", target_name),
+            )],
+            vec![(
+                "明文节点".into(),
+                format!("admin:sub:plain:{}", target_name),
+            )],
             vec![("返回用户卡片".into(), format!("admin:user:{}", target_name))],
         ]
     } else {
@@ -540,11 +527,7 @@ async fn send_subscription_menu(
     send_text(ctx, chat_id, "请选择订阅内容", Some(inline_keyboard(rows))).await
 }
 
-async fn send_subscription_url(
-    ctx: &TgContext,
-    chat_id: i64,
-    target: Option<&str>,
-) -> Result<()> {
+async fn send_subscription_url(ctx: &TgContext, chat_id: i64, target: Option<&str>) -> Result<()> {
     let export = build_export_payloads(ctx, chat_id, target).await?;
     let text = match export.url {
         Some(url) => format!("URL 订阅\n\n{}", url),
@@ -616,10 +599,26 @@ async fn send_user_settings(ctx: &TgContext, chat_id: i64) -> Result<()> {
 async fn toggle_user_setting(ctx: &TgContext, chat_id: i64, level: u8) -> Result<()> {
     let user = bound_user(ctx, chat_id).await?;
     let (n80, n90, n100) = match level {
-        80 => (!user.tg_notify_quota_80, user.tg_notify_quota_90, user.tg_notify_quota_100),
-        90 => (user.tg_notify_quota_80, !user.tg_notify_quota_90, user.tg_notify_quota_100),
-        100 => (user.tg_notify_quota_80, user.tg_notify_quota_90, !user.tg_notify_quota_100),
-        _ => (user.tg_notify_quota_80, user.tg_notify_quota_90, user.tg_notify_quota_100),
+        80 => (
+            !user.tg_notify_quota_80,
+            user.tg_notify_quota_90,
+            user.tg_notify_quota_100,
+        ),
+        90 => (
+            user.tg_notify_quota_80,
+            !user.tg_notify_quota_90,
+            user.tg_notify_quota_100,
+        ),
+        100 => (
+            user.tg_notify_quota_80,
+            user.tg_notify_quota_90,
+            !user.tg_notify_quota_100,
+        ),
+        _ => (
+            user.tg_notify_quota_80,
+            user.tg_notify_quota_90,
+            user.tg_notify_quota_100,
+        ),
     };
     user_repo::set_tg_notify_settings(
         &ctx.pool,
@@ -727,11 +726,7 @@ async fn prompt_admin_times(ctx: &TgContext, chat_id: i64) -> Result<()> {
     .await
 }
 
-async fn refresh_and_send_usage(
-    ctx: &TgContext,
-    chat_id: i64,
-    target: Option<&str>,
-) -> Result<()> {
+async fn refresh_and_send_usage(ctx: &TgContext, chat_id: i64, target: Option<&str>) -> Result<()> {
     let username = resolve_target_user(ctx, chat_id, target).await?.name;
     let flush_msg = match crate::service::runtime_service::flush_current_traffic(
         &ctx.pool,
@@ -1021,7 +1016,8 @@ fn due_times(
     dates: &BTreeMap<String, String>,
 ) -> Vec<String> {
     let today = now.format("%Y-%m-%d").to_string();
-    times.iter()
+    times
+        .iter()
         .filter_map(|item| {
             let (hh, mm) = parse_single_time(item)?;
             if now.hour() == hh && now.minute() == mm && dates.get(item) != Some(&today) {
@@ -1034,11 +1030,19 @@ fn due_times(
 }
 
 fn on_off(v: bool) -> &'static str {
-    if v { "开启" } else { "关闭" }
+    if v {
+        "开启"
+    } else {
+        "关闭"
+    }
 }
 
 fn package_label(user: &User) -> String {
-    format!("{}（{}）", quota_label(user.quota_gb), billing_label(user.traffic_multiplier))
+    format!(
+        "{}（{}）",
+        quota_label(user.quota_gb),
+        billing_label(user.traffic_multiplier)
+    )
 }
 
 fn billing_label(multiplier: f64) -> String {
@@ -1085,7 +1089,11 @@ fn user_home_text(user: &User) -> String {
         remaining_label(user),
         user.quota_used_percent(),
         reset_label(user.reset_day),
-        if user.expire_at.is_empty() { "永久" } else { &user.expire_at }
+        if user.expire_at.is_empty() {
+            "永久"
+        } else {
+            &user.expire_at
+        }
     )
 }
 
@@ -1120,7 +1128,11 @@ fn admin_user_card_text(user: &User) -> String {
         remaining_label(user),
         user.quota_used_percent(),
         reset_label(user.reset_day),
-        if user.expire_at.is_empty() { "永久" } else { &user.expire_at }
+        if user.expire_at.is_empty() {
+            "永久"
+        } else {
+            &user.expire_at
+        }
     )
 }
 
@@ -1167,12 +1179,10 @@ fn start_keyboard(bound: bool, admin: bool) -> Value {
 }
 
 fn user_usage_keyboard() -> Value {
-    inline_keyboard(vec![
-        vec![
-            ("刷新流量".into(), "user:refresh".into()),
-            ("返回首页".into(), "home".into()),
-        ],
-    ])
+    inline_keyboard(vec![vec![
+        ("刷新流量".into(), "user:refresh".into()),
+        ("返回首页".into(), "home".into()),
+    ]])
 }
 
 fn user_alert_keyboard() -> Value {
@@ -1288,7 +1298,11 @@ async fn send_long_text(
     let chunks = split_message(text, 3500);
     let last = chunks.len().saturating_sub(1);
     for (idx, chunk) in chunks.iter().enumerate() {
-        let markup = if idx == last { reply_markup.clone() } else { None };
+        let markup = if idx == last {
+            reply_markup.clone()
+        } else {
+            None
+        };
         send_text(ctx, chat_id, chunk, markup).await?;
     }
     Ok(())
@@ -1311,7 +1325,9 @@ async fn api_post(ctx: &TgContext, method: &str, payload: &Value) -> Result<Valu
     let resp = ctx
         .client
         .post(url)
-        .timeout(Duration::from_secs(ctx.cfg.telegram.request_timeout_secs.max(3)))
+        .timeout(Duration::from_secs(
+            ctx.cfg.telegram.request_timeout_secs.max(3),
+        ))
         .json(payload)
         .send()
         .await
@@ -1376,7 +1392,8 @@ fn normalized_schedule_list(list: &[String]) -> Option<String> {
 }
 
 fn default_schedule_times_json() -> String {
-    serde_json::to_string(&vec!["09:00".to_string(), "21:30".to_string()]).unwrap_or_else(|_| "[]".into())
+    serde_json::to_string(&vec!["09:00".to_string(), "21:30".to_string()])
+        .unwrap_or_else(|_| "[]".into())
 }
 
 fn parse_single_time(text: &str) -> Option<(u32, u32)> {
@@ -1403,15 +1420,16 @@ fn parse_timezone(s: &str) -> Option<FixedOffset> {
         return FixedOffset::east_opt(0);
     }
     let aliased_secs = match s {
-        "Asia/Shanghai" | "Asia/Hong_Kong" | "Asia/Taipei" | "Asia/Singapore"
-        | "Asia/Macau" | "Asia/Kuala_Lumpur" | "Asia/Manila" => Some(8 * 3600),
+        "Asia/Shanghai" | "Asia/Hong_Kong" | "Asia/Taipei" | "Asia/Singapore" | "Asia/Macau"
+        | "Asia/Kuala_Lumpur" | "Asia/Manila" => Some(8 * 3600),
         "Asia/Tokyo" | "Asia/Seoul" => Some(9 * 3600),
         "Asia/Bangkok" | "Asia/Ho_Chi_Minh" | "Asia/Jakarta" => Some(7 * 3600),
         "Asia/Kolkata" | "Asia/Calcutta" => Some(5 * 3600 + 30 * 60),
         "Asia/Dubai" => Some(4 * 3600),
         "Europe/London" => Some(0),
-        "Europe/Paris" | "Europe/Berlin" | "Europe/Rome" | "Europe/Madrid"
-        | "Europe/Amsterdam" => Some(3600),
+        "Europe/Paris" | "Europe/Berlin" | "Europe/Rome" | "Europe/Madrid" | "Europe/Amsterdam" => {
+            Some(3600)
+        }
         "America/New_York" => Some(-5 * 3600),
         "America/Chicago" => Some(-6 * 3600),
         "America/Denver" => Some(-7 * 3600),
@@ -1469,13 +1487,19 @@ mod tests {
             parse_timezone("Asia/Shanghai"),
             FixedOffset::east_opt(8 * 3600)
         );
-        assert_eq!(parse_timezone("Asia/Tokyo"), FixedOffset::east_opt(9 * 3600));
+        assert_eq!(
+            parse_timezone("Asia/Tokyo"),
+            FixedOffset::east_opt(9 * 3600)
+        );
         assert_eq!(parse_timezone("Europe/London"), FixedOffset::east_opt(0));
     }
 
     #[test]
     fn parse_timezone_offset_forms() {
-        assert_eq!(parse_timezone("+05:30"), FixedOffset::east_opt(5 * 3600 + 30 * 60));
+        assert_eq!(
+            parse_timezone("+05:30"),
+            FixedOffset::east_opt(5 * 3600 + 30 * 60)
+        );
         assert_eq!(parse_timezone("-08:00"), FixedOffset::east_opt(-8 * 3600));
         assert_eq!(parse_timezone("+0800"), FixedOffset::east_opt(8 * 3600));
         assert_eq!(parse_timezone("+08"), FixedOffset::east_opt(8 * 3600));

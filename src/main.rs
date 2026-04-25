@@ -603,13 +603,12 @@ async fn run_user(
                 return Ok(());
             }
             let config = core::config::load(&cfg.singbox.config_path)?;
-            let server =
-                service::node_service::resolve_export_server(
-                    cfg.subscription.use_public_base_as_server,
-                    &cfg.subscription.public_base,
-                    None,
-                )
-                .await?;
+            let server = service::node_service::resolve_export_server(
+                cfg.subscription.use_public_base_as_server,
+                &cfg.subscription.public_base,
+                None,
+            )
+            .await?;
             let links = service::sub_service::generate_links(&config, &name, &server)?;
             if links.is_empty() {
                 println!("用户 '{}' 无可用节点", name);
@@ -653,13 +652,12 @@ async fn run_node(cmd: cli::node::NodeCommands, cfg: &AppConfig) -> Result<()> {
             let config = config
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("config.json 不存在"))?;
-            let server =
-                service::node_service::resolve_export_server(
-                    cfg.subscription.use_public_base_as_server,
-                    &cfg.subscription.public_base,
-                    None,
-                )
-                .await?;
+            let server = service::node_service::resolve_export_server(
+                cfg.subscription.use_public_base_as_server,
+                &cfg.subscription.public_base,
+                None,
+            )
+            .await?;
             let ls = service::sub_service::generate_links(config, &name, &server)?;
             println!(
                 "# 订阅 (Base64)\n{}",

@@ -89,12 +89,12 @@ pub async fn set_tg_bind_token(pool: &SqlitePool, name: &str, token: &str) -> Re
 }
 
 pub async fn find_by_tg_bind_token(pool: &SqlitePool, token: &str) -> Result<Option<User>> {
-    Ok(
-        sqlx::query_as::<_, User>("SELECT * FROM users WHERE tg_bind_token=? AND tg_bind_token != ''")
-            .bind(token)
-            .fetch_optional(pool)
-            .await?,
+    Ok(sqlx::query_as::<_, User>(
+        "SELECT * FROM users WHERE tg_bind_token=? AND tg_bind_token != ''",
     )
+    .bind(token)
+    .fetch_optional(pool)
+    .await?)
 }
 
 pub async fn find_by_tg_chat_id(pool: &SqlitePool, chat_id: i64) -> Result<Option<User>> {
