@@ -1517,21 +1517,72 @@ fn all_usages_text(users: &[User]) -> String {
             .cmp(&a.used_total_bytes())
             .then_with(|| a.name.cmp(&b.name))
     });
-    // 用 <pre> 包成等宽块，列对齐才不会被 Telegram 折叠空格。
-    let mut body = String::with_capacity(rows.len() * 64);
-    body.push_str("用户          已用       / 配额      百分比\n");
-    body.push_str("──────────────────────────────────────\n");
-    for user in &rows {
+
+    let total = rows.len();
+    let enabled = rows.iter().filter(|u| u.enabled).count();
+    let over = rows.iter().filter(|u| u.is_over_quota()).count();
+    let expired = rows.iter().filter(|u| u.is_expired()).count();
+    let bound = rows.iter().filter(|u| u.tg_is_bound()).count();
+    let total_used: i64 = rows.iter().map(|u| u.used_total_bytes()).sum();
+
+    // 表格用 <pre> monospace 框出，不留入用户名 < > & 让 HTML 解析失败 ——
+    // 整个 body 最后会被 h() 转义。所以表格内部用纯 ASCII 框线即可。
+    let mut body = String::with_capacity(rows.len() * 96);
+    body.push_str(" #   用户         已用       / 配额    占比    进度\n");
+    body.push_str("──────────────────────────────────────────────\n");
+    for (i, user) in rows.iter().enumerate() {
+        let pct_str = if user.quota_gb <= 0.0 {
+            "  ─".to_string()
+        } else {
+            format!("{:>3.0}%", user.quota_used_percent())
+        };
+        let bar_str = if user.quota_gb <= 0.0 {
+            "    ─    ".to_string()
+        } else {
+            mini_bar(user.quota_used_percent())
+        };
         body.push_str(&format!(
-            "{:<12} {:>9} / {:<6} {:>6.1}%\n",
-            // 限制 name 在 12 字符以内，避免一个超长用户名把整行撑出 Telegram 的宽度
-            truncate_for_table(&user.name, 12),
+            "{:>2}.  {:<10} {:>9} / {:<6}  {}   {}\n",
+            i + 1,
+            truncate_for_table(&user.name, 10),
             User::format_bytes(user.used_total_bytes()),
             quota_label(user.quota_gb),
-            user.quota_used_percent()
+            pct_str,
+            bar_str,
         ));
     }
-    format!("📋 全部用户流量\n\n<pre>{}</pre>", h(body.trim_end()))
+
+    format!(
+        "📋 <b>全部用户流量</b>\n\n\
+         👥 共 <b>{total}</b> 人 · ✅ 启用 <b>{enabled}</b> · 🚨 超额 <b>{over}</b> · ⏳ 到期 <b>{expired}</b>\n\
+         🔗 已绑定 TG: <b>{bound}</b> / {total}\n\
+         📊 本周期流量合计: <b>{total_used_b}</b>\n\n\
+         <pre>{body}</pre>",
+        total = total,
+        enabled = enabled,
+        over = over,
+        expired = expired,
+        bound = bound,
+        total_used_b = h(&User::format_bytes(total_used)),
+        body = h(body.trim_end()),
+    )
+}
+
+/// 全部用户列表里给每行用的迷你 10 格进度条；空格 ░ 满格 █，不展示半格。
+/// 比 progress_bar(20 格) 窄一半，留出更多列宽给百分比和数字。
+fn mini_bar(pct: f64) -> String {
+    const N: usize = 10;
+    let pct = pct.clamp(0.0, 100.0);
+    let filled = (pct * N as f64 / 100.0).round() as usize;
+    let mut s = String::with_capacity(N * 3);
+    for i in 0..N {
+        if i < filled {
+            s.push('█');
+        } else {
+            s.push('░');
+        }
+    }
+    s
 }
 
 /// 截断 ASCII 安全的窄宽截断；中文/emoji 因为是宽字符可能仍会撑列，
@@ -1963,7 +2014,9 @@ fn parse_timezone(s: &str) -> Option<FixedOffset> {
 
 #[cfg(test)]
 mod tests {
-    use super::{h, normalized_schedule_vec, parse_schedule_input, parse_timezone, progress_bar};
+    use super::{
+        h, mini_bar, normalized_schedule_vec, parse_schedule_input, parse_timezone, progress_bar,
+    };
     use chrono::FixedOffset;
 
     #[test]
@@ -2061,5 +2114,20 @@ mod tests {
         assert_eq!(h("\"'"), "\"'");
         // 用户名里夹 HTML 标签会被打散成字面量
         assert_eq!(h("<script>x</script>"), "&lt;script&gt;x&lt;/script&gt;");
+    }
+
+    #[test]
+    fn mini_bar_boundaries() {
+        assert_eq!(mini_bar(0.0), "░░░░░░░░░░");
+        assert_eq!(mini_bar(50.0), "█████░░░░░");
+        assert_eq!(mini_bar(100.0), "██████████");
+    }
+
+    #[test]
+    fn mini_bar_rounds_to_nearest_cell() {
+        // 24% × 10 = 2.4 → round → 2 满
+        assert_eq!(mini_bar(24.0), "██░░░░░░░░");
+        // 25% × 10 = 2.5 → round → 3 满（half away from zero）
+        assert_eq!(mini_bar(25.0), "███░░░░░░░");
     }
 }
