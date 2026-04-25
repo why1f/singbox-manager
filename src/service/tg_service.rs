@@ -1130,11 +1130,7 @@ async fn run_due_schedules(ctx: &TgContext) -> Result<()> {
             continue;
         }
         let users = user_repo::list_all(&ctx.pool).await?;
-        let text = format!(
-            "⏰ 定时流量汇总\n时间: {}\n\n{}",
-            h(&now.format("%Y-%m-%d %H:%M").to_string()),
-            all_usages_text(&users)
-        );
+        let text = scheduled_all_usages_text(&now.format("%m-%d %H:%M").to_string(), &users);
         send_html(ctx, prefs.chat_id, &text, Some(admin_overview_keyboard())).await?;
         for item in due {
             dates.insert(item, today.clone());
@@ -1511,6 +1507,18 @@ fn admin_user_card_text(user: &User) -> String {
 }
 
 fn all_usages_text(users: &[User]) -> String {
+    format!("📊 <b>全部用户流量</b>\n\n{}", all_usages_body(users))
+}
+
+fn scheduled_all_usages_text(when: &str, users: &[User]) -> String {
+    format!(
+        "⏰ <b>流量汇总</b> <code>{}</code>\n\n{}",
+        h(when),
+        all_usages_body(users)
+    )
+}
+
+fn all_usages_body(users: &[User]) -> String {
     let mut rows = users.to_vec();
     rows.sort_by(|a, b| {
         b.used_total_bytes()
@@ -1519,26 +1527,20 @@ fn all_usages_text(users: &[User]) -> String {
     });
 
     let total = rows.len();
-    let enabled = rows.iter().filter(|u| u.enabled).count();
     let over = rows.iter().filter(|u| u.is_over_quota()).count();
     let expired = rows.iter().filter(|u| u.is_expired()).count();
-    let bound = rows.iter().filter(|u| u.tg_is_bound()).count();
     let total_used: i64 = rows.iter().map(|u| u.used_total_bytes()).sum();
 
-    let mut out = String::with_capacity(rows.len() * 160);
+    let mut out = String::with_capacity(rows.len() * 96);
     out.push_str(&format!(
-        "📋 <b>全部用户流量</b>\n\n\
-         👥 共 <b>{total}</b> 人 · ✅ {enabled} · 🚨 {over} · ⏳ {expired}\n\
-         🔗 已绑定 <b>{bound}</b> / {total} · 📊 合计 <b>{total_used_b}</b>",
+        "{total} 人 · 超额 {over} · 到期 {expired} · 合计 <b>{total_used_b}</b>",
         total = total,
-        enabled = enabled,
         over = over,
         expired = expired,
-        bound = bound,
         total_used_b = h(&User::format_bytes(total_used)),
     ));
 
-    for user in &rows {
+    for (idx, user) in rows.iter().enumerate() {
         let icon = if user.is_expired() {
             "⏳"
         } else if user.is_over_quota() {
@@ -1548,31 +1550,81 @@ fn all_usages_text(users: &[User]) -> String {
         } else {
             "⛔"
         };
-        // 不限配额的用户压成一行，没有进度条没有百分比，避免假象
+        let name = truncate_label(&user.name, 8);
+        let used = User::format_bytes(user.used_total_bytes());
+        let quota = compact_quota_label(user.quota_gb);
+        let prefix = if idx == 0 { "\n\n" } else { "\n" };
         if user.quota_gb <= 0.0 {
-            out.push_str(&format!(
-                "\n\n{icon} <b>{name}</b> · 不限\n\
-                 已用: <b>{used}</b>",
-                icon = icon,
-                name = h(&user.name),
-                used = h(&User::format_bytes(user.used_total_bytes())),
-            ));
+            let line = format!("{icon} {name:<8} {used:>8}/{quota:<4}  --   --");
+            out.push_str(&format!("{prefix}<code>{}</code>", h(&line)));
         } else {
             let pct = user.quota_used_percent();
-            out.push_str(&format!(
-                "\n\n{icon} <b>{name}</b>\n\
-                 计费用量: <b>{used}</b> / {quota} · {pct:.1}%\n\
-                 进度: <code>{bar}</code>",
+            let pct_s = compact_percent(pct);
+            let bar = compact_progress_bar(pct);
+            let line = format!(
+                "{icon} {name:<8} {used:>8}/{quota:<4} {pct_s:>5}  {bar}",
                 icon = icon,
-                name = h(&user.name),
-                used = h(&User::format_bytes(user.used_total_bytes())),
-                quota = h(&quota_label(user.quota_gb)),
-                pct = pct,
-                bar = progress_bar(pct),
-            ));
+                name = name,
+                used = used,
+                quota = quota,
+                pct_s = pct_s,
+                bar = bar,
+            );
+            out.push_str(&format!("{prefix}<code>{}</code>", h(&line)));
         }
     }
 
+    out
+}
+
+fn compact_quota_label(quota_gb: f64) -> String {
+    if quota_gb <= 0.0 {
+        "∞".to_string()
+    } else if (quota_gb.fract()).abs() < 0.01 {
+        format!("{:.0}G", quota_gb)
+    } else {
+        format!("{:.1}G", quota_gb)
+    }
+}
+
+fn compact_percent(pct: f64) -> String {
+    let pct = pct.clamp(0.0, 999.9);
+    if pct < 10.0 {
+        format!("{pct:.1}%")
+    } else {
+        format!("{pct:.0}%")
+    }
+}
+
+fn compact_progress_bar(pct: f64) -> String {
+    const N: usize = 8;
+    let pct = pct.clamp(0.0, 100.0);
+    let scaled = pct * N as f64 / 100.0;
+    let full = scaled.floor() as usize;
+    let has_half = (scaled - full as f64) >= 0.5 && full < N;
+    let mut s = String::with_capacity(N);
+    for i in 0..N {
+        if i < full {
+            s.push('█');
+        } else if i == full && has_half {
+            s.push('▓');
+        } else {
+            s.push('░');
+        }
+    }
+    s
+}
+
+fn truncate_label(s: &str, max_chars: usize) -> String {
+    let count = s.chars().count();
+    if count <= max_chars {
+        return s.to_string();
+    }
+    if max_chars <= 1 {
+        return "…".to_string();
+    }
+    let mut out: String = s.chars().take(max_chars - 1).collect();
+    out.push('…');
     out
 }
 
@@ -1994,7 +2046,10 @@ fn parse_timezone(s: &str) -> Option<FixedOffset> {
 
 #[cfg(test)]
 mod tests {
-    use super::{h, normalized_schedule_vec, parse_schedule_input, parse_timezone, progress_bar};
+    use super::{
+        compact_percent, compact_progress_bar, compact_quota_label, h, normalized_schedule_vec,
+        parse_schedule_input, parse_timezone, progress_bar, truncate_label,
+    };
     use chrono::FixedOffset;
 
     #[test]
@@ -2083,6 +2138,29 @@ mod tests {
     fn progress_bar_clamps_overflow() {
         assert_eq!(progress_bar(150.0), "[████████████████████]");
         assert_eq!(progress_bar(-5.0), "[░░░░░░░░░░░░░░░░░░░░]");
+    }
+
+    #[test]
+    fn compact_progress_bar_uses_eight_cells() {
+        assert_eq!(compact_progress_bar(0.0), "░░░░░░░░");
+        assert_eq!(compact_progress_bar(50.0), "████░░░░");
+        assert_eq!(compact_progress_bar(100.0), "████████");
+    }
+
+    #[test]
+    fn compact_percent_trims_large_values() {
+        assert_eq!(compact_percent(1.24), "1.2%");
+        assert_eq!(compact_percent(42.1), "42%");
+        assert_eq!(compact_percent(150.0), "150%");
+    }
+
+    #[test]
+    fn compact_quota_and_label_helpers() {
+        assert_eq!(compact_quota_label(100.0), "100G");
+        assert_eq!(compact_quota_label(12.5), "12.5G");
+        assert_eq!(compact_quota_label(0.0), "∞");
+        assert_eq!(truncate_label("abcdefgh", 8), "abcdefgh");
+        assert_eq!(truncate_label("abcdefghi", 8), "abcdefg…");
     }
 
     #[test]
