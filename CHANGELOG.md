@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## v0.4.10
+
+### Fixed
+
+- **`telegram.timezone` 不再把 DST 时区映射成固定偏移**：v0.4.9 把 `Europe/London` / `America/New_York` / `Australia/Sydney` 等映射成它们标准时间下的偏移，但这些时区有夏令时，DST 期间整整偏 1 小时。改为只保留全年无 DST 的 IANA 别名（Asia/* 系列、Asia/Dubai、Australia/Brisbane / Australia/Perth）；DST 时区一律不识别，回落 `+08:00` 并在日志里 warn 提示用显式偏移如 `-05:00`。
+- **TG 设置定时推送的提示文案改为动态读取 timezone**：`prompt_user_times` / `prompt_admin_times` 之前还硬编码"时区固定为 Asia/Shanghai"，v0.4.9 让 timezone 可配后这两处文案没跟上。现改为显示 `cfg.telegram.timezone` 当前值，空串时显示 `Asia/Shanghai（默认）`。
+
 ## v0.4.9
 
 ### Fixed
