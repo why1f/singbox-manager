@@ -54,6 +54,7 @@ struct TgUpdate {
 
 #[derive(Debug, Deserialize, Clone)]
 struct TgMessage {
+    message_id: i64,
     chat: TgChat,
     #[serde(default)]
     text: Option<String>,
@@ -102,6 +103,9 @@ pub async fn start(pool: SqlitePool, cfg: Arc<AppConfig>) -> Result<mpsc::Sender
         pending_inputs: Arc::new(Mutex::new(HashMap::new())),
     };
     ensure_admin_defaults(&ctx).await?;
+    // 注册 BotFather 命令菜单（输入框左下角的 / 快捷键）。失败仅 warn，
+    // 因为命令本身没注册也能工作，只是 UI 上不出现下拉提示。
+    register_bot_commands(&ctx).await;
 
     let (tx, mut rx) = mpsc::channel::<TgEvent>(64);
 
@@ -151,6 +155,22 @@ async fn ensure_admin_defaults(ctx: &TgContext) -> Result<()> {
         .await?;
     }
     Ok(())
+}
+
+/// 把 bot 支持的命令通过 setMyCommands 注册给 Telegram。注册完后用户的输入框
+/// 左下角会出现 / 快捷键面板，点 bot 头像旁的"命令菜单"也能看到。
+/// /usages 是管理员命令但 Telegram 命令菜单是 per-bot 全局的，非 admin 调用
+/// 会在 send_all_usages 里被 bail，UI 上至少能让 admin 一目了然。
+async fn register_bot_commands(ctx: &TgContext) {
+    let commands = json!([
+        { "command": "start", "description": "打开主菜单 / 刷新" },
+        { "command": "usage", "description": "查看我的流量" },
+        { "command": "bind",  "description": "绑定账号: /bind <绑定码>" },
+        { "command": "usages", "description": "（管理员）全部用户流量" },
+    ]);
+    if let Err(e) = api_post(ctx, "setMyCommands", &json!({ "commands": commands })).await {
+        warn!(error = %e, "注册 Telegram 命令菜单失败（不致命）");
+    }
 }
 
 async fn poll_updates_loop(ctx: TgContext) {
@@ -211,12 +231,13 @@ async fn handle_update(ctx: &TgContext, update: TgUpdate) -> Result<()> {
         }
     }
     if let Some(cb) = update.callback_query {
+        let cb_id = cb.id.clone();
         if let Some(data) = cb.data.clone() {
             if let Some(msg) = cb.message.clone() {
-                handle_callback(ctx, msg.chat.id, &data).await?;
+                handle_callback(ctx, msg.chat.id, msg.message_id, &data).await?;
             }
         }
-        let _ = answer_callback(ctx, &cb.id).await;
+        let _ = answer_callback(ctx, &cb_id).await;
     }
     Ok(())
 }
@@ -235,12 +256,12 @@ async fn handle_message(ctx: &TgContext, chat_id: i64, text: &str) -> Result<()>
         };
     }
     match text {
-        "/start" => send_start(ctx, chat_id).await,
-        "/usage" => match send_usage(ctx, chat_id).await {
+        "/start" => send_start(ctx, chat_id, None).await,
+        "/usage" => match send_usage(ctx, chat_id, None).await {
             Ok(()) => Ok(()),
             Err(e) => send_text(ctx, chat_id, &e.to_string(), None).await,
         },
-        "/usages" => match send_all_usages(ctx, chat_id).await {
+        "/usages" => match send_all_usages(ctx, chat_id, None).await {
             Ok(()) => Ok(()),
             Err(e) => send_text(ctx, chat_id, &e.to_string(), None).await,
         },
@@ -283,10 +304,13 @@ async fn handle_pending_input(
                 &json,
             )
             .await?;
-            send_text(
+            send_html(
                 ctx,
                 chat_id,
-                &format!("已更新定时推送时间：{}", times.join(", ")),
+                &format!(
+                    "✅ <b>已更新定时推送时间</b>\n\n<code>{}</code>",
+                    h(&times.join(", "))
+                ),
                 Some(user_settings_keyboard()),
             )
             .await?;
@@ -294,10 +318,13 @@ async fn handle_pending_input(
         PendingInput::AdminSchedule => {
             let prefs = load_admin_pref(ctx, chat_id).await?;
             tg_repo::set_admin_schedule(&ctx.pool, chat_id, prefs.schedule_enabled, &json).await?;
-            send_text(
+            send_html(
                 ctx,
                 chat_id,
-                &format!("已更新管理员汇总时间：{}", times.join(", ")),
+                &format!(
+                    "✅ <b>已更新管理员汇总时间</b>\n\n<code>{}</code>",
+                    h(&times.join(", "))
+                ),
                 Some(admin_settings_keyboard()),
             )
             .await?;
@@ -307,69 +334,70 @@ async fn handle_pending_input(
     Ok(())
 }
 
-async fn handle_callback(ctx: &TgContext, chat_id: i64, data: &str) -> Result<()> {
+async fn handle_callback(ctx: &TgContext, chat_id: i64, msg_id: i64, data: &str) -> Result<()> {
+    // 所有 callback dispatch 把 message_id 传给目标函数，目标函数走 send_or_edit_html
+    // 在原卡片上原地更新而不是新发——避免聊天流积累一长串切换历史。
+    let edit = Some(msg_id);
     let result = match data {
-        "home" => send_start(ctx, chat_id).await,
-        "user:usage" => send_usage(ctx, chat_id).await,
-        "user:refresh" => refresh_and_send_usage(ctx, chat_id, None).await,
-        "user:subs" => send_subscription_menu(ctx, chat_id, None).await,
-        "user:sub:url" => send_subscription_url(ctx, chat_id, None).await,
-        "user:sub:b64" => send_subscription_base64(ctx, chat_id, None).await,
-        "user:sub:plain" => send_subscription_plain(ctx, chat_id, None).await,
-        "user:settings" => send_user_settings(ctx, chat_id).await,
-        "user:set:n80" => toggle_user_setting(ctx, chat_id, 80).await,
-        "user:set:n90" => toggle_user_setting(ctx, chat_id, 90).await,
-        "user:set:n100" => toggle_user_setting(ctx, chat_id, 100).await,
-        "user:set:schedule" => toggle_user_schedule(ctx, chat_id).await,
-        "user:set:times" => prompt_user_times(ctx, chat_id).await,
-        "admin:home" => send_admin_home(ctx, chat_id).await,
-        "admin:usages" => send_all_usages(ctx, chat_id).await,
-        "admin:users" => send_user_picker(ctx, chat_id).await,
-        "admin:settings" => send_admin_settings(ctx, chat_id).await,
-        "admin:set:quota" => toggle_admin_quota(ctx, chat_id).await,
-        "admin:set:schedule" => toggle_admin_schedule(ctx, chat_id).await,
-        "admin:set:times" => prompt_admin_times(ctx, chat_id).await,
+        "home" => send_start(ctx, chat_id, edit).await,
+        "user:usage" => send_usage(ctx, chat_id, edit).await,
+        "user:refresh" => refresh_and_send_usage(ctx, chat_id, edit, None).await,
+        "user:subs" => send_subscription_menu(ctx, chat_id, edit, None).await,
+        "user:sub:url" => send_subscription_url(ctx, chat_id, edit, None).await,
+        "user:sub:b64" => send_subscription_base64(ctx, chat_id, edit, None).await,
+        "user:sub:plain" => send_subscription_plain(ctx, chat_id, edit, None).await,
+        "user:settings" => send_user_settings(ctx, chat_id, edit).await,
+        "user:set:n80" => toggle_user_setting(ctx, chat_id, edit, 80).await,
+        "user:set:n90" => toggle_user_setting(ctx, chat_id, edit, 90).await,
+        "user:set:n100" => toggle_user_setting(ctx, chat_id, edit, 100).await,
+        "user:set:schedule" => toggle_user_schedule(ctx, chat_id, edit).await,
+        "user:set:times" => prompt_user_times(ctx, chat_id, edit).await,
+        "admin:home" => send_admin_home(ctx, chat_id, edit).await,
+        "admin:usages" => send_all_usages(ctx, chat_id, edit).await,
+        "admin:users" => send_user_picker(ctx, chat_id, edit).await,
+        "admin:settings" => send_admin_settings(ctx, chat_id, edit).await,
+        "admin:set:quota" => toggle_admin_quota(ctx, chat_id, edit).await,
+        "admin:set:schedule" => toggle_admin_schedule(ctx, chat_id, edit).await,
+        "admin:set:times" => prompt_admin_times(ctx, chat_id, edit).await,
         _ if data.starts_with("admin:user:") => {
             let name = data.trim_start_matches("admin:user:");
-            send_admin_user_card(ctx, chat_id, name).await
+            send_admin_user_card(ctx, chat_id, edit, name).await
         }
         _ if data.starts_with("admin:uusage:") => {
             let name = data.trim_start_matches("admin:uusage:");
-            send_admin_user_usage(ctx, chat_id, name).await
+            send_admin_user_usage(ctx, chat_id, edit, name).await
         }
         _ if data.starts_with("admin:urefresh:") => {
             let name = data.trim_start_matches("admin:urefresh:");
-            refresh_and_send_usage(ctx, chat_id, Some(name)).await
+            refresh_and_send_usage(ctx, chat_id, edit, Some(name)).await
         }
         _ if data.starts_with("admin:usubs:") => {
             let name = data.trim_start_matches("admin:usubs:");
-            send_subscription_menu(ctx, chat_id, Some(name)).await
+            send_subscription_menu(ctx, chat_id, edit, Some(name)).await
         }
         _ if data.starts_with("admin:sub:url:") => {
             let name = data.trim_start_matches("admin:sub:url:");
-            send_subscription_url(ctx, chat_id, Some(name)).await
+            send_subscription_url(ctx, chat_id, edit, Some(name)).await
         }
         _ if data.starts_with("admin:sub:b64:") => {
             let name = data.trim_start_matches("admin:sub:b64:");
-            send_subscription_base64(ctx, chat_id, Some(name)).await
+            send_subscription_base64(ctx, chat_id, edit, Some(name)).await
         }
         _ if data.starts_with("admin:sub:plain:") => {
             let name = data.trim_start_matches("admin:sub:plain:");
-            send_subscription_plain(ctx, chat_id, Some(name)).await
+            send_subscription_plain(ctx, chat_id, edit, Some(name)).await
         }
-        // 注意：更具体的 prefix（admin:bind:regen:/admin:bind:unbind:）必须放在
-        // admin:bind: 之前，否则会被它先吞掉。
         _ if data.starts_with("admin:bind:regen:") => {
             let name = data.trim_start_matches("admin:bind:regen:");
-            admin_bind_regen(ctx, chat_id, name).await
+            admin_bind_regen(ctx, chat_id, edit, name).await
         }
         _ if data.starts_with("admin:bind:unbind:") => {
             let name = data.trim_start_matches("admin:bind:unbind:");
-            admin_bind_unbind(ctx, chat_id, name).await
+            admin_bind_unbind(ctx, chat_id, edit, name).await
         }
         _ if data.starts_with("admin:bind:") => {
             let name = data.trim_start_matches("admin:bind:");
-            send_admin_bind_card(ctx, chat_id, name).await
+            send_admin_bind_card(ctx, chat_id, edit, name).await
         }
         _ => Ok(()),
     };
@@ -385,29 +413,36 @@ async fn bind_user(ctx: &TgContext, chat_id: i64, code: &str) -> Result<()> {
         .ok_or_else(|| anyhow!("绑定码无效"))?;
     user_repo::clear_tg_binding_for_chat(&ctx.pool, chat_id).await?;
     user_repo::set_tg_binding(&ctx.pool, &user.name, chat_id).await?;
-    send_text(
+    send_html(
         ctx,
         chat_id,
-        &format!("绑定成功\n账号：{}", user.name),
+        &format!(
+            "🎉 <b>绑定成功</b>\n\n账号:  <b>{name}</b>\n\n现在可以用下方按钮或输入 /usage 查看流量。",
+            name = h(&user.name)
+        ),
         Some(start_keyboard(true, is_admin(ctx, chat_id))),
     )
     .await
 }
 
-async fn send_start(ctx: &TgContext, chat_id: i64) -> Result<()> {
+async fn send_start(ctx: &TgContext, chat_id: i64, edit: Option<i64>) -> Result<()> {
     let bound = user_repo::find_by_tg_chat_id(&ctx.pool, chat_id).await?;
     let admin = is_admin(ctx, chat_id);
     match bound {
         Some(user) => {
             let text = user_home_text(&user);
-            send_html(ctx, chat_id, &text, Some(start_keyboard(true, admin))).await
+            send_or_edit_html(ctx, chat_id, edit, &text, Some(start_keyboard(true, admin))).await
         }
-        None if admin => send_admin_home(ctx, chat_id).await,
+        None if admin => send_admin_home(ctx, chat_id, edit).await,
         None => {
-            send_text(
+            send_or_edit_html(
                 ctx,
                 chat_id,
-                "你还没有绑定账号。\n\n请先发送：\n/bind <绑定码>",
+                edit,
+                "👋 <b>欢迎使用 sing-box 流量面板</b>\n\n\
+                 你还没有绑定账号。请联系管理员获取 <b>绑定码</b>，然后发送：\n\
+                 <code>/bind &lt;绑定码&gt;</code>\n\n\
+                 绑定后可以查看流量、订阅和接收阈值提醒。",
                 None,
             )
             .await
@@ -415,63 +450,112 @@ async fn send_start(ctx: &TgContext, chat_id: i64) -> Result<()> {
     }
 }
 
-async fn send_usage(ctx: &TgContext, chat_id: i64) -> Result<()> {
+async fn send_usage(ctx: &TgContext, chat_id: i64, edit: Option<i64>) -> Result<()> {
     let user = bound_user(ctx, chat_id).await?;
-    send_html(
+    send_or_edit_html(
         ctx,
         chat_id,
+        edit,
         &user_usage_text(&user, false),
         Some(user_usage_keyboard()),
     )
     .await
 }
 
-async fn send_all_usages(ctx: &TgContext, chat_id: i64) -> Result<()> {
+async fn send_all_usages(ctx: &TgContext, chat_id: i64, edit: Option<i64>) -> Result<()> {
     if !is_admin(ctx, chat_id) {
         anyhow::bail!("仅管理员可查看全部用户流量");
     }
     let users = user_repo::list_all(&ctx.pool).await?;
-    send_html(
+    send_or_edit_html(
         ctx,
         chat_id,
+        edit,
         &all_usages_text(&users),
         Some(admin_overview_keyboard()),
     )
     .await
 }
 
-async fn send_admin_home(ctx: &TgContext, chat_id: i64) -> Result<()> {
+async fn send_admin_home(ctx: &TgContext, chat_id: i64, edit: Option<i64>) -> Result<()> {
     if !is_admin(ctx, chat_id) {
         anyhow::bail!("仅管理员可访问管理面板");
     }
     let users = user_repo::list_all(&ctx.pool).await?;
+    let total = users.len();
     let enabled = users.iter().filter(|u| u.enabled).count();
+    let disabled = total.saturating_sub(enabled);
     let over = users.iter().filter(|u| u.is_over_quota()).count();
     let exp = users.iter().filter(|u| u.is_expired()).count();
+    let total_used: i64 = users.iter().map(|u| u.used_total_bytes()).sum();
+    let bound = users.iter().filter(|u| u.tg_is_bound()).count();
     let text = format!(
-        "管理员面板\n\n用户数：{}\n启用：{}\n超额：{}\n到期：{}",
-        users.len(),
-        enabled,
-        over,
-        exp
+        "👨\u{200d}💼 <b>管理员面板</b>\n\n\
+         📈 <b>用户概览</b>\n\
+         👥 总数:    <b>{total}</b>\n\
+         ✅ 启用:    <b>{enabled}</b>{disabled_tail}\n\
+         🚨 超额:    <b>{over}</b>\n\
+         ⏳ 到期:    <b>{exp}</b>\n\
+         🔗 已绑定:  <b>{bound}</b> / {total}\n\n\
+         📊 <b>整体流量</b>\n\
+         本周期合计:  <b>{total_used}</b>",
+        total = total,
+        enabled = enabled,
+        disabled_tail = if disabled > 0 {
+            format!("（停用 {}）", disabled)
+        } else {
+            String::new()
+        },
+        over = over,
+        exp = exp,
+        bound = bound,
+        total_used = h(&User::format_bytes(total_used)),
     );
-    send_text(ctx, chat_id, &text, Some(admin_home_keyboard())).await
+    send_or_edit_html(ctx, chat_id, edit, &text, Some(admin_home_keyboard())).await
 }
 
-async fn send_user_picker(ctx: &TgContext, chat_id: i64) -> Result<()> {
+async fn send_user_picker(ctx: &TgContext, chat_id: i64, edit: Option<i64>) -> Result<()> {
     if !is_admin(ctx, chat_id) {
         anyhow::bail!("仅管理员可查看用户列表");
     }
     let users = user_repo::list_all(&ctx.pool).await?;
+    let total = users.len();
     let mut rows = Vec::new();
-    for u in users {
-        rows.push(vec![(u.name.clone(), format!("admin:user:{}", u.name))]);
+    for u in &users {
+        let icon = if u.is_expired() {
+            "⏳"
+        } else if u.is_over_quota() {
+            "🚨"
+        } else if u.enabled {
+            "✅"
+        } else {
+            "⛔"
+        };
+        rows.push(vec![(
+            format!("{} {}", icon, u.name),
+            format!("admin:user:{}", u.name),
+        )]);
     }
-    rows.push(vec![("返回管理员首页".into(), "admin:home".into())]);
-    send_text(ctx, chat_id, "选择用户", Some(inline_keyboard(rows))).await
+    rows.push(vec![("← 返回管理员首页".into(), "admin:home".into())]);
+    send_or_edit_html(
+        ctx,
+        chat_id,
+        edit,
+        &format!(
+            "📋 <b>用户列表</b>\n\n共 <b>{total}</b> 个用户，点击查看详情",
+            total = total
+        ),
+        Some(inline_keyboard(rows)),
+    )
+    .await
 }
 
-async fn send_admin_user_card(ctx: &TgContext, chat_id: i64, username: &str) -> Result<()> {
+async fn send_admin_user_card(
+    ctx: &TgContext,
+    chat_id: i64,
+    edit: Option<i64>,
+    username: &str,
+) -> Result<()> {
     if !is_admin(ctx, chat_id) {
         anyhow::bail!("仅管理员可查看用户");
     }
@@ -490,10 +574,15 @@ async fn send_admin_user_card(ctx: &TgContext, chat_id: i64, username: &str) -> 
         ],
         vec![("返回用户列表".into(), "admin:users".into())],
     ];
-    send_html(ctx, chat_id, &text, Some(inline_keyboard(rows))).await
+    send_or_edit_html(ctx, chat_id, edit, &text, Some(inline_keyboard(rows))).await
 }
 
-async fn send_admin_user_usage(ctx: &TgContext, chat_id: i64, username: &str) -> Result<()> {
+async fn send_admin_user_usage(
+    ctx: &TgContext,
+    chat_id: i64,
+    edit: Option<i64>,
+    username: &str,
+) -> Result<()> {
     if !is_admin(ctx, chat_id) {
         anyhow::bail!("仅管理员可查看用户流量");
     }
@@ -507,16 +596,22 @@ async fn send_admin_user_usage(ctx: &TgContext, chat_id: i64, username: &str) ->
         ],
         vec![("返回用户列表".into(), "admin:users".into())],
     ];
-    send_html(
+    send_or_edit_html(
         ctx,
         chat_id,
+        edit,
         &user_usage_text(&user, true),
         Some(inline_keyboard(rows)),
     )
     .await
 }
 
-async fn send_admin_bind_card(ctx: &TgContext, chat_id: i64, username: &str) -> Result<()> {
+async fn send_admin_bind_card(
+    ctx: &TgContext,
+    chat_id: i64,
+    edit: Option<i64>,
+    username: &str,
+) -> Result<()> {
     if !is_admin(ctx, chat_id) {
         anyhow::bail!("仅管理员可管理 TG 绑定");
     }
@@ -569,10 +664,15 @@ async fn send_admin_bind_card(ctx: &TgContext, chat_id: i64, username: &str) -> 
         ("返回用户列表".into(), "admin:users".into()),
     ]);
 
-    send_html(ctx, chat_id, &body, Some(inline_keyboard(rows))).await
+    send_or_edit_html(ctx, chat_id, edit, &body, Some(inline_keyboard(rows))).await
 }
 
-async fn admin_bind_regen(ctx: &TgContext, chat_id: i64, username: &str) -> Result<()> {
+async fn admin_bind_regen(
+    ctx: &TgContext,
+    chat_id: i64,
+    edit: Option<i64>,
+    username: &str,
+) -> Result<()> {
     if !is_admin(ctx, chat_id) {
         anyhow::bail!("仅管理员可管理 TG 绑定");
     }
@@ -581,10 +681,15 @@ async fn admin_bind_regen(ctx: &TgContext, chat_id: i64, username: &str) -> Resu
         .ok_or_else(|| anyhow!("用户不存在: {}", username))?;
     let new_token = crate::service::user_service::new_tg_bind_token();
     user_repo::set_tg_bind_token(&ctx.pool, username, &new_token).await?;
-    send_admin_bind_card(ctx, chat_id, username).await
+    send_admin_bind_card(ctx, chat_id, edit, username).await
 }
 
-async fn admin_bind_unbind(ctx: &TgContext, chat_id: i64, username: &str) -> Result<()> {
+async fn admin_bind_unbind(
+    ctx: &TgContext,
+    chat_id: i64,
+    edit: Option<i64>,
+    username: &str,
+) -> Result<()> {
     if !is_admin(ctx, chat_id) {
         anyhow::bail!("仅管理员可管理 TG 绑定");
     }
@@ -592,14 +697,17 @@ async fn admin_bind_unbind(ctx: &TgContext, chat_id: i64, username: &str) -> Res
         .await?
         .ok_or_else(|| anyhow!("用户不存在: {}", username))?;
     if user.tg_is_bound() {
-        // chat_id=0 在 set_tg_binding 里其实可以接受，但 user 端"绑定"语义统一用
-        // user_repo::set_tg_binding(name, 0) 来标识"已解绑"。
         user_repo::set_tg_binding(&ctx.pool, username, 0).await?;
     }
-    send_admin_bind_card(ctx, chat_id, username).await
+    send_admin_bind_card(ctx, chat_id, edit, username).await
 }
 
-async fn send_subscription_menu(ctx: &TgContext, chat_id: i64, target: Option<&str>) -> Result<()> {
+async fn send_subscription_menu(
+    ctx: &TgContext,
+    chat_id: i64,
+    edit: Option<i64>,
+    target: Option<&str>,
+) -> Result<()> {
     let target_name = resolve_target_user(ctx, chat_id, target).await?.name;
     let rows = if target.is_some() {
         vec![
@@ -622,18 +730,34 @@ async fn send_subscription_menu(ctx: &TgContext, chat_id: i64, target: Option<&s
             vec![("返回首页".into(), "home".into())],
         ]
     };
-    send_text(ctx, chat_id, "请选择订阅内容", Some(inline_keyboard(rows))).await
-}
-
-async fn send_subscription_url(ctx: &TgContext, chat_id: i64, target: Option<&str>) -> Result<()> {
-    let export = build_export_payloads(ctx, chat_id, target).await?;
-    let text = match export.url {
-        Some(url) => format!("URL 订阅\n\n{}", url),
-        None => "当前未启用 URL 订阅。".into(),
-    };
-    send_text(
+    send_or_edit_html(
         ctx,
         chat_id,
+        edit,
+        "📦 <b>订阅导出</b>\n\n请选择订阅内容格式：",
+        Some(inline_keyboard(rows)),
+    )
+    .await
+}
+
+async fn send_subscription_url(
+    ctx: &TgContext,
+    chat_id: i64,
+    edit: Option<i64>,
+    target: Option<&str>,
+) -> Result<()> {
+    let export = build_export_payloads(ctx, chat_id, target).await?;
+    let text = match export.url {
+        Some(url) => format!(
+            "🔗 <b>URL 订阅</b>\n\n<code>{}</code>\n\n直接复制此 URL 导入客户端。",
+            h(&url)
+        ),
+        None => "⚠️ 当前未启用 URL 订阅（管理员未配置 [subscription].public_base）。".into(),
+    };
+    send_or_edit_html(
+        ctx,
+        chat_id,
+        edit,
         &text,
         Some(subscription_back_keyboard(target)),
     )
@@ -643,13 +767,18 @@ async fn send_subscription_url(ctx: &TgContext, chat_id: i64, target: Option<&st
 async fn send_subscription_base64(
     ctx: &TgContext,
     chat_id: i64,
+    edit: Option<i64>,
     target: Option<&str>,
 ) -> Result<()> {
     let export = build_export_payloads(ctx, chat_id, target).await?;
+    // base64 内容可能超过 4096 字符触发 send_long_text 拆分；拆分发送时无法 edit
+    // （editMessage 只能改一条），这里降级为新发：先 edit 一条"长文本即将到达"的占位，
+    // 再走 send_long_text 顺序新发。简化：直接新发。
+    let _ = edit;
     send_long_text(
         ctx,
         chat_id,
-        &format!("Base64 订阅\n\n{}", export.base64),
+        &format!("📋 Base64 订阅\n\n{}", export.base64),
         Some(subscription_back_keyboard(target)),
     )
     .await
@@ -658,6 +787,7 @@ async fn send_subscription_base64(
 async fn send_subscription_plain(
     ctx: &TgContext,
     chat_id: i64,
+    edit: Option<i64>,
     target: Option<&str>,
 ) -> Result<()> {
     let export = build_export_payloads(ctx, chat_id, target).await?;
@@ -666,35 +796,69 @@ async fn send_subscription_plain(
     } else {
         export.plain_links.join("\n")
     };
+    let _ = edit;
     send_long_text(
         ctx,
         chat_id,
-        &format!("明文节点\n\n{}", plain),
+        &format!("📋 明文节点\n\n{}", plain),
         Some(subscription_back_keyboard(target)),
     )
     .await
 }
 
-async fn send_user_settings(ctx: &TgContext, chat_id: i64) -> Result<()> {
+async fn send_user_settings(ctx: &TgContext, chat_id: i64, edit: Option<i64>) -> Result<()> {
     let user = bound_user(ctx, chat_id).await?;
     let times = effective_user_schedule_times(ctx, &user);
     let text = format!(
-        "通知设置\n时区：{}\n\n80% 阈值：{}\n90% 阈值：{}\n100% 阈值：{}\n定时推送：{}\n推送时间：{}",
-        ctx.cfg.telegram.timezone,
-        on_off(user.tg_notify_quota_80),
-        on_off(user.tg_notify_quota_90),
-        on_off(user.tg_notify_quota_100),
-        on_off(user.tg_schedule_enabled),
-        if times.is_empty() {
+        "🔔 <b>通知设置</b>\n\n\
+         🌏 时区:        {tz}\n\n\
+         <b>阈值告警</b>\n\
+         {e80} 80% 提醒:    {n80}\n\
+         {e90} 90% 提醒:    {n90}\n\
+         {e100} 100% 提醒:   {n100}\n\n\
+         <b>定时播报</b>\n\
+         {esch} 启用:        {sch}\n\
+         ⏰ 时间:        <code>{times}</code>",
+        tz = h(&timezone_label(ctx)),
+        e80 = if user.tg_notify_quota_80 {
+            "🟢"
+        } else {
+            "⚪"
+        },
+        e90 = if user.tg_notify_quota_90 {
+            "🟢"
+        } else {
+            "⚪"
+        },
+        e100 = if user.tg_notify_quota_100 {
+            "🟢"
+        } else {
+            "⚪"
+        },
+        n80 = on_off(user.tg_notify_quota_80),
+        n90 = on_off(user.tg_notify_quota_90),
+        n100 = on_off(user.tg_notify_quota_100),
+        esch = if user.tg_schedule_enabled {
+            "🟢"
+        } else {
+            "⚪"
+        },
+        sch = on_off(user.tg_schedule_enabled),
+        times = if times.is_empty() {
             "未设置".into()
         } else {
-            times.join(", ")
+            h(&times.join(", "))
         }
     );
-    send_text(ctx, chat_id, &text, Some(user_settings_keyboard())).await
+    send_or_edit_html(ctx, chat_id, edit, &text, Some(user_settings_keyboard())).await
 }
 
-async fn toggle_user_setting(ctx: &TgContext, chat_id: i64, level: u8) -> Result<()> {
+async fn toggle_user_setting(
+    ctx: &TgContext,
+    chat_id: i64,
+    edit: Option<i64>,
+    level: u8,
+) -> Result<()> {
     let user = bound_user(ctx, chat_id).await?;
     let (n80, n90, n100) = match level {
         80 => (
@@ -728,10 +892,10 @@ async fn toggle_user_setting(ctx: &TgContext, chat_id: i64, level: u8) -> Result
         &user.tg_schedule_times,
     )
     .await?;
-    send_user_settings(ctx, chat_id).await
+    send_user_settings(ctx, chat_id, edit).await
 }
 
-async fn toggle_user_schedule(ctx: &TgContext, chat_id: i64) -> Result<()> {
+async fn toggle_user_schedule(ctx: &TgContext, chat_id: i64, edit: Option<i64>) -> Result<()> {
     let user = bound_user(ctx, chat_id).await?;
     user_repo::set_tg_notify_settings(
         &ctx.pool,
@@ -743,10 +907,10 @@ async fn toggle_user_schedule(ctx: &TgContext, chat_id: i64) -> Result<()> {
         &user.tg_schedule_times,
     )
     .await?;
-    send_user_settings(ctx, chat_id).await
+    send_user_settings(ctx, chat_id, edit).await
 }
 
-async fn prompt_user_times(ctx: &TgContext, chat_id: i64) -> Result<()> {
+async fn prompt_user_times(ctx: &TgContext, chat_id: i64, edit: Option<i64>) -> Result<()> {
     let user = bound_user(ctx, chat_id).await?;
     ctx.pending_inputs.lock().await.insert(
         chat_id,
@@ -754,48 +918,65 @@ async fn prompt_user_times(ctx: &TgContext, chat_id: i64) -> Result<()> {
             username: user.name,
         },
     );
-    send_text(
+    send_or_edit_html(
         ctx,
         chat_id,
+        edit,
         &format!(
-            "请输入定时推送时间，支持多个。\n格式：HH:MM,HH:MM\n示例：09:00,21:30\n\n时区：{}",
-            timezone_label(ctx)
+            "✏️ <b>设置定时推送时间</b>\n\n\
+             请直接发送时间，支持多个，逗号分隔。\n\
+             格式: <code>HH:MM,HH:MM</code>\n\
+             示例: <code>09:00,21:30</code>\n\n\
+             🌏 时区: {}",
+            h(&timezone_label(ctx))
         ),
         None,
     )
     .await
 }
 
-async fn send_admin_settings(ctx: &TgContext, chat_id: i64) -> Result<()> {
+async fn send_admin_settings(ctx: &TgContext, chat_id: i64, edit: Option<i64>) -> Result<()> {
     if !is_admin(ctx, chat_id) {
         anyhow::bail!("仅管理员可配置管理员通知");
     }
     let prefs = load_admin_pref(ctx, chat_id).await?;
     let times = effective_admin_schedule_times(ctx, &prefs);
     let text = format!(
-        "管理员通知设置\n时区：{}\n\n阈值警告：{}\n定时汇总：{}\n汇总时间：{}",
-        ctx.cfg.telegram.timezone,
-        on_off(prefs.notify_quota),
-        on_off(prefs.schedule_enabled),
-        if times.is_empty() {
+        "👨\u{200d}💼 <b>管理员通知设置</b>\n\n\
+         🌏 时区:        {tz}\n\n\
+         <b>阈值警告</b>\n\
+         {eq} 启用:        {q}\n\n\
+         <b>定时汇总</b>\n\
+         {esch} 启用:        {sch}\n\
+         ⏰ 时间:        <code>{times}</code>",
+        tz = h(&timezone_label(ctx)),
+        eq = if prefs.notify_quota { "🟢" } else { "⚪" },
+        q = on_off(prefs.notify_quota),
+        esch = if prefs.schedule_enabled {
+            "🟢"
+        } else {
+            "⚪"
+        },
+        sch = on_off(prefs.schedule_enabled),
+        times = if times.is_empty() {
             "未设置".into()
         } else {
-            times.join(", ")
+            h(&times.join(", "))
         }
     );
-    send_text(ctx, chat_id, &text, Some(admin_settings_keyboard())).await
+    send_or_edit_html(ctx, chat_id, edit, &text, Some(admin_settings_keyboard())).await
 }
 
-async fn toggle_admin_quota(ctx: &TgContext, chat_id: i64) -> Result<()> {
+async fn toggle_admin_quota(ctx: &TgContext, chat_id: i64, edit: Option<i64>) -> Result<()> {
     if !is_admin(ctx, chat_id) {
         anyhow::bail!("仅管理员可配置管理员通知");
     }
     let prefs = load_admin_pref(ctx, chat_id).await?;
     tg_repo::set_admin_notify_quota(&ctx.pool, chat_id, !prefs.notify_quota).await?;
-    send_admin_settings(ctx, chat_id).await
+    send_admin_settings(ctx, chat_id, edit).await
 }
 
-async fn toggle_admin_schedule(ctx: &TgContext, chat_id: i64) -> Result<()> {
+async fn toggle_admin_schedule(ctx: &TgContext, chat_id: i64, edit: Option<i64>) -> Result<()> {
     if !is_admin(ctx, chat_id) {
         anyhow::bail!("仅管理员可配置管理员通知");
     }
@@ -807,10 +988,10 @@ async fn toggle_admin_schedule(ctx: &TgContext, chat_id: i64) -> Result<()> {
         &prefs.schedule_times,
     )
     .await?;
-    send_admin_settings(ctx, chat_id).await
+    send_admin_settings(ctx, chat_id, edit).await
 }
 
-async fn prompt_admin_times(ctx: &TgContext, chat_id: i64) -> Result<()> {
+async fn prompt_admin_times(ctx: &TgContext, chat_id: i64, edit: Option<i64>) -> Result<()> {
     if !is_admin(ctx, chat_id) {
         anyhow::bail!("仅管理员可配置管理员通知");
     }
@@ -818,19 +999,29 @@ async fn prompt_admin_times(ctx: &TgContext, chat_id: i64) -> Result<()> {
         .lock()
         .await
         .insert(chat_id, PendingInput::AdminSchedule);
-    send_text(
+    send_or_edit_html(
         ctx,
         chat_id,
+        edit,
         &format!(
-            "请输入管理员汇总时间，支持多个。\n格式：HH:MM,HH:MM\n示例：09:00,13:00,21:30\n\n时区：{}",
-            timezone_label(ctx)
+            "✏️ <b>设置管理员汇总时间</b>\n\n\
+             请直接发送时间，支持多个，逗号分隔。\n\
+             格式: <code>HH:MM,HH:MM</code>\n\
+             示例: <code>09:00,13:00,21:30</code>\n\n\
+             🌏 时区: {}",
+            h(&timezone_label(ctx))
         ),
         None,
     )
     .await
 }
 
-async fn refresh_and_send_usage(ctx: &TgContext, chat_id: i64, target: Option<&str>) -> Result<()> {
+async fn refresh_and_send_usage(
+    ctx: &TgContext,
+    chat_id: i64,
+    edit: Option<i64>,
+    target: Option<&str>,
+) -> Result<()> {
     let username = resolve_target_user(ctx, chat_id, target).await?.name;
     let flush_msg = match crate::service::runtime_service::flush_current_traffic(
         &ctx.pool,
@@ -855,9 +1046,10 @@ async fn refresh_and_send_usage(ctx: &TgContext, chat_id: i64, target: Option<&s
     } else {
         user_usage_keyboard()
     };
-    send_html(
+    send_or_edit_html(
         ctx,
         chat_id,
+        edit,
         &format!("{}{}", flush_msg, user_usage_text(&user, target.is_some())),
         Some(keyboard),
     )
@@ -1485,6 +1677,41 @@ async fn send_html(
     reply_markup: Option<Value>,
 ) -> Result<()> {
     send_message(ctx, chat_id, text, reply_markup, true).await
+}
+
+/// 卡片切换专用：edit_msg_id 有值时调用 editMessageText 在原消息上原地更新，
+/// 没值或编辑失败（例如对方把消息删了）时降级回 sendMessage 新发。"内容未变"
+/// 这种良性错误吞掉，避免 UI 上回弹一条 toast。
+async fn send_or_edit_html(
+    ctx: &TgContext,
+    chat_id: i64,
+    edit_msg_id: Option<i64>,
+    text: &str,
+    reply_markup: Option<Value>,
+) -> Result<()> {
+    if let Some(msg_id) = edit_msg_id {
+        let mut payload = json!({
+            "chat_id": chat_id,
+            "message_id": msg_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": true,
+        });
+        if let Some(markup) = &reply_markup {
+            payload["reply_markup"] = markup.clone();
+        }
+        match api_post(ctx, "editMessageText", &payload).await {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("message is not modified") {
+                    return Ok(());
+                }
+                tracing::debug!(error = %msg, "editMessageText 失败，降级到 sendMessage");
+            }
+        }
+    }
+    send_html(ctx, chat_id, text, reply_markup).await
 }
 
 async fn send_message(
