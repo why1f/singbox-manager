@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use tokio::sync::{mpsc, Mutex};
-use tracing::{error, warn};
+use tracing::warn;
 
 use crate::{
     db::{tg_repo, user_repo},
@@ -85,11 +85,18 @@ pub async fn start(pool: SqlitePool, cfg: Arc<AppConfig>) -> Result<mpsc::Sender
         .connect_timeout(Duration::from_secs(cfg.telegram.request_timeout_secs.max(3)))
         .build()
         .context("构建 Telegram HTTP 客户端失败")?;
+    let offset = parse_timezone(&cfg.telegram.timezone).unwrap_or_else(|| {
+        warn!(
+            timezone = %cfg.telegram.timezone,
+            "无法解析时区，回落到 +08:00（仅支持 ±HH:MM 偏移和常用 IANA 别名如 Asia/Shanghai/Tokyo）"
+        );
+        FixedOffset::east_opt(8 * 3600).expect("8h 偏移恒定有效")
+    });
     let ctx = TgContext {
         pool,
         cfg,
         client,
-        offset: FixedOffset::east_opt(8 * 3600).ok_or_else(|| anyhow!("时区偏移无效"))?,
+        offset,
         pending_inputs: Arc::new(Mutex::new(HashMap::new())),
     };
     ensure_admin_defaults(&ctx).await?;
@@ -114,9 +121,7 @@ pub async fn start(pool: SqlitePool, cfg: Arc<AppConfig>) -> Result<mpsc::Sender
     {
         let ctx = ctx.clone();
         tokio::spawn(async move {
-            if let Err(e) = poll_updates_loop(ctx).await {
-                error!("Telegram 轮询退出: {}", e);
-            }
+            poll_updates_loop(ctx).await;
         });
     }
 
@@ -146,17 +151,32 @@ async fn ensure_admin_defaults(ctx: &TgContext) -> Result<()> {
     Ok(())
 }
 
-async fn poll_updates_loop(ctx: TgContext) -> Result<()> {
+async fn poll_updates_loop(ctx: TgContext) {
     let mut offset = 0i64;
+    let mut backoff_secs = 1u64;
+    let normal_secs = ctx.cfg.telegram.poll_interval_secs.max(1);
     loop {
-        let updates = get_updates(&ctx, offset).await?;
-        for update in updates {
-            offset = update.update_id + 1;
-            if let Err(e) = handle_update(&ctx, update).await {
-                warn!("处理 Telegram update 失败: {}", e);
+        match get_updates(&ctx, offset).await {
+            Ok(updates) => {
+                backoff_secs = 1;
+                for update in updates {
+                    offset = update.update_id + 1;
+                    if let Err(e) = handle_update(&ctx, update).await {
+                        warn!("处理 Telegram update 失败: {}", e);
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(normal_secs)).await;
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    backoff_secs,
+                    "Telegram getUpdates 失败，将退避后重试"
+                );
+                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                backoff_secs = (backoff_secs * 2).min(60);
             }
         }
-        tokio::time::sleep(Duration::from_secs(ctx.cfg.telegram.poll_interval_secs.max(1))).await;
     }
 }
 
@@ -1370,9 +1390,64 @@ fn parse_single_time(text: &str) -> Option<(u32, u32)> {
     }
 }
 
+/// 解析 telegram.timezone 配置。支持：
+/// - 空串 / "UTC" / "Z" → +00:00
+/// - 常用 IANA 别名（Asia/Shanghai 等）→ 写死的固定偏移
+/// - "+HH:MM" / "-HH:MM" / "+HHMM" / "+HH"
+///
+/// 不引入 chrono-tz 是为了不增加二进制体积，不处理 DST 是因为目标用户
+/// 几乎都在不走夏令时的时区。其他时区显式传 ±HH:MM 即可。
+fn parse_timezone(s: &str) -> Option<FixedOffset> {
+    let s = s.trim();
+    if s.is_empty() || s.eq_ignore_ascii_case("UTC") || s.eq_ignore_ascii_case("Z") {
+        return FixedOffset::east_opt(0);
+    }
+    let aliased_secs = match s {
+        "Asia/Shanghai" | "Asia/Hong_Kong" | "Asia/Taipei" | "Asia/Singapore"
+        | "Asia/Macau" | "Asia/Kuala_Lumpur" | "Asia/Manila" => Some(8 * 3600),
+        "Asia/Tokyo" | "Asia/Seoul" => Some(9 * 3600),
+        "Asia/Bangkok" | "Asia/Ho_Chi_Minh" | "Asia/Jakarta" => Some(7 * 3600),
+        "Asia/Kolkata" | "Asia/Calcutta" => Some(5 * 3600 + 30 * 60),
+        "Asia/Dubai" => Some(4 * 3600),
+        "Europe/London" => Some(0),
+        "Europe/Paris" | "Europe/Berlin" | "Europe/Rome" | "Europe/Madrid"
+        | "Europe/Amsterdam" => Some(3600),
+        "America/New_York" => Some(-5 * 3600),
+        "America/Chicago" => Some(-6 * 3600),
+        "America/Denver" => Some(-7 * 3600),
+        "America/Los_Angeles" => Some(-8 * 3600),
+        "Australia/Sydney" => Some(10 * 3600),
+        _ => None,
+    };
+    if let Some(secs) = aliased_secs {
+        return FixedOffset::east_opt(secs);
+    }
+    let (sign, rest) = match s.chars().next()? {
+        '+' => (1i32, &s[1..]),
+        '-' => (-1i32, &s[1..]),
+        _ => return None,
+    };
+    let (hh, mm) = if let Some((h, m)) = rest.split_once(':') {
+        (h, m)
+    } else if rest.len() == 4 {
+        (&rest[..2], &rest[2..])
+    } else if rest.len() == 2 || rest.len() == 1 {
+        (rest, "0")
+    } else {
+        return None;
+    };
+    let h: i32 = hh.parse().ok()?;
+    let m: i32 = mm.parse().ok()?;
+    if !(0..=14).contains(&h) || !(0..=59).contains(&m) {
+        return None;
+    }
+    FixedOffset::east_opt(sign * (h * 3600 + m * 60))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{normalized_schedule_vec, parse_schedule_input};
+    use super::{normalized_schedule_vec, parse_schedule_input, parse_timezone};
+    use chrono::FixedOffset;
 
     #[test]
     fn parse_schedule_accepts_multiple_times() {
@@ -1386,5 +1461,37 @@ mod tests {
             normalized_schedule_vec(&["09:00".into(), "25:00".into(), "21:30".into()]),
             vec!["09:00", "21:30"]
         );
+    }
+
+    #[test]
+    fn parse_timezone_iana_aliases() {
+        assert_eq!(
+            parse_timezone("Asia/Shanghai"),
+            FixedOffset::east_opt(8 * 3600)
+        );
+        assert_eq!(parse_timezone("Asia/Tokyo"), FixedOffset::east_opt(9 * 3600));
+        assert_eq!(parse_timezone("Europe/London"), FixedOffset::east_opt(0));
+    }
+
+    #[test]
+    fn parse_timezone_offset_forms() {
+        assert_eq!(parse_timezone("+05:30"), FixedOffset::east_opt(5 * 3600 + 30 * 60));
+        assert_eq!(parse_timezone("-08:00"), FixedOffset::east_opt(-8 * 3600));
+        assert_eq!(parse_timezone("+0800"), FixedOffset::east_opt(8 * 3600));
+        assert_eq!(parse_timezone("+08"), FixedOffset::east_opt(8 * 3600));
+    }
+
+    #[test]
+    fn parse_timezone_special_values() {
+        assert_eq!(parse_timezone(""), FixedOffset::east_opt(0));
+        assert_eq!(parse_timezone("UTC"), FixedOffset::east_opt(0));
+        assert_eq!(parse_timezone("z"), FixedOffset::east_opt(0));
+    }
+
+    #[test]
+    fn parse_timezone_rejects_invalid() {
+        assert_eq!(parse_timezone("invalid"), None);
+        assert_eq!(parse_timezone("+25:00"), None);
+        assert_eq!(parse_timezone("+abc"), None);
     }
 }

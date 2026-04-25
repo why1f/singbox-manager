@@ -1301,9 +1301,18 @@ fn spawn_edit_node(
         if let Err(e) = crate::service::runtime_service::mutate_config_locked(
             &pool,
             &cfg.singbox.config_path,
+            Some(&cfg.singbox.binary_path),
             false,
-            |cfg_json| {
-                crate::core::config::edit_node(cfg_json, &tag, port, server_name, path, port_reuse)
+            |cfg_json, ops| {
+                crate::core::config::edit_node(
+                    cfg_json,
+                    &tag,
+                    port,
+                    server_name,
+                    path,
+                    port_reuse,
+                    ops,
+                )
             },
         )
         .await
@@ -1665,8 +1674,9 @@ fn spawn_add_node(
         let meta = match crate::service::runtime_service::mutate_config_locked(
             &pool,
             &cfg.singbox.config_path,
+            Some(&cfg.singbox.binary_path),
             true,
-            |cfg_json| crate::core::config::add_node(cfg_json, &req),
+            |cfg_json, ops| crate::core::config::add_node(cfg_json, &req, ops),
         )
         .await
         {
@@ -1725,8 +1735,9 @@ fn spawn_delete_node(
         let removed = match crate::service::runtime_service::mutate_config_locked(
             &pool,
             &cfg.singbox.config_path,
+            Some(&cfg.singbox.binary_path),
             false,
-            |cfg_json| Ok(crate::core::config::remove_node(cfg_json, &tag)),
+            |cfg_json, ops| Ok(crate::core::config::remove_node(cfg_json, &tag, ops)),
         )
         .await
         {

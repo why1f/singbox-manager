@@ -67,23 +67,47 @@ pub fn remove_node_meta(tag: &str) {
     let _ = std::fs::remove_file(Path::new(CERTS_DIR).join(format!("{}.key", tag)));
 }
 
+/// 配置突变期间需要伴随写出的 NodeMeta 副作用。由 add_node / edit_node /
+/// remove_node 收集，由 mutate_config_locked 在 lock commit 成功后统一 apply，
+/// 保证 config.json 与 nodes.meta.json 不会出现"一边落盘、一边没落盘"的不一致。
+#[derive(Debug, Clone)]
+pub enum MetaOp {
+    Set(String, NodeMeta),
+    Remove(String),
+}
+
+pub fn apply_meta_ops(ops: &[MetaOp]) {
+    for op in ops {
+        match op {
+            MetaOp::Set(tag, meta) => {
+                if let Err(e) = set_node_meta(tag, meta.clone()) {
+                    tracing::warn!(tag = %tag, error = %e, "写 NodeMeta 失败");
+                }
+            }
+            MetaOp::Remove(tag) => remove_node_meta(tag),
+        }
+    }
+}
+
+/// 把 ops 里同 tag 的 Set 合并；没有就基于现有 meta 新建一个再 push。
+fn merge_or_push_meta(ops: &mut Vec<MetaOp>, tag: &str, mutate: impl FnOnce(&mut NodeMeta)) {
+    for op in ops.iter_mut() {
+        if let MetaOp::Set(t, m) = op {
+            if t == tag {
+                mutate(m);
+                return;
+            }
+        }
+    }
+    let mut m = get_node_meta(tag).unwrap_or_default();
+    mutate(&mut m);
+    ops.push(MetaOp::Set(tag.to_string(), m));
+}
+
 pub fn load(path: &str) -> Result<Value> {
     Ok(serde_json::from_str(
         &std::fs::read_to_string(path).with_context(|| format!("读取 {} 失败", path))?,
     )?)
-}
-
-pub fn save(path: &str, json: &Value) -> Result<()> {
-    let tmp = format!("{}.tmp", path);
-    if let Some(parent) = Path::new(path).parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).ok();
-        }
-    }
-    std::fs::write(&tmp, serde_json::to_string_pretty(json)?)?;
-    // Unix: rename 覆盖已有文件；Windows 下需先删除（项目定位 Linux，不处理）。
-    std::fs::rename(&tmp, path)?;
-    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -96,7 +120,11 @@ pub enum AddNodeMeta {
     },
 }
 
-pub fn add_node(cfg: &mut Value, req: &AddNodeRequest) -> Result<AddNodeMeta> {
+pub fn add_node(
+    cfg: &mut Value,
+    req: &AddNodeRequest,
+    ops: &mut Vec<MetaOp>,
+) -> Result<AddNodeMeta> {
     let root = ensure_object(cfg);
     let inbounds = root
         .entry("inbounds")
@@ -110,20 +138,18 @@ pub fn add_node(cfg: &mut Value, req: &AddNodeRequest) -> Result<AddNodeMeta> {
     {
         anyhow::bail!("节点 tag 已存在: {}", req.tag);
     }
-    let (mut inbound, meta) = build_inbound(req)?;
+    let (mut inbound, meta) = build_inbound(req, ops)?;
     if req.port_reuse {
         // 端口复用：inbound 只监听 127.0.0.1，由 nginx stream 做 SNI 分流回源
         inbound["listen"] = json!("127.0.0.1");
-        let mut nm = get_node_meta(&req.tag).unwrap_or_default();
-        nm.port_reuse = true;
-        let _ = set_node_meta(&req.tag, nm);
+        merge_or_push_meta(ops, &req.tag, |m| m.port_reuse = true);
     }
     inbounds.push(inbound);
     Ok(meta)
 }
 
 /// 按 tag 移除 inbound。返回是否确实移除了节点。
-pub fn remove_node(cfg: &mut Value, tag: &str) -> bool {
+pub fn remove_node(cfg: &mut Value, tag: &str, ops: &mut Vec<MetaOp>) -> bool {
     let Some(inbounds) = cfg.get_mut("inbounds").and_then(|v| v.as_array_mut()) else {
         return false;
     };
@@ -131,7 +157,7 @@ pub fn remove_node(cfg: &mut Value, tag: &str) -> bool {
     inbounds.retain(|ib| ib.get("tag").and_then(Value::as_str) != Some(tag));
     let removed = inbounds.len() < before;
     if removed {
-        remove_node_meta(tag);
+        ops.push(MetaOp::Remove(tag.to_string()));
     }
     removed
 }
@@ -144,6 +170,7 @@ pub fn edit_node(
     new_server_name: Option<String>,
     new_path: Option<String>,
     new_port_reuse: Option<bool>,
+    ops: &mut Vec<MetaOp>,
 ) -> Result<()> {
     let inbounds = cfg
         .get_mut("inbounds")
@@ -181,10 +208,7 @@ pub fn edit_node(
         } else {
             "::".into()
         });
-        // 同步更新 meta
-        let mut meta = get_node_meta(tag).unwrap_or_default();
-        meta.port_reuse = reuse;
-        let _ = set_node_meta(tag, meta);
+        merge_or_push_meta(ops, tag, |m| m.port_reuse = reuse);
     }
     Ok(())
 }
@@ -301,7 +325,7 @@ fn parse_uuid_bytes(s: &str) -> [u8; 16] {
         .unwrap_or([0u8; 16])
 }
 
-fn build_inbound(req: &AddNodeRequest) -> Result<(Value, AddNodeMeta)> {
+fn build_inbound(req: &AddNodeRequest, ops: &mut Vec<MetaOp>) -> Result<(Value, AddNodeMeta)> {
     match req.protocol {
         Protocol::VlessReality => {
             let (private_key, public_key) = generate_reality_keypair()?;
@@ -310,14 +334,14 @@ fn build_inbound(req: &AddNodeRequest) -> Result<(Value, AddNodeMeta)> {
                 .server_name
                 .clone()
                 .unwrap_or_else(|| "www.apple.com".into());
-            let _ = set_node_meta(
-                &req.tag,
+            ops.push(MetaOp::Set(
+                req.tag.clone(),
                 NodeMeta {
                     public_key: Some(public_key.clone()),
                     ss_password: None,
                     port_reuse: false,
                 },
-            );
+            ));
             let inbound = json!({
                 "type": "vless",
                 "tag":  req.tag,
@@ -405,14 +429,14 @@ fn build_inbound(req: &AddNodeRequest) -> Result<(Value, AddNodeMeta)> {
         Protocol::Shadowsocks => {
             let method = "2022-blake3-aes-128-gcm";
             let ss_pwd = random_b64_16();
-            let _ = set_node_meta(
-                &req.tag,
+            ops.push(MetaOp::Set(
+                req.tag.clone(),
                 NodeMeta {
                     public_key: None,
                     ss_password: Some(ss_pwd.clone()),
                     port_reuse: false,
                 },
-            );
+            ));
             Ok((
                 json!({
                     "type": "shadowsocks",
@@ -640,7 +664,7 @@ fn ensure_object(value: &mut Value) -> &mut Map<String, Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{edit_node, sync_users};
+    use super::{edit_node, sync_users, MetaOp};
     use crate::model::user::User;
     use serde_json::json;
 
@@ -711,6 +735,7 @@ mod tests {
             }]
         });
 
+        let mut ops = Vec::new();
         edit_node(
             &mut cfg,
             "hy2",
@@ -718,10 +743,43 @@ mod tests {
             Some("www.apple.com".into()),
             None,
             None,
+            &mut ops,
         )
         .unwrap();
 
         assert!(cfg["inbounds"][0]["tls"].get("server_name").is_none());
+        assert!(ops.is_empty(), "无 port_reuse 改动时不该产生 MetaOp");
+    }
+
+    #[test]
+    fn edit_node_port_reuse_pushes_meta_op_instead_of_writing_to_disk() {
+        let mut cfg = json!({
+            "inbounds": [{
+                "type": "trojan",
+                "tag": "trojan-1",
+                "listen": "::",
+                "listen_port": 443,
+                "users": [],
+                "tls": {
+                    "enabled": true,
+                    "server_name": "example.com",
+                    "certificate_path": "/etc/sing-box/certs/trojan-1.crt",
+                    "key_path": "/etc/sing-box/certs/trojan-1.key"
+                }
+            }]
+        });
+        let mut ops = Vec::new();
+        edit_node(&mut cfg, "trojan-1", None, None, None, Some(true), &mut ops).unwrap();
+
+        assert_eq!(cfg["inbounds"][0]["listen"], "127.0.0.1");
+        assert_eq!(ops.len(), 1, "port_reuse 改动应入队一个 MetaOp");
+        match &ops[0] {
+            MetaOp::Set(tag, m) => {
+                assert_eq!(tag, "trojan-1");
+                assert!(m.port_reuse, "port_reuse=true 应被记录");
+            }
+            other => panic!("期望 MetaOp::Set，实际 {:?}", other),
+        }
     }
 
     #[test]

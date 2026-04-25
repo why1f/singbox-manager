@@ -684,8 +684,9 @@ async fn run_node(cmd: cli::node::NodeCommands, cfg: &AppConfig) -> Result<()> {
             let meta = service::runtime_service::mutate_config_locked(
                 &pool,
                 &cfg.singbox.config_path,
+                Some(&cfg.singbox.binary_path),
                 true,
-                |cfg_json| core::config::add_node(cfg_json, &req),
+                |cfg_json, ops| core::config::add_node(cfg_json, &req, ops),
             )
             .await?;
             service::runtime_service::validate_and_reload(&pool, cfg).await?;
@@ -707,8 +708,9 @@ async fn run_node(cmd: cli::node::NodeCommands, cfg: &AppConfig) -> Result<()> {
             service::runtime_service::mutate_config_locked(
                 &pool,
                 &cfg.singbox.config_path,
+                Some(&cfg.singbox.binary_path),
                 false,
-                |cfg_json| {
+                |cfg_json, ops| {
                     core::config::edit_node(
                         cfg_json,
                         &args.tag,
@@ -716,6 +718,7 @@ async fn run_node(cmd: cli::node::NodeCommands, cfg: &AppConfig) -> Result<()> {
                         args.server_name,
                         args.path,
                         args.port_reuse,
+                        ops,
                     )
                 },
             )
@@ -728,8 +731,9 @@ async fn run_node(cmd: cli::node::NodeCommands, cfg: &AppConfig) -> Result<()> {
             let removed = service::runtime_service::mutate_config_locked(
                 &pool,
                 &cfg.singbox.config_path,
+                Some(&cfg.singbox.binary_path),
                 false,
-                |cfg_json| Ok(core::config::remove_node(cfg_json, &tag)),
+                |cfg_json, ops| Ok(core::config::remove_node(cfg_json, &tag, ops)),
             )
             .await?;
             if !removed {

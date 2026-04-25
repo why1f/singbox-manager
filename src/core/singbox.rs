@@ -1,4 +1,6 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
+use reqwest::Client;
+use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
@@ -31,17 +33,25 @@ impl SingboxProcess {
         systemctl("reload").or_else(|_| systemctl("restart"))
     }
     pub fn check_config(&self) -> Result<()> {
-        let o = Command::new(&self.binary_path)
-            .args(["check", "-c", &self.config_path])
-            .output()?;
-        if o.status.success() {
-            Ok(())
-        } else {
-            Err(anyhow!(
-                "配置验证失败: {}",
-                String::from_utf8_lossy(&o.stderr)
-            ))
-        }
+        check_config_at(&self.binary_path, Path::new(&self.config_path))
+    }
+}
+
+/// 用指定 sing-box 二进制对任意 config 路径跑 `sing-box check`。
+/// 支持 `mutate_config_locked` 在 .tmp 文件上预校验，避免坏配置覆盖主路径。
+pub fn check_config_at(binary_path: &str, config_path: &Path) -> Result<()> {
+    let o = Command::new(binary_path)
+        .arg("check")
+        .arg("-c")
+        .arg(config_path)
+        .output()?;
+    if o.status.success() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "配置验证失败: {}",
+            String::from_utf8_lossy(&o.stderr)
+        ))
     }
 }
 
@@ -190,6 +200,10 @@ pub async fn install_latest() -> Result<()> {
         .await?;
     std::fs::write(&tarball, &bytes)?;
 
+    // 强校验 sha256：SagerNet 官方 release 提供 .dgst 文件，缺失或 mismatch 直接 fail。
+    // 历史上这里完全没校验，下载劫持/MITM 即等同 root RCE。
+    verify_download_or_skip(&client, &tarball, &download_url, &asset).await?;
+
     let status = Command::new("tar")
         .args(["xzf"])
         .arg(&tarball)
@@ -335,13 +349,9 @@ pub async fn install_v2rayapi(repo: &str) -> Result<()> {
         .await?;
     std::fs::write(&tarball, &bytes)?;
 
-    // 尽量校验 sha256
-    let sha_url = format!("{}.sha256", download_url);
-    if let Ok(resp) = client.get(&sha_url).send().await {
-        if let Ok(text) = resp.text().await {
-            verify_sha256(&tarball, text.trim())?;
-        }
-    }
+    // 强校验 sha256：build-singbox.yml 会同时发布 <asset>.sha256；
+    // 取不到或 mismatch 都硬失败。要绕过设 SB_MANAGER_SKIP_DOWNLOAD_VERIFY=1。
+    verify_download_or_skip(&client, &tarball, &download_url, &asset).await?;
 
     // 解包
     let status = Command::new("tar")
@@ -397,30 +407,134 @@ pub async fn install_v2rayapi(repo: &str) -> Result<()> {
     Ok(())
 }
 
-fn verify_sha256(file: &std::path::Path, sha_line: &str) -> Result<()> {
-    let expected = sha_line
+/// 拉取指定 asset 的预期 sha256。先试 SagerNet 风格的 `.dgst`（多 hash 文件），
+/// 再回落到自构建那种简单的 `.sha256`。两者都拿不到时返回 Err，调用方应硬失败。
+async fn fetch_expected_sha256(
+    client: &Client,
+    asset_url: &str,
+    asset_name: &str,
+) -> Result<String> {
+    // 1. .dgst （SagerNet 官方）
+    if let Some(text) = fetch_text_optional(client, &format!("{}.dgst", asset_url)).await? {
+        if let Some(sha) = parse_dgst_sha256(&text) {
+            return Ok(sha);
+        }
+    }
+    // 2. .sha256 （自编译产物）
+    if let Some(text) = fetch_text_optional(client, &format!("{}.sha256", asset_url)).await? {
+        if let Some(sha) = parse_sha256_text(&text) {
+            return Ok(sha);
+        }
+    }
+    Err(anyhow!(
+        "无法获取 {} 的 sha256 校验文件（{}.dgst / {}.sha256 都不可用）；\
+         如确认下载源可信、要绕过校验，可设置 SB_MANAGER_SKIP_DOWNLOAD_VERIFY=1",
+        asset_name,
+        asset_url,
+        asset_url,
+    ))
+}
+
+/// HTTP GET 文本；404 等 4xx 视作"该文件不存在"返回 None；网络错误返回 Err。
+async fn fetch_text_optional(client: &Client, url: &str) -> Result<Option<String>> {
+    let resp = match client.get(url).send().await {
+        Ok(r) => r,
+        Err(e) => return Err(anyhow!("请求 {} 失败: {}", url, e)),
+    };
+    let status = resp.status();
+    if status.as_u16() == 404 || status.as_u16() == 403 {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        return Err(anyhow!("{} 返回 {}", url, status));
+    }
+    Ok(Some(resp.text().await.with_context(|| format!("读取 {} 响应体失败", url))?))
+}
+
+/// 解析 SagerNet 风格 `.dgst` 文件，找 `SHA256(...)= <hex>` 行。
+fn parse_dgst_sha256(text: &str) -> Option<String> {
+    for raw in text.lines() {
+        let line = raw.trim();
+        let Some(rest) = line.strip_prefix("SHA256") else {
+            continue;
+        };
+        let Some((_, hex)) = rest.split_once('=') else {
+            continue;
+        };
+        let hex = hex.trim().to_ascii_lowercase();
+        if is_valid_sha256_hex(&hex) {
+            return Some(hex);
+        }
+    }
+    None
+}
+
+/// 解析简单 sha 文件，第一行第一个 token 视为 hex。
+fn parse_sha256_text(text: &str) -> Option<String> {
+    let line = text.lines().next()?;
+    let hex = line.split_whitespace().next()?.to_ascii_lowercase();
+    if is_valid_sha256_hex(&hex) {
+        Some(hex)
+    } else {
+        None
+    }
+}
+
+fn is_valid_sha256_hex(s: &str) -> bool {
+    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn compute_sha256_of_file(path: &Path) -> Result<String> {
+    let out = Command::new("sha256sum")
+        .arg(path)
+        .output()
+        .with_context(|| "调用 sha256sum 失败（请确保 coreutils 已安装）")?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "sha256sum 失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    let line = String::from_utf8_lossy(&out.stdout);
+    let hex = line
         .split_whitespace()
         .next()
         .unwrap_or("")
         .to_ascii_lowercase();
-    if expected.len() != 64 {
-        return Ok(());
-    } // 非法 sha 文件，跳过校验
-    let out = Command::new("sha256sum").arg(file).output()?;
-    if !out.status.success() {
+    if !is_valid_sha256_hex(&hex) {
+        return Err(anyhow!("sha256sum 输出无效: {}", line.trim()));
+    }
+    Ok(hex)
+}
+
+fn skip_download_verify() -> bool {
+    std::env::var("SB_MANAGER_SKIP_DOWNLOAD_VERIFY")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
+        .unwrap_or(false)
+}
+
+/// 校验下载文件的 sha256；除非显式设置 SB_MANAGER_SKIP_DOWNLOAD_VERIFY=1 否则失败硬抛。
+async fn verify_download_or_skip(
+    client: &Client,
+    file: &Path,
+    asset_url: &str,
+    asset_name: &str,
+) -> Result<()> {
+    if skip_download_verify() {
+        tracing::warn!(
+            asset = %asset_name,
+            "SB_MANAGER_SKIP_DOWNLOAD_VERIFY=1，跳过 sha256 校验（不推荐）"
+        );
         return Ok(());
     }
-    let got = String::from_utf8_lossy(&out.stdout);
-    let got = got
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if got != expected {
+    let expected = fetch_expected_sha256(client, asset_url, asset_name).await?;
+    let actual = compute_sha256_of_file(file)?;
+    if actual != expected {
         return Err(anyhow!(
-            "sha256 校验失败: expected {} got {}",
+            "sha256 校验失败 ({}): expected {} got {}",
+            asset_name,
             expected,
-            got
+            actual
         ));
     }
     Ok(())
@@ -454,3 +568,56 @@ const DEFAULT_CONFIG_WITH_V2RAY_API: &str = r#"{
   }
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::{is_valid_sha256_hex, parse_dgst_sha256, parse_sha256_text};
+
+    #[test]
+    fn parse_sha256_simple_format() {
+        let text = "abc123def4567890abc123def4567890abc123def4567890abc123def4567890  sing-box-1.10.0-linux-amd64.tar.gz\n";
+        assert_eq!(
+            parse_sha256_text(text),
+            Some("abc123def4567890abc123def4567890abc123def4567890abc123def4567890".into())
+        );
+    }
+
+    #[test]
+    fn parse_sha256_rejects_short_hex() {
+        assert_eq!(parse_sha256_text("abc"), None);
+        assert_eq!(parse_sha256_text(""), None);
+    }
+
+    #[test]
+    fn parse_dgst_picks_sha256_line() {
+        let text = "\
+SHA224(sing-box-1.10.0-linux-amd64.tar.gz)= 1111111111111111111111111111111111111111111111111111111111
+SHA256(sing-box-1.10.0-linux-amd64.tar.gz)= ABC123DEF4567890ABC123DEF4567890ABC123DEF4567890ABC123DEF4567890
+SHA384(sing-box-1.10.0-linux-amd64.tar.gz)= 22222222
+SHA512(sing-box-1.10.0-linux-amd64.tar.gz)= 33333333
+";
+        assert_eq!(
+            parse_dgst_sha256(text),
+            // 我们把 hex 强制 lowercase
+            Some("abc123def4567890abc123def4567890abc123def4567890abc123def4567890".into())
+        );
+    }
+
+    #[test]
+    fn parse_dgst_returns_none_when_only_other_hashes() {
+        let text = "SHA224(x)= aa\nSHA512(x)= bb\n";
+        assert_eq!(parse_dgst_sha256(text), None);
+    }
+
+    #[test]
+    fn sha256_hex_validity() {
+        assert!(is_valid_sha256_hex(
+            "abc123def4567890abc123def4567890abc123def4567890abc123def4567890"
+        ));
+        assert!(!is_valid_sha256_hex("abc"));
+        // 含非 hex 字符
+        assert!(!is_valid_sha256_hex(
+            "ZZZ123def4567890abc123def4567890abc123def4567890abc123def4567890"
+        ));
+    }
+}

@@ -216,8 +216,10 @@ fn clash_vless_ws(out: &mut String, ib: &Value, user: &Value, s: &str, p: u64, n
     writeln!(out, "    network: ws").ok();
     writeln!(out, "    udp: true").ok();
     writeln!(out, "    tls: {}", tls).ok();
-    writeln!(out, "    servername: {}", yaml_str(sni)).ok();
-    writeln!(out, "    skip-cert-verify: true").ok();
+    if tls {
+        writeln!(out, "    servername: {}", yaml_str(sni)).ok();
+        writeln!(out, "    skip-cert-verify: {}", insecure_flag(ib)).ok();
+    }
     writeln!(out, "    ws-opts:").ok();
     writeln!(out, "      path: {}", yaml_str(path)).ok();
     true
@@ -241,8 +243,10 @@ fn clash_vmess_ws(out: &mut String, ib: &Value, user: &Value, s: &str, p: u64, n
     writeln!(out, "    network: ws").ok();
     writeln!(out, "    udp: true").ok();
     writeln!(out, "    tls: {}", tls).ok();
-    writeln!(out, "    servername: {}", yaml_str(sni)).ok();
-    writeln!(out, "    skip-cert-verify: true").ok();
+    if tls {
+        writeln!(out, "    servername: {}", yaml_str(sni)).ok();
+        writeln!(out, "    skip-cert-verify: {}", insecure_flag(ib)).ok();
+    }
     writeln!(out, "    ws-opts:").ok();
     writeln!(out, "      path: {}", yaml_str(path)).ok();
     true
@@ -278,7 +282,7 @@ fn clash_trojan(out: &mut String, ib: &Value, user: &Value, s: &str, p: u64, nam
     writeln!(out, "    password: {}", yaml_str(pw)).ok();
     writeln!(out, "    udp: true").ok();
     writeln!(out, "    sni: {}", yaml_str(sni)).ok();
-    writeln!(out, "    skip-cert-verify: true").ok();
+    writeln!(out, "    skip-cert-verify: {}", insecure_flag(ib)).ok();
     true
 }
 
@@ -294,7 +298,7 @@ fn clash_hy2(out: &mut String, ib: &Value, user: &Value, s: &str, p: u64, name: 
     writeln!(out, "    port: {}", p).ok();
     writeln!(out, "    password: {}", yaml_str(pw)).ok();
     writeln!(out, "    sni: {}", yaml_str(sni)).ok();
-    writeln!(out, "    skip-cert-verify: true").ok();
+    writeln!(out, "    skip-cert-verify: {}", insecure_flag(ib)).ok();
     true
 }
 
@@ -317,7 +321,7 @@ fn clash_tuic(out: &mut String, ib: &Value, user: &Value, s: &str, p: u64, name:
     writeln!(out, "    alpn: [h3]").ok();
     writeln!(out, "    congestion-controller: bbr").ok();
     writeln!(out, "    udp-relay-mode: native").ok();
-    writeln!(out, "    skip-cert-verify: true").ok();
+    writeln!(out, "    skip-cert-verify: {}", insecure_flag(ib)).ok();
     true
 }
 
@@ -333,7 +337,7 @@ fn clash_anytls(out: &mut String, ib: &Value, user: &Value, s: &str, p: u64, nam
     writeln!(out, "    port: {}", p).ok();
     writeln!(out, "    password: {}", yaml_str(pw)).ok();
     writeln!(out, "    sni: {}", yaml_str(sni)).ok();
-    writeln!(out, "    skip-cert-verify: true").ok();
+    writeln!(out, "    skip-cert-verify: {}", insecure_flag(ib)).ok();
     true
 }
 
@@ -583,6 +587,62 @@ mod tests {
 
         assert!(yaml.contains("type: anytls"));
         assert!(yaml.contains("name: anytls-1"));
+    }
+
+    #[test]
+    fn clash_yaml_skip_cert_verify_follows_insecure_flag() {
+        // 自签证书（托管目录下）→ skip-cert-verify: true
+        let self_signed = json!({
+            "inbounds": [{
+                "type": "trojan",
+                "tag": "trojan-self",
+                "listen_port": 443,
+                "users": [{ "name": "alice", "password": "secret" }],
+                "tls": {
+                    "enabled": true,
+                    "server_name": "example.com",
+                    "certificate_path": "/etc/sing-box/certs/trojan-self.crt",
+                    "key_path": "/etc/sing-box/certs/trojan-self.key"
+                }
+            }]
+        });
+        let yaml = generate_clash_yaml(&self_signed, "alice", "1.2.3.4").unwrap();
+        assert!(yaml.contains("skip-cert-verify: true"));
+
+        // 真证书（托管目录之外）→ skip-cert-verify: false
+        let real_cert = json!({
+            "inbounds": [{
+                "type": "trojan",
+                "tag": "trojan-real",
+                "listen_port": 443,
+                "users": [{ "name": "alice", "password": "secret" }],
+                "tls": {
+                    "enabled": true,
+                    "server_name": "example.com",
+                    "certificate_path": "/etc/letsencrypt/live/example.com/fullchain.pem",
+                    "key_path": "/etc/letsencrypt/live/example.com/privkey.pem"
+                }
+            }]
+        });
+        let yaml = generate_clash_yaml(&real_cert, "alice", "1.2.3.4").unwrap();
+        assert!(yaml.contains("skip-cert-verify: false"));
+        assert!(!yaml.contains("skip-cert-verify: true"));
+    }
+
+    #[test]
+    fn clash_yaml_vless_ws_no_tls_omits_skip_cert_verify() {
+        let cfg = json!({
+            "inbounds": [{
+                "type": "vless",
+                "tag": "ws-plain",
+                "listen_port": 8080,
+                "users": [{ "name": "alice", "uuid": "de909d94-1d92-4a2f-9da8-c5b52a52282c" }],
+                "transport": { "type": "ws", "path": "/vless" }
+            }]
+        });
+        let yaml = generate_clash_yaml(&cfg, "alice", "1.2.3.4").unwrap();
+        assert!(yaml.contains("tls: false"));
+        assert!(!yaml.contains("skip-cert-verify"));
     }
 
     #[test]
