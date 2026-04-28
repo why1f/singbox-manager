@@ -2,6 +2,8 @@ use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::Value;
 
+use super::node_service::ServerAddresses;
+
 #[derive(Debug, Clone)]
 pub struct ShareLink {
     pub tag: String,
@@ -9,7 +11,7 @@ pub struct ShareLink {
     pub link: String,
 }
 
-pub fn generate_links(cfg: &Value, username: &str, server: &str) -> Result<Vec<ShareLink>> {
+pub fn generate_links(cfg: &Value, username: &str, addrs: &ServerAddresses) -> Result<Vec<ShareLink>> {
     let mut links = Vec::new();
     let Some(inbounds) = cfg["inbounds"].as_array() else {
         return Ok(links);
@@ -21,6 +23,7 @@ pub fn generate_links(cfg: &Value, username: &str, server: &str) -> Result<Vec<S
         let Some(user) = find_user(ib, username) else {
             continue;
         };
+        let server = super::node_service::pick_server(addrs, tag);
         let link = match typ {
             "vless" => {
                 if ib["tls"]["reality"]["enabled"].as_bool() == Some(true) {
@@ -74,7 +77,7 @@ pub fn generate_subscription(links: &[ShareLink]) -> String {
 }
 
 /// 生成 Clash/Mihomo 格式的 YAML 订阅
-pub fn generate_clash_yaml(cfg: &Value, username: &str, server: &str) -> Result<String> {
+pub fn generate_clash_yaml(cfg: &Value, username: &str, addrs: &ServerAddresses) -> Result<String> {
     use std::fmt::Write;
     let mut out = String::new();
     writeln!(out, "# mihomo / clash-meta subscription for {}", username).ok();
@@ -99,6 +102,7 @@ pub fn generate_clash_yaml(cfg: &Value, username: &str, server: &str) -> Result<
             continue;
         };
 
+        let server = super::node_service::pick_server(addrs, tag);
         let proxy_name = tag.to_string();
         let added = match typ {
             "vless" => {
@@ -254,9 +258,15 @@ fn clash_vmess_ws(out: &mut String, ib: &Value, user: &Value, s: &str, p: u64, n
 
 fn clash_ss(out: &mut String, ib: &Value, user: &Value, s: &str, p: u64, name: &str) -> bool {
     use std::fmt::Write;
-    // SS inbound users 条目结构为 {name, password}；password 已是 base64(uuid bytes)
-    let Some(pw) = user["password"].as_str() else {
-        return false;
+    let user_pw = match user["password"].as_str() {
+        Some(pw) => pw,
+        None => return false,
+    };
+    let psk = ib["password"].as_str().unwrap_or("");
+    let pw = if psk.is_empty() {
+        user_pw.to_string()
+    } else {
+        format!("{}:{}", psk, user_pw)
     };
     let method = ib["method"].as_str().unwrap_or("2022-blake3-aes-128-gcm");
     writeln!(out, "  - name: {}", yaml_str(name)).ok();
@@ -264,7 +274,7 @@ fn clash_ss(out: &mut String, ib: &Value, user: &Value, s: &str, p: u64, name: &
     writeln!(out, "    server: {}", s).ok();
     writeln!(out, "    port: {}", p).ok();
     writeln!(out, "    cipher: {}", yaml_str(method)).ok();
-    writeln!(out, "    password: {}", yaml_str(pw)).ok();
+    writeln!(out, "    password: {}", yaml_str(&pw)).ok();
     writeln!(out, "    udp: true").ok();
     true
 }
@@ -432,7 +442,13 @@ fn vmess_ws(ib: &Value, user: &Value, s: &str, p: u64, tag: &str) -> Option<Stri
 }
 
 fn shadowsocks(ib: &Value, user: &Value, s: &str, p: u64, tag: &str) -> Option<String> {
-    let pw = user["password"].as_str()?;
+    let user_pw = user["password"].as_str()?;
+    let psk = ib["password"].as_str().unwrap_or("");
+    let pw = if psk.is_empty() {
+        user_pw.to_string()
+    } else {
+        format!("{}:{}", psk, user_pw)
+    };
     let m = ib["method"].as_str().unwrap_or("2022-blake3-aes-128-gcm");
     Some(format!(
         "ss://{}@{}:{}#{}",
@@ -519,8 +535,15 @@ fn anytls(ib: &Value, user: &Value, s: &str, p: u64, tag: &str) -> Option<String
 
 #[cfg(test)]
 mod tests {
-    use super::{generate_clash_yaml, generate_links};
+    use super::{generate_clash_yaml, generate_links, ServerAddresses};
     use serde_json::json;
+
+    fn test_addrs() -> ServerAddresses {
+        ServerAddresses {
+            ipv4: "1.2.3.4".into(),
+            ipv6: "2001:db8::1".into(),
+        }
+    }
 
     #[test]
     fn vless_ws_without_tls_exports_security_none() {
@@ -534,7 +557,7 @@ mod tests {
             }]
         });
 
-        let links = generate_links(&cfg, "alice", "1.2.3.4").unwrap();
+        let links = generate_links(&cfg, "alice", &test_addrs()).unwrap();
 
         assert_eq!(links.len(), 1);
         assert!(links[0].link.contains("security=none"));
@@ -558,7 +581,7 @@ mod tests {
             }]
         });
 
-        let links = generate_links(&cfg, "alice", "1.2.3.4").unwrap();
+        let links = generate_links(&cfg, "alice", &test_addrs()).unwrap();
 
         assert_eq!(links.len(), 1);
         assert!(links[0].link.contains("security=tls"));
@@ -583,7 +606,7 @@ mod tests {
             }]
         });
 
-        let yaml = generate_clash_yaml(&cfg, "alice", "1.2.3.4").unwrap();
+        let yaml = generate_clash_yaml(&cfg, "alice", &test_addrs()).unwrap();
 
         assert!(yaml.contains("type: anytls"));
         assert!(yaml.contains("name: anytls-1"));
@@ -606,7 +629,7 @@ mod tests {
                 }
             }]
         });
-        let yaml = generate_clash_yaml(&self_signed, "alice", "1.2.3.4").unwrap();
+        let yaml = generate_clash_yaml(&self_signed, "alice", &test_addrs()).unwrap();
         assert!(yaml.contains("skip-cert-verify: true"));
 
         // 真证书（托管目录之外）→ skip-cert-verify: false
@@ -624,7 +647,7 @@ mod tests {
                 }
             }]
         });
-        let yaml = generate_clash_yaml(&real_cert, "alice", "1.2.3.4").unwrap();
+        let yaml = generate_clash_yaml(&real_cert, "alice", &test_addrs()).unwrap();
         assert!(yaml.contains("skip-cert-verify: false"));
         assert!(!yaml.contains("skip-cert-verify: true"));
     }
@@ -640,7 +663,7 @@ mod tests {
                 "transport": { "type": "ws", "path": "/vless" }
             }]
         });
-        let yaml = generate_clash_yaml(&cfg, "alice", "1.2.3.4").unwrap();
+        let yaml = generate_clash_yaml(&cfg, "alice", &test_addrs()).unwrap();
         assert!(yaml.contains("tls: false"));
         assert!(!yaml.contains("skip-cert-verify"));
     }
@@ -662,7 +685,7 @@ mod tests {
             }]
         });
 
-        let links = generate_links(&cfg, "alice", "1.2.3.4").unwrap();
+        let links = generate_links(&cfg, "alice", &test_addrs()).unwrap();
 
         assert_eq!(links.len(), 1);
         assert!(links[0].link.ends_with("#trojan-1"));

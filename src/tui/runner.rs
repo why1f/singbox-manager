@@ -417,18 +417,11 @@ fn handle_modal_key(
             server_name,
             path,
             port_reuse,
+            ipv6,
         } => {
             s.modal = None;
             spawn_add_node(
-                pool,
-                cfg,
-                ui_tx,
-                tag,
-                protocol,
-                port,
-                server_name,
-                path,
-                port_reuse,
+                pool, cfg, ui_tx, tag, protocol, port, server_name, path, port_reuse, ipv6,
             );
         }
         ModalAction::SubmitNodeEdit {
@@ -437,9 +430,10 @@ fn handle_modal_key(
             server_name,
             path,
             port_reuse,
+            ipv6,
         } => {
             s.modal = None;
-            spawn_edit_node(pool, cfg, ui_tx, tag, port, server_name, path, port_reuse);
+            spawn_edit_node(pool, cfg, ui_tx, tag, port, server_name, path, port_reuse, ipv6);
         }
         ModalAction::DeleteUser(name) => {
             s.modal = None;
@@ -549,9 +543,9 @@ fn handle_page_key(
             }
             Page::Nodes => {
                 if let Some(n) = s.selected_node() {
-                    let port_reuse = crate::core::config::get_node_meta(&n.tag)
-                        .map(|m| m.port_reuse)
-                        .unwrap_or(false);
+                    let meta = crate::core::config::get_node_meta(&n.tag);
+                    let port_reuse = meta.as_ref().map(|m| m.port_reuse).unwrap_or(false);
+                    let ipv6 = meta.map(|m| m.ipv6).unwrap_or(false);
                     s.modal = Some(Modal::EditNode(crate::tui::forms::NodeEditForm {
                         tag: n.tag.clone(),
                         protocol: n.protocol.to_string(),
@@ -559,6 +553,7 @@ fn handle_page_key(
                         server_name: String::new(),
                         path: String::new(),
                         port_reuse,
+                        ipv6,
                         ..Default::default()
                     }));
                 }
@@ -1296,6 +1291,7 @@ fn spawn_edit_node(
     server_name: Option<String>,
     path: Option<String>,
     port_reuse: Option<bool>,
+    ipv6: Option<bool>,
 ) {
     tokio::spawn(async move {
         if let Err(e) = crate::service::runtime_service::mutate_config_locked(
@@ -1311,6 +1307,7 @@ fn spawn_edit_node(
                     server_name,
                     path,
                     port_reuse,
+                    ipv6,
                     ops,
                 )
             },
@@ -1472,7 +1469,7 @@ fn spawn_export(cfg: Arc<AppConfig>, tx: mpsc::Sender<UiEvent>, name: String) {
                 return;
             }
         };
-        let server = match crate::service::node_service::resolve_server_host(
+        let addrs = match crate::service::node_service::resolve_server_host(
             &cfg.subscription.public_base,
             None,
         )
@@ -1489,7 +1486,7 @@ fn spawn_export(cfg: Arc<AppConfig>, tx: mpsc::Sender<UiEvent>, name: String) {
                 return;
             }
         };
-        match crate::service::sub_service::generate_links(&cfg_json, &name, &server) {
+        match crate::service::sub_service::generate_links(&cfg_json, &name, &addrs) {
             Ok(links) if !links.is_empty() => {
                 let text = crate::service::sub_service::generate_subscription(&links);
                 let _ = tx.send(UiEvent::SubscriptionExported { name, text }).await;
@@ -1649,6 +1646,7 @@ fn spawn_add_node(
     server_name: Option<String>,
     path: Option<String>,
     port_reuse: bool,
+    ipv6: bool,
 ) {
     tokio::spawn(async move {
         let p = match crate::model::node::Protocol::try_from(protocol.as_str()) {
@@ -1670,6 +1668,7 @@ fn spawn_add_node(
             server_name,
             path,
             port_reuse,
+            ipv6,
         };
         let meta = match crate::service::runtime_service::mutate_config_locked(
             &pool,

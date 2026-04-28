@@ -1253,13 +1253,13 @@ async fn build_export_payloads(
 ) -> Result<ExportPayload> {
     let user = resolve_target_user(ctx, chat_id, target).await?;
     let cfg_json = crate::core::config::load(&ctx.cfg.singbox.config_path)?;
-    let server = crate::service::node_service::resolve_export_server(
+    let addrs = crate::service::node_service::resolve_export_server(
         ctx.cfg.subscription.use_public_base_as_server,
         &ctx.cfg.subscription.public_base,
         None,
     )
     .await?;
-    let links = crate::service::sub_service::generate_links(&cfg_json, &user.name, &server)?;
+    let links = crate::service::sub_service::generate_links(&cfg_json, &user.name, &addrs)?;
     let plain_links = links.iter().map(|item| item.link.clone()).collect::<Vec<_>>();
     let base64 = crate::service::sub_service::generate_subscription(&links);
     let url = if !ctx.cfg.subscription.public_base.trim().is_empty() && !user.sub_token.is_empty() {

@@ -6,12 +6,13 @@ use qrcode::{render::svg, QrCode};
 use serde_json::Value;
 
 use crate::model::user::User;
+use crate::service::node_service::ServerAddresses;
 use crate::service::sub_service;
 
 /// 渲染完整 HTML。`base_url` 形如 `https://sub.example.com`（不带尾斜杠）。
-pub fn render(cfg: &Value, user: &User, server: &str, base_url: &str) -> String {
+pub fn render(cfg: &Value, user: &User, addrs: &ServerAddresses, base_url: &str) -> String {
     let base = base_url.trim_end_matches('/');
-    let links = sub_service::generate_links(cfg, &user.name, server).unwrap_or_default();
+    let links = sub_service::generate_links(cfg, &user.name, addrs).unwrap_or_default();
 
     let used_total = user.used_total_bytes().max(0);
     let quota_bytes = user.quota_bytes();

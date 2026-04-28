@@ -29,6 +29,7 @@ pub enum NodeField {
     ServerName,
     Path,
     PortReuse,
+    Ipv6,
 }
 
 /// 需要 TLS SNI 的协议（inbound tls.server_name 生效）。
@@ -60,6 +61,7 @@ fn add_fields(protocol: &str) -> Vec<NodeField> {
     if protocol_supports_port_reuse(protocol) {
         v.push(NodeField::PortReuse);
     }
+    v.push(NodeField::Ipv6);
     v
 }
 
@@ -74,6 +76,7 @@ fn edit_fields(protocol: &str) -> Vec<NodeField> {
     if protocol_supports_port_reuse(protocol) {
         v.push(NodeField::PortReuse);
     }
+    v.push(NodeField::Ipv6);
     v
 }
 
@@ -105,6 +108,7 @@ pub struct NodeForm {
     pub server_name: String,
     pub path: String,
     pub port_reuse: bool,
+    pub ipv6: bool,
     pub focus: usize,
     pub error: Option<String>,
 }
@@ -152,6 +156,7 @@ pub struct NodeEditForm {
     pub server_name: String,
     pub path: String,
     pub port_reuse: bool, // 端口复用：开启时订阅 URL 的端口固定 443
+    pub ipv6: bool,
     pub focus: usize,
     pub error: Option<String>,
 }
@@ -188,6 +193,7 @@ pub enum ModalAction {
         server_name: Option<String>,
         path: Option<String>,
         port_reuse: bool,
+        ipv6: bool,
     },
     SubmitNodeEdit {
         tag: String,
@@ -195,6 +201,7 @@ pub enum ModalAction {
         server_name: Option<String>,
         path: Option<String>,
         port_reuse: Option<bool>,
+        ipv6: Option<bool>,
     },
     DeleteUser(String),
     DeleteNode(String),
@@ -394,6 +401,12 @@ fn handle_node_edit(f: &mut NodeEditForm, k: KeyEvent) -> ModalAction {
             f.port_reuse = !f.port_reuse;
             ModalAction::None
         }
+        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+            if focused == Some(NodeField::Ipv6) =>
+        {
+            f.ipv6 = !f.ipv6;
+            ModalAction::None
+        }
         KeyCode::Enter => {
             let port = if f.port.trim().is_empty() {
                 None
@@ -428,15 +441,16 @@ fn handle_node_edit(f: &mut NodeEditForm, k: KeyEvent) -> ModalAction {
                 server_name: sn,
                 path: pa,
                 port_reuse: pr,
+                ipv6: Some(f.ipv6),
             }
         }
-        KeyCode::Backspace if focused != Some(NodeField::PortReuse) => {
+        KeyCode::Backspace if focused != Some(NodeField::PortReuse) && focused != Some(NodeField::Ipv6) => {
             if let Some(s) = node_edit_field_mut(f, focused) {
                 s.pop();
             }
             ModalAction::None
         }
-        KeyCode::Char(c) if focused != Some(NodeField::PortReuse) => {
+        KeyCode::Char(c) if focused != Some(NodeField::PortReuse) && focused != Some(NodeField::Ipv6) => {
             if let Some(s) = node_edit_field_mut(f, focused) {
                 s.push(c);
             }
@@ -634,6 +648,10 @@ fn handle_node(f: &mut NodeForm, k: KeyEvent) -> ModalAction {
             f.port_reuse = !f.port_reuse;
             ModalAction::None
         }
+        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if focused == NodeField::Ipv6 => {
+            f.ipv6 = !f.ipv6;
+            ModalAction::None
+        }
         KeyCode::Enter => {
             let tag = f.tag.trim().to_string();
             if tag.is_empty() {
@@ -667,15 +685,16 @@ fn handle_node(f: &mut NodeForm, k: KeyEvent) -> ModalAction {
                 server_name: sn,
                 path,
                 port_reuse: reuse,
+                ipv6: f.ipv6,
             }
         }
-        KeyCode::Backspace if !matches!(focused, NodeField::Protocol | NodeField::PortReuse) => {
+        KeyCode::Backspace if !matches!(focused, NodeField::Protocol | NodeField::PortReuse | NodeField::Ipv6) => {
             if let Some(s) = node_field_mut(f, focused) {
                 s.pop();
             }
             ModalAction::None
         }
-        KeyCode::Char(c) if !matches!(focused, NodeField::Protocol | NodeField::PortReuse) => {
+        KeyCode::Char(c) if !matches!(focused, NodeField::Protocol | NodeField::PortReuse | NodeField::Ipv6) => {
             if let Some(s) = node_field_mut(f, focused) {
                 s.push(c);
             }
@@ -691,7 +710,7 @@ fn node_field_mut(f: &mut NodeForm, which: NodeField) -> Option<&mut String> {
         NodeField::Port => Some(&mut f.port),
         NodeField::ServerName => Some(&mut f.server_name),
         NodeField::Path => Some(&mut f.path),
-        NodeField::Protocol | NodeField::PortReuse => None,
+        NodeField::Protocol | NodeField::PortReuse | NodeField::Ipv6 => None,
     }
 }
 
@@ -866,6 +885,10 @@ fn render_node(f: &mut Frame, area: Rect, form: &NodeForm) {
                 "端口复用 (Space/←→ 切换)",
                 format!("◀ {} ▶", if form.port_reuse { "开" } else { "关" }),
             ),
+            NodeField::Ipv6 => (
+                "订阅优先 IPv6 (Space/←→ 切换)",
+                format!("◀ {} ▶", if form.ipv6 { "开" } else { "关" }),
+            ),
         };
         let style = if i == form.focus {
             Style::default().fg(Color::Black).bg(Color::Cyan)
@@ -873,7 +896,7 @@ fn render_node(f: &mut Frame, area: Rect, form: &NodeForm) {
             Style::default().fg(Color::White)
         };
         let cursor =
-            if i == form.focus && !matches!(*field, NodeField::Protocol | NodeField::PortReuse) {
+            if i == form.focus && !matches!(*field, NodeField::Protocol | NodeField::PortReuse | NodeField::Ipv6) {
                 "_"
             } else {
                 ""
@@ -955,6 +978,10 @@ fn render_node_edit(f: &mut Frame, area: Rect, form: &NodeEditForm) {
                 "端口复用 (Space/←→ 切换)",
                 format!("◀ {} ▶", if form.port_reuse { "开" } else { "关" }),
             ),
+            NodeField::Ipv6 => (
+                "订阅优先 IPv6 (Space/←→ 切换)",
+                format!("◀ {} ▶", if form.ipv6 { "开" } else { "关" }),
+            ),
             _ => continue,
         };
         let style = if i == form.focus {
@@ -962,7 +989,7 @@ fn render_node_edit(f: &mut Frame, area: Rect, form: &NodeEditForm) {
         } else {
             Style::default().fg(Color::White)
         };
-        let cursor = if i == form.focus && *field != NodeField::PortReuse {
+        let cursor = if i == form.focus && *field != NodeField::PortReuse && *field != NodeField::Ipv6 {
             "_"
         } else {
             ""

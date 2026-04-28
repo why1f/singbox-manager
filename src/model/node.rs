@@ -48,4 +48,5 @@ pub struct AddNodeRequest {
     pub server_name: Option<String>,
     pub path: Option<String>,
     pub port_reuse: bool,
+    pub ipv6: bool,
 }

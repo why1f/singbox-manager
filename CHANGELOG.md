@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## v0.4.18
+
+### Added
+
+- **节点级 IPv6 导出**：每个节点可独立选择是否优先使用 IPv6 地址做订阅导出。`NodeMeta` 新增 `ipv6` 字段，TUI 添加/编辑节点表单增加「订阅优先 IPv6」开关，CLI `sb add-node --ipv6` / `sb node edit --ipv6`。服务端并行探测 `api4.ipify.org` + `api6.ipify.org`，缓存双栈地址，同一份订阅可同时包含 IPv4 和 IPv6 节点。
+
+### Fixed
+
+- **SS 2022 订阅密码不完整**：`clash_ss()` / `shadowsocks()` 导出的 `password` 从单独的用户 key 改为 `PSK:user_key` 拼接格式，修复部分客户端因缺少 PSK 无法连接的问题。
+
 ## v0.4.17
 
 ### Fixed

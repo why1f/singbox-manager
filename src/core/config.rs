@@ -30,6 +30,9 @@ pub struct NodeMeta {
     /// 端口复用：sing-box 监听改走 127.0.0.1，订阅 URL 的端口写死 443（需自己配 nginx stream SNI 分流）
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub port_reuse: bool,
+    /// 订阅导出时优先使用 IPv6 地址
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ipv6: bool,
 }
 
 fn load_meta_file() -> NodesMeta {
@@ -162,7 +165,8 @@ pub fn remove_node(cfg: &mut Value, tag: &str, ops: &mut Vec<MetaOp>) -> bool {
     removed
 }
 
-/// 编辑已有节点：只能改 port / server_name / path / port_reuse（不改协议或密钥，否则应删重建）
+/// 编辑已有节点：只能改 port / server_name / path / port_reuse / ipv6（不改协议或密钥，否则应删重建）
+#[allow(clippy::too_many_arguments)]
 pub fn edit_node(
     cfg: &mut Value,
     tag: &str,
@@ -170,6 +174,7 @@ pub fn edit_node(
     new_server_name: Option<String>,
     new_path: Option<String>,
     new_port_reuse: Option<bool>,
+    new_ipv6: Option<bool>,
     ops: &mut Vec<MetaOp>,
 ) -> Result<()> {
     let inbounds = cfg
@@ -209,6 +214,9 @@ pub fn edit_node(
             "::".into()
         });
         merge_or_push_meta(ops, tag, |m| m.port_reuse = reuse);
+    }
+    if let Some(ipv6) = new_ipv6 {
+        merge_or_push_meta(ops, tag, |m| m.ipv6 = ipv6);
     }
     Ok(())
 }
@@ -340,6 +348,7 @@ fn build_inbound(req: &AddNodeRequest, ops: &mut Vec<MetaOp>) -> Result<(Value, 
                     public_key: Some(public_key.clone()),
                     ss_password: None,
                     port_reuse: false,
+                    ipv6: req.ipv6,
                 },
             ));
             let inbound = json!({
@@ -435,6 +444,7 @@ fn build_inbound(req: &AddNodeRequest, ops: &mut Vec<MetaOp>) -> Result<(Value, 
                     public_key: None,
                     ss_password: Some(ss_pwd.clone()),
                     port_reuse: false,
+                    ipv6: req.ipv6,
                 },
             ));
             Ok((
@@ -743,6 +753,7 @@ mod tests {
             Some("www.apple.com".into()),
             None,
             None,
+            None,
             &mut ops,
         )
         .unwrap();
@@ -769,7 +780,7 @@ mod tests {
             }]
         });
         let mut ops = Vec::new();
-        edit_node(&mut cfg, "trojan-1", None, None, None, Some(true), &mut ops).unwrap();
+        edit_node(&mut cfg, "trojan-1", None, None, None, Some(true), None, &mut ops).unwrap();
 
         assert_eq!(cfg["inbounds"][0]["listen"], "127.0.0.1");
         assert_eq!(ops.len(), 1, "port_reuse 改动应入队一个 MetaOp");

@@ -603,13 +603,13 @@ async fn run_user(
                 return Ok(());
             }
             let config = core::config::load(&cfg.singbox.config_path)?;
-            let server = service::node_service::resolve_export_server(
+            let addrs = service::node_service::resolve_export_server(
                 cfg.subscription.use_public_base_as_server,
                 &cfg.subscription.public_base,
                 None,
             )
             .await?;
-            let links = service::sub_service::generate_links(&config, &name, &server)?;
+            let links = service::sub_service::generate_links(&config, &name, &addrs)?;
             if links.is_empty() {
                 println!("用户 '{}' 无可用节点", name);
             } else {
@@ -652,13 +652,13 @@ async fn run_node(cmd: cli::node::NodeCommands, cfg: &AppConfig) -> Result<()> {
             let config = config
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("config.json 不存在"))?;
-            let server = service::node_service::resolve_export_server(
+            let addrs = service::node_service::resolve_export_server(
                 cfg.subscription.use_public_base_as_server,
                 &cfg.subscription.public_base,
                 None,
             )
             .await?;
-            let ls = service::sub_service::generate_links(config, &name, &server)?;
+            let ls = service::sub_service::generate_links(config, &name, &addrs)?;
             println!(
                 "# 订阅 (Base64)\n{}",
                 service::sub_service::generate_subscription(&ls)
@@ -678,6 +678,7 @@ async fn run_node(cmd: cli::node::NodeCommands, cfg: &AppConfig) -> Result<()> {
                 server_name: args.server_name,
                 path: args.path,
                 port_reuse: args.port_reuse,
+                ipv6: args.ipv6,
             };
             let meta = service::runtime_service::mutate_config_locked(
                 &pool,
@@ -716,6 +717,7 @@ async fn run_node(cmd: cli::node::NodeCommands, cfg: &AppConfig) -> Result<()> {
                         args.server_name,
                         args.path,
                         args.port_reuse,
+                        args.ipv6,
                         ops,
                     )
                 },

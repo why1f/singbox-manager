@@ -21,6 +21,9 @@ pub struct AddNodeArgs {
     /// 端口复用：inbound listen 改 127.0.0.1，订阅 port 固定 443（仅 reality/trojan/anytls 有效）
     #[arg(long, default_value_t = false)]
     pub port_reuse: bool,
+    /// 订阅导出时使用 IPv6 地址
+    #[arg(long, default_value_t = false)]
+    pub ipv6: bool,
 }
 
 #[derive(Args, Debug)]
@@ -34,6 +37,8 @@ pub struct EditNodeArgs {
     pub path: Option<String>,
     #[arg(long)]
     pub port_reuse: Option<bool>,
+    #[arg(long)]
+    pub ipv6: Option<bool>,
 }
 
 #[derive(Subcommand, Debug)]

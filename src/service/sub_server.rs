@@ -110,7 +110,7 @@ async fn handle_sub(
     };
 
     let request_host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
-    let server = match node_service::resolve_export_server(
+    let addrs = match node_service::resolve_export_server(
         s.cfg.subscription.use_public_base_as_server,
         &s.cfg.subscription.public_base,
         request_host,
@@ -127,17 +127,17 @@ async fn handle_sub(
     let (body, ctype): (Vec<u8>, &str) = match fmt {
         Format::Stats => {
             let base = resolve_base_url(&s.cfg.subscription.public_base, &headers);
-            let html = stats_html::render(&cfg_json, &user, &server, &base);
+            let html = stats_html::render(&cfg_json, &user, &addrs, &base);
             (html.into_bytes(), "text/html; charset=utf-8")
         }
-        Format::Yaml => match sub_service::generate_clash_yaml(&cfg_json, &user.name, &server) {
+        Format::Yaml => match sub_service::generate_clash_yaml(&cfg_json, &user.name, &addrs) {
             Ok(yaml) => (yaml.into_bytes(), "text/yaml; charset=utf-8"),
             Err(e) => {
                 return error_response(fmt, StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())
             }
         },
         Format::Base64 => {
-            let links = match sub_service::generate_links(&cfg_json, &user.name, &server) {
+            let links = match sub_service::generate_links(&cfg_json, &user.name, &addrs) {
                 Ok(links) => links,
                 Err(e) => {
                     return error_response(fmt, StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())
