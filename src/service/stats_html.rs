@@ -275,18 +275,47 @@ fn html_escape(s: &str) -> String {
     out
 }
 
-/// 在 JS 单引号字符串里安全嵌入
+/// 在 JS 单引号字符串里安全嵌入。
+///
+/// 这些字符串还会被放进 HTML 属性（`onclick="copy(this,'...')"`），所以双引号
+/// 必须一起转义——否则一个含 `"` 的 SNI 就能闭合 onclick 属性注入任意事件处理器。
+/// `&` 同理：不转的话浏览器会先做 HTML 实体解码，`&#39;` 之类会还原成引号。
 fn js_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
             '\\' => out.push_str("\\\\"),
-            '\'' => out.push_str("\\'"),
+            '\'' => out.push_str("\\x27"),
+            '"' => out.push_str("\\x22"),
+            '&' => out.push_str("\\x26"),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '<' => out.push_str("\\x3c"), // 防止 </script> 截断
+            '>' => out.push_str("\\x3e"),
             c => out.push(c),
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{html_escape, js_escape};
+
+    #[test]
+    fn js_escape_closes_attribute_escape_hatches() {
+        let evil = r#"a"b'c&d<e>f"#;
+        let out = js_escape(evil);
+        for bad in ['"', '\'', '&', '<', '>'] {
+            assert!(!out.contains(bad), "{} 未被转义: {}", bad, out);
+        }
+    }
+
+    #[test]
+    fn html_escape_covers_quotes() {
+        assert_eq!(
+            html_escape(r#"<a href="x">"#),
+            "&lt;a href=&quot;x&quot;&gt;"
+        );
+    }
 }

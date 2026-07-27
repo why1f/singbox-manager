@@ -15,37 +15,51 @@ use crate::{
     model::{config::AppConfig, traffic::TrafficDelta, user::User},
 };
 
+/// 跨进程写锁：用 SQLite `BEGIN IMMEDIATE` 把 CLI / daemon / TUI 三类进程对
+/// config.json 的"读 → 改 → 写"串行化。
+///
+/// 未显式 commit/rollback 就被 drop（future 被取消、panic 等）时，Drop 里同步
+/// 发一次 ROLLBACK 兜底——否则带着未结事务的连接会回到池里，后续复用者会在
+/// 残留事务中执行语句，或长期占着 IMMEDIATE 锁把别的进程堵死。
 pub struct RuntimeLock {
-    conn: PoolConnection<Sqlite>,
-    finished: bool,
+    conn: Option<PoolConnection<Sqlite>>,
 }
 
 impl RuntimeLock {
     pub async fn acquire(pool: &SqlitePool) -> Result<Self> {
         let mut conn = pool.acquire().await?;
         sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
-        Ok(Self {
-            conn,
-            finished: false,
-        })
+        Ok(Self { conn: Some(conn) })
     }
 
     pub fn conn(&mut self) -> &mut PoolConnection<Sqlite> {
-        &mut self.conn
+        self.conn
+            .as_mut()
+            .expect("RuntimeLock 在 commit/rollback 之后不应再被使用")
     }
 
     pub async fn commit(mut self) -> Result<()> {
-        if !self.finished {
-            sqlx::query("COMMIT").execute(&mut *self.conn).await?;
-            self.finished = true;
+        if let Some(mut conn) = self.conn.take() {
+            sqlx::query("COMMIT").execute(&mut *conn).await?;
         }
         Ok(())
     }
 
     pub async fn rollback(mut self) {
-        if !self.finished {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *self.conn).await;
-            self.finished = true;
+        if let Some(mut conn) = self.conn.take() {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+        }
+    }
+}
+
+impl Drop for RuntimeLock {
+    fn drop(&mut self) {
+        // 仍持有连接 = 既没 commit 也没 rollback，说明是取消/panic 路径。
+        // 这里只能同步收尾：sqlx 的 SqliteConnection 在 drop 时会关闭底层连接，
+        // 未提交事务由 SQLite 自动回滚；显式丢弃可以让它尽快发生。
+        if let Some(conn) = self.conn.take() {
+            warn!("RuntimeLock 未显式结束事务即被丢弃（任务取消或 panic），事务将回滚");
+            drop(conn);
         }
     }
 }

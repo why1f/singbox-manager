@@ -29,7 +29,8 @@ pub fn read_cpu() -> Option<CpuSample> {
     None
 }
 
-/// 整机 rx/tx bytes（排除 lo）
+/// 整机 rx/tx bytes。排除 lo 与虚拟网卡（docker/veth/br-/virbr/tun/tap/wg 等）——
+/// 容器桥接会把同一份流量在物理网卡和虚拟网卡上各记一次，不滤会双重计数。
 #[cfg(target_os = "linux")]
 pub fn read_net() -> Option<(u64, u64)> {
     let s = std::fs::read_to_string("/proc/net/dev").ok()?;
@@ -41,7 +42,7 @@ pub fn read_net() -> Option<(u64, u64)> {
             continue;
         }
         let iface = parts[0].trim();
-        if iface == "lo" {
+        if is_virtual_iface(iface) {
             continue;
         }
         let nums: Vec<u64> = parts[1]
@@ -54,6 +55,30 @@ pub fn read_net() -> Option<(u64, u64)> {
         tx_total += tx;
     }
     Some((rx_total, tx_total))
+}
+
+/// 回环与常见虚拟接口前缀。判定放在这里便于单测。
+/// 只有 Linux 的 read_net 会用它；非 Linux 上仅测试引用。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn is_virtual_iface(iface: &str) -> bool {
+    const VIRTUAL_PREFIXES: &[&str] = &[
+        "lo",
+        "docker",
+        "veth",
+        "br-",
+        "virbr",
+        "tun",
+        "tap",
+        "wg",
+        "sing-box",
+        "utun",
+        "kube",
+        "cni",
+        "flannel",
+        "tailscale",
+        "zt",
+    ];
+    VIRTUAL_PREFIXES.iter().any(|p| iface.starts_with(p))
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -70,4 +95,42 @@ pub fn cpu_percent(prev: &CpuSample, cur: &CpuSample) -> u8 {
     }
     let busy = dt.saturating_sub(di);
     ((busy as f64 / dt as f64) * 100.0).clamp(0.0, 100.0) as u8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cpu_percent, is_virtual_iface, CpuSample};
+
+    #[test]
+    fn virtual_interfaces_are_excluded() {
+        for iface in ["lo", "docker0", "veth1a2b", "br-abc", "wg0", "tailscale0"] {
+            assert!(is_virtual_iface(iface), "{} 应被过滤", iface);
+        }
+        for iface in ["eth0", "ens3", "enp0s3", "wlan0"] {
+            assert!(!is_virtual_iface(iface), "{} 不该被过滤", iface);
+        }
+    }
+
+    #[test]
+    fn cpu_percent_handles_zero_delta() {
+        let s = CpuSample {
+            idle: 10,
+            total: 100,
+        };
+        assert_eq!(cpu_percent(&s, &s), 0);
+    }
+
+    #[test]
+    fn cpu_percent_computes_busy_ratio() {
+        let prev = CpuSample {
+            idle: 100,
+            total: 200,
+        };
+        let cur = CpuSample {
+            idle: 150,
+            total: 300,
+        };
+        // 总增 100，空闲增 50 → 忙 50%
+        assert_eq!(cpu_percent(&prev, &cur), 50);
+    }
 }

@@ -13,6 +13,9 @@ pub fn render(f: &mut Frame, area: Rect, s: &AppState) {
             StatusLevel::Error => Color::Red,
         };
         Span::styled(format!(" {} ", t), Style::default().fg(c))
+    } else if let Some(op) = s.op_busy {
+        // 有写操作在跑时给个明确反馈，否则用户会以为按键没生效而反复按
+        Span::styled(format!(" ⋯ {}中… ", op), Style::default().fg(Color::Cyan))
     } else {
         Span::styled(
             format!(

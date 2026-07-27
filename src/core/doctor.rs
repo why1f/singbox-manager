@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::{sqlite::SqlitePoolOptions, Row};
 use std::path::Path;
 
 use crate::{core, model::config::AppConfig};
@@ -194,6 +194,21 @@ async fn check_database(path: &str) -> Result<()> {
         .execute(&pool)
         .await
         .context("执行 SELECT 1 失败")?;
+    // 迁移是否跑到最新版：老版本二进制升级后没重启 daemon 时这里会暴露出来。
+    let version: i64 = sqlx::query("PRAGMA user_version")
+        .fetch_one(&pool)
+        .await
+        .context("读取 user_version 失败")?
+        .try_get(0)
+        .unwrap_or(0);
+    let expected = crate::db::schema_version();
+    if version < expected {
+        return Err(anyhow!(
+            "数据库结构版本 {} 落后于程序期望的 {}；启动一次 sb daemon/tui 会自动迁移",
+            version,
+            expected
+        ));
+    }
     Ok(())
 }
 

@@ -8,6 +8,7 @@ path = "/etc/sing-box/manager/manager.db"
 
 [stats]
 sync_interval_secs   = 30
+# 告警首档百分比；另外两档固定 90 / 100，与 Telegram 的三档开关一一对应
 quota_alert_percent  = 80
 
 [kernel]
@@ -27,7 +28,10 @@ nginx_conf  = "/etc/nginx/conf.d/sb-manager.conf"
 [telegram]
 enabled = false
 bot_token = ""
+# 支持 ±HH:MM 偏移和无夏令时的 IANA 名（Asia/Shanghai、Asia/Tokyo 等）。
+# 有夏令时的时区（Europe/London、America/* …）会被拒绝并回落 +08:00，请直接填偏移量。
 timezone = "Asia/Shanghai"
+# 管理员 chat_id，找 @userinfobot 获取；留空则没有管理员面板
 admin_chat_ids = []
 poll_interval_secs = 2
 request_timeout_secs = 10

@@ -225,6 +225,12 @@ pub async fn install_latest() -> Result<()> {
         .status();
     std::fs::create_dir_all("/etc/sing-box/bin")?;
     let dst = std::path::Path::new("/etc/sing-box/bin/sing-box");
+    // 先删再拷：直接覆盖正在运行的可执行文件会 ETXTBSY（stop 失败或还没退干净时）。
+    // unlink 只断开目录项，已运行的进程持有 inode 不受影响。
+    if dst.exists() {
+        std::fs::remove_file(dst)
+            .with_context(|| format!("删除旧二进制 {} 失败", dst.display()))?;
+    }
     std::fs::copy(&src_bin, dst)?;
     set_executable(dst)?;
 
@@ -245,6 +251,30 @@ pub async fn install_latest() -> Result<()> {
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
     Ok(())
+}
+
+/// 探测 v2ray_api 统计接口是否真的可用。
+///
+/// 官方 release 的 sing-box **不带 `with_v2ray_api` 编译标签**，装完能跑代理但
+/// 流量统计永远不工作，且安装本身是"成功"的——不主动探一次，用户要等到发现
+/// 流量一直是 0 才会去 `sb doctor`。返回 Some(提示) 表示有问题。
+pub async fn probe_v2ray_api(grpc_addr: &str) -> Option<String> {
+    // 内核刚 restart，给它几秒把 gRPC 端口挂起来
+    for attempt in 0..6u32 {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(800)).await;
+        }
+        if crate::core::grpc::connect(grpc_addr).await.is_ok() {
+            return None;
+        }
+    }
+    Some(format!(
+        "已安装，但 gRPC 统计接口 {} 连不上：\
+         官方版 sing-box 不含 with_v2ray_api 编译标签，流量统计不可用。\
+         如需流量统计请改装 v2ray_api 版（内核页按 v / sb kernel install-v2ray-api）；\
+         也可能是内核还没起来，稍后 sb doctor 复查。",
+        grpc_addr
+    ))
 }
 
 /// 卸载：停服务、禁用、删二进制 / unit 文件、daemon-reload。
@@ -376,6 +406,12 @@ pub async fn install_v2rayapi(repo: &str) -> Result<()> {
         .status();
     std::fs::create_dir_all("/etc/sing-box/bin")?;
     let dst = std::path::Path::new("/etc/sing-box/bin/sing-box");
+    // 先删再拷：直接覆盖正在运行的可执行文件会 ETXTBSY（stop 失败或还没退干净时）。
+    // unlink 只断开目录项，已运行的进程持有 inode 不受影响。
+    if dst.exists() {
+        std::fs::remove_file(dst)
+            .with_context(|| format!("删除旧二进制 {} 失败", dst.display()))?;
+    }
     std::fs::copy(&src_bin, dst)?;
     set_executable(dst)?;
 
@@ -442,8 +478,16 @@ async fn fetch_text_optional(client: &Client, url: &str) -> Result<Option<String
         Err(e) => return Err(anyhow!("请求 {} 失败: {}", url, e)),
     };
     let status = resp.status();
-    if status.as_u16() == 404 || status.as_u16() == 403 {
+    if status.as_u16() == 404 {
         return Ok(None);
+    }
+    // 403 在 GitHub 上通常是**未认证限流**（60 次/小时），不是"文件不存在"。
+    // 当成 None 会让上层报"取不到 sha256"，把排查方向带偏。
+    if status.as_u16() == 403 {
+        return Err(anyhow!(
+            "{} 返回 403（GitHub 未认证请求限流或权限不足），请稍后重试",
+            url
+        ));
     }
     if !status.is_success() {
         return Err(anyhow!("{} 返回 {}", url, status));

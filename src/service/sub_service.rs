@@ -11,7 +11,11 @@ pub struct ShareLink {
     pub link: String,
 }
 
-pub fn generate_links(cfg: &Value, username: &str, addrs: &ServerAddresses) -> Result<Vec<ShareLink>> {
+pub fn generate_links(
+    cfg: &Value,
+    username: &str,
+    addrs: &ServerAddresses,
+) -> Result<Vec<ShareLink>> {
     let mut links = Vec::new();
     let Some(inbounds) = cfg["inbounds"].as_array() else {
         return Ok(links);
@@ -379,6 +383,12 @@ fn fragment(tag: &str) -> String {
     urlencoding::encode(tag).into_owned()
 }
 
+/// query 参数值统一做 URL 编码。sni/path 等直接来自 config.json 的 tls.server_name，
+/// 未编码时含 `&`/`#`/`"` 会破坏链接结构，也会顺着订阅页流进 HTML 属性上下文。
+fn qs(value: &str) -> String {
+    urlencoding::encode(value).into_owned()
+}
+
 fn vless_reality(ib: &Value, user: &Value, s: &str, p: u64, tag: &str) -> Option<String> {
     let uuid = user["uuid"].as_str()?;
     let sni = ib["tls"]["server_name"].as_str().unwrap_or("www.apple.com");
@@ -392,7 +402,7 @@ fn vless_reality(ib: &Value, user: &Value, s: &str, p: u64, tag: &str) -> Option
         .unwrap_or("");
     Some(format!(
         "vless://{}@{}:{}?encryption=none&flow=xtls-rprx-vision&security=reality&sni={}&fp=chrome&pbk={}&sid={}&type=tcp#{}",
-        uuid, s, p, sni, pk, sid, fragment(tag)))
+        uuid, s, p, qs(sni), qs(&pk), qs(sid), fragment(tag)))
 }
 
 fn vless_ws(ib: &Value, user: &Value, s: &str, p: u64, tag: &str) -> Option<String> {
@@ -405,7 +415,7 @@ fn vless_ws(ib: &Value, user: &Value, s: &str, p: u64, tag: &str) -> Option<Stri
     let security = if tls { "tls" } else { "none" };
     let sni = ib["tls"]["server_name"].as_str().unwrap_or(s);
     let sni_param = if tls {
-        format!("&sni={}", sni)
+        format!("&sni={}", qs(sni))
     } else {
         String::new()
     };
@@ -472,7 +482,7 @@ fn trojan(ib: &Value, user: &Value, s: &str, p: u64, tag: &str) -> Option<String
         urlencoding::encode(pw),
         s,
         p,
-        sni,
+        qs(sni),
         insec,
         fragment(tag)
     ))
@@ -487,7 +497,7 @@ fn hysteria2(ib: &Value, user: &Value, s: &str, p: u64, tag: &str) -> Option<Str
         urlencoding::encode(pw),
         s,
         p,
-        sni,
+        qs(sni),
         insec,
         fragment(tag)
     ))
@@ -508,7 +518,7 @@ fn tuic(ib: &Value, user: &Value, s: &str, p: u64, tag: &str) -> Option<String> 
         pw,
         s,
         p,
-        sni,
+        qs(sni),
         insec,
         fragment(tag)
     ))
@@ -527,7 +537,7 @@ fn anytls(ib: &Value, user: &Value, s: &str, p: u64, tag: &str) -> Option<String
         urlencoding::encode(pw),
         s,
         p,
-        sni,
+        qs(sni),
         insec,
         fragment(tag)
     ))

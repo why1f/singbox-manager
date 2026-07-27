@@ -11,7 +11,6 @@ set -euo pipefail
 
 REPO="${REPO:-why1f/singbox-manager}"
 VERSION="${VERSION:-latest}"
-PREFIX="/usr/local"
 BIN_PATH="/etc/sing-box/bin/sb"
 CONFIG_DIR="/etc/sing-box/manager"
 CONFIG_PATH="$CONFIG_DIR/config.toml"
@@ -26,6 +25,7 @@ note() { printf '%s\n' "$1"; }
 command -v systemctl >/dev/null 2>&1 || fail "未检测到 systemctl"
 command -v curl >/dev/null 2>&1 || fail "需要 curl"
 command -v tar >/dev/null 2>&1 || fail "需要 tar"
+command -v sha256sum >/dev/null 2>&1 || fail "需要 sha256sum（coreutils）"
 
 case "$(uname -m)" in
   x86_64)         TARGET="x86_64-unknown-linux-musl" ;;
@@ -65,9 +65,18 @@ trap 'rm -rf "$TMP"' EXIT
 
 note "下载 $URL"
 curl -fL --retry 3 -o "$TMP/$ASSET" "$URL"
-curl -fL --retry 3 -o "$TMP/$ASSET.sha256" "$URL.sha256" || true
-if [ -s "$TMP/$ASSET.sha256" ]; then
-  ( cd "$TMP" && sha256sum -c "$ASSET.sha256" ) || fail "校验失败"
+
+# sha256 强校验：release workflow 一定会发布 <asset>.sha256。
+# 取不到或对不上都直接退出——下载被劫持等同于 root RCE。
+# 确认下载源可信要跳过时显式设 SKIP_VERIFY=1。
+if [ "${SKIP_VERIFY:-0}" = "1" ]; then
+  note "! SKIP_VERIFY=1，跳过 sha256 校验（不推荐）"
+else
+  curl -fL --retry 3 -o "$TMP/$ASSET.sha256" "$URL.sha256" \
+    || fail "无法下载校验文件 $URL.sha256（如确认来源可信可设 SKIP_VERIFY=1 跳过）"
+  [ -s "$TMP/$ASSET.sha256" ] || fail "校验文件为空: $URL.sha256"
+  ( cd "$TMP" && sha256sum -c "$ASSET.sha256" ) || fail "sha256 校验失败，已中止安装"
+  note "✓ sha256 校验通过"
 fi
 
 tar xzf "$TMP/$ASSET" -C "$TMP"
@@ -165,4 +174,6 @@ note "  systemctl status sb-manager     # 看服务"
 note "  journalctl -u sb-manager -f     # 看日志"
 note ""
 note "若 sb 报找不到：unalias sb sing-box 2>/dev/null; hash -r  或重新登录"
-[ -z "$SB_BIN" ] && note "sing-box 未安装 — 进 TUI (sb) 到内核[5]页按 v 一键装带 v2ray_api 的版本。"
+if [ -z "$SB_BIN" ]; then
+  note "sing-box 未安装 — 进 TUI (sb) 到内核[5]页按 v 一键装带 v2ray_api 的版本。"
+fi

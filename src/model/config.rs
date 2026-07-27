@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 pub struct AppConfig {
     pub singbox: SingboxConfig,
     pub db: DbConfig,
+    /// 纯调优项，整段省略也能跑
+    #[serde(default)]
     pub stats: StatsConfig,
     #[serde(default)]
     pub kernel: KernelConfig,
@@ -24,8 +26,25 @@ pub struct DbConfig {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatsConfig {
+    #[serde(default = "default_sync_interval_secs")]
     pub sync_interval_secs: u64,
+    /// 告警首档百分比；另外两档固定 90 / 100
+    #[serde(default = "default_quota_alert_percent")]
     pub quota_alert_percent: u8,
+}
+impl Default for StatsConfig {
+    fn default() -> Self {
+        Self {
+            sync_interval_secs: default_sync_interval_secs(),
+            quota_alert_percent: default_quota_alert_percent(),
+        }
+    }
+}
+fn default_sync_interval_secs() -> u64 {
+    30
+}
+fn default_quota_alert_percent() -> u8 {
+    80
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,10 +183,7 @@ impl Default for AppConfig {
             db: DbConfig {
                 path: "/etc/sing-box/manager/manager.db".into(),
             },
-            stats: StatsConfig {
-                sync_interval_secs: 30,
-                quota_alert_percent: 80,
-            },
+            stats: StatsConfig::default(),
             kernel: KernelConfig::default(),
             subscription: SubscriptionConfig::default(),
             telegram: TelegramConfig::default(),

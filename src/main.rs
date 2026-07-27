@@ -121,6 +121,10 @@ async fn main() -> Result<()> {
             let pool = open_pool(&cfg).await?;
             run_token(a.command, &pool, &cfg).await
         }
+        Commands::Bind(a) => {
+            let pool = open_pool(&cfg).await?;
+            run_bind(a.command, &pool, &cfg).await
+        }
         Commands::Nginx(a) => run_nginx(a.command, &cfg),
         Commands::Daemon => {
             let pool = open_pool(&cfg).await?;
@@ -187,24 +191,17 @@ async fn open_pool(cfg: &AppConfig) -> Result<sqlx::SqlitePool> {
 }
 
 async fn run_daemon(pool: sqlx::SqlitePool, cfg: AppConfig) -> Result<()> {
-    use service::traffic_service::{self, TrafficEvent};
+    use service::traffic_service::TrafficEvent;
 
-    // 给老库补订阅 token
-    if let Ok(n) = service::user_service::ensure_sub_tokens(&pool).await {
-        if n > 0 {
-            tracing::info!(filled = n, "为历史用户补发订阅 token");
-        }
-    }
-    if let Ok(n) = service::user_service::ensure_tg_bind_tokens(&pool).await {
-        if n > 0 {
-            tracing::info!(filled = n, "为历史用户补发 TG 绑定码");
-        }
-    }
+    // 给老库补订阅 token / TG 绑定码
+    backfill_tokens(&pool).await;
+
+    let cfg = std::sync::Arc::new(cfg);
 
     // 订阅 HTTP 服务
     if cfg.subscription.enabled {
         let pool_sub = pool.clone();
-        let cfg_sub = std::sync::Arc::new(cfg.clone());
+        let cfg_sub = cfg.clone();
         tokio::spawn(async move {
             if let Err(e) = service::sub_server::run(pool_sub, cfg_sub).await {
                 tracing::error!("订阅服务错误: {}", e);
@@ -213,7 +210,7 @@ async fn run_daemon(pool: sqlx::SqlitePool, cfg: AppConfig) -> Result<()> {
     }
 
     let tg_tx = if cfg.telegram.enabled {
-        match service::tg_service::start(pool.clone(), std::sync::Arc::new(cfg.clone())).await {
+        match service::tg_service::start(pool.clone(), cfg.clone()).await {
             Ok(tx) => {
                 tracing::info!("Telegram Bot 已启动");
                 Some(tx)
@@ -269,9 +266,93 @@ async fn run_daemon(pool: sqlx::SqlitePool, cfg: AppConfig) -> Result<()> {
         }
     });
 
-    // 带指数退避的重连循环
+    // 主循环跑到收到退出信号为止；退出前把内存里的流量增量落库
+    tokio::select! {
+        _ = traffic_supervisor(pool.clone(), cfg.clone(), tx) => {}
+        _ = shutdown_signal() => {
+            tracing::info!("收到退出信号，正在保存流量数据…");
+        }
+    }
+    shutdown_flush(&pool, &cfg).await;
+    pool.close().await;
+    Ok(())
+}
+
+/// 给老库补发订阅 token / TG 绑定码。失败只记日志——这是尽力而为的补数据，
+/// 不该阻塞 daemon 启动。
+async fn backfill_tokens(pool: &sqlx::SqlitePool) {
+    match service::user_service::ensure_sub_tokens(pool).await {
+        Ok(n) if n > 0 => tracing::info!(filled = n, "为历史用户补发订阅 token"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "补发订阅 token 失败"),
+    }
+    match service::user_service::ensure_tg_bind_tokens(pool).await {
+        Ok(n) if n > 0 => tracing::info!(filled = n, "为历史用户补发 TG 绑定码"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "补发 TG 绑定码失败"),
+    }
+}
+
+/// 等待 Ctrl-C 或 SIGTERM（`systemctl stop` 发的就是 SIGTERM）。
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "注册 SIGTERM 处理失败，仅监听 Ctrl-C");
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// 退出前最后一次拉 gRPC 计数并落库，避免丢掉最近一个同步周期内的增量。
+async fn shutdown_flush(pool: &sqlx::SqlitePool, cfg: &AppConfig) {
+    match service::traffic_service::flush_current_traffic(pool, &cfg.singbox.grpc_addr).await {
+        Ok(deltas) if !deltas.is_empty() => {
+            let up: i64 = deltas.iter().map(|d| d.delta_up).sum();
+            let down: i64 = deltas.iter().map(|d| d.delta_down).sum();
+            tracing::info!(
+                users = deltas.len(),
+                up_bytes = up,
+                down_bytes = down,
+                "退出前已保存流量增量"
+            );
+        }
+        Ok(_) => tracing::info!("退出前流量已是最新，无需保存"),
+        Err(e) => tracing::warn!(error = %e, "退出前保存流量失败（可能 sing-box 已停止）"),
+    }
+}
+
+/// gRPC 重连主循环（daemon 与 TUI 共用）。
+///
+/// - 连上：跑流量同步直到断开；
+/// - 连不上：仍然执行自动控制（月重置 / 到期禁用 / 超额禁用），
+///   保证纯离线场景这些逻辑不失效；
+/// - 指数退避 1 → 60s。
+///
+/// `SyncState` 建在循环外，使告警去重表和"DB 改了但 config 没同步"的脏标记
+/// 跨重连保持。永不返回。
+async fn traffic_supervisor(
+    pool: sqlx::SqlitePool,
+    cfg: std::sync::Arc<AppConfig>,
+    tx: mpsc::Sender<service::traffic_service::TrafficEvent>,
+) {
+    use service::traffic_service::{self, SyncState, TrafficEvent};
+
     let mut backoff_secs = 1u64;
-    let mut auto_sync_dirty = false;
+    let mut state = SyncState::new();
     loop {
         match core::grpc::connect(&cfg.singbox.grpc_addr).await {
             Ok(client) => {
@@ -281,31 +362,27 @@ async fn run_daemon(pool: sqlx::SqlitePool, cfg: AppConfig) -> Result<()> {
                     client,
                     cfg.stats.sync_interval_secs,
                     cfg.stats.quota_alert_percent,
-                    std::sync::Arc::new(cfg.clone()),
+                    cfg.clone(),
                     tx.clone(),
+                    &mut state,
                 )
                 .await;
                 tracing::warn!("流量同步任务退出，准备重连");
             }
             Err(e) => {
                 tracing::warn!(addr = %cfg.singbox.grpc_addr, error = %e, "连接 gRPC 失败");
+                let _ = tx.send(TrafficEvent::GrpcError(e.to_string())).await;
                 match service::user_service::apply_automatic_controls(&pool).await {
                     Ok(changed) => {
                         if !changed.is_empty() {
-                            auto_sync_dirty = true;
-                            for item in changed {
-                                tracing::info!(event = %item, "自动控制");
-                            }
+                            state.mark_dirty();
+                            let _ = tx.send(TrafficEvent::AutoControl(changed)).await;
                         }
-                        if auto_sync_dirty {
-                            if let Err(err) =
-                                service::runtime_service::apply_user_runtime_changes(&pool, &cfg)
-                                    .await
-                            {
-                                tracing::error!(error = %err, "自动控制后同步 sing-box 配置失败");
-                            } else {
-                                auto_sync_dirty = false;
-                            }
+                        if let Err(err) = state.sync_if_dirty(&pool, &cfg).await {
+                            tracing::error!(error = %err, "自动控制后同步 sing-box 配置失败");
+                            let _ = tx
+                                .send(TrafficEvent::RuntimeSyncError(err.to_string()))
+                                .await;
                         }
                     }
                     Err(err) => tracing::error!(error = %err, "执行自动控制失败"),
@@ -318,21 +395,30 @@ async fn run_daemon(pool: sqlx::SqlitePool, cfg: AppConfig) -> Result<()> {
 }
 
 async fn run_tui(pool: sqlx::SqlitePool, cfg: AppConfig) -> Result<()> {
-    use service::traffic_service::{self, TrafficEvent};
+    use service::traffic_service::TrafficEvent;
 
-    // 给老库补订阅 token
-    let _ = service::user_service::ensure_sub_tokens(&pool).await;
-    let _ = service::user_service::ensure_tg_bind_tokens(&pool).await;
+    backfill_tokens(&pool).await;
+
+    let cfg = std::sync::Arc::new(cfg);
 
     // 订阅 HTTP 服务（TUI 模式也开，方便开发测试）
     if cfg.subscription.enabled {
         let pool_sub = pool.clone();
-        let cfg_sub = std::sync::Arc::new(cfg.clone());
+        let cfg_sub = cfg.clone();
         tokio::spawn(async move {
             if let Err(e) = service::sub_server::run(pool_sub, cfg_sub).await {
                 tracing::warn!("订阅服务退出: {}", e);
             }
         });
+    }
+
+    // Telegram Bot：与 daemon 模式一致。只跑 TUI 不跑 daemon 的部署里，
+    // 不启动 bot 会让 TG 通知静默失效，看起来像故障。
+    if cfg.telegram.enabled {
+        match service::tg_service::start(pool.clone(), cfg.clone()).await {
+            Ok(_tx) => tracing::info!("Telegram Bot 已启动"),
+            Err(e) => tracing::warn!(error = %e, "Telegram Bot 启动失败"),
+        }
     }
 
     let users = service::user_service::list_users(&pool)
@@ -353,69 +439,13 @@ async fn run_tui(pool: sqlx::SqlitePool, cfg: AppConfig) -> Result<()> {
 
     let (tx, rx) = mpsc::channel::<TrafficEvent>(128);
 
-    // 后台流量/重连任务；失败时自动重试（与 daemon 相同）
+    // 后台流量/重连任务（与 daemon 共用同一套逻辑）
     {
         let pool_bg = pool.clone();
         let cfg_bg = cfg.clone();
         let tx_bg = tx.clone();
         tokio::spawn(async move {
-            let mut backoff = 1u64;
-            let mut auto_sync_dirty = false;
-            loop {
-                match core::grpc::connect(&cfg_bg.singbox.grpc_addr).await {
-                    Ok(client) => {
-                        backoff = 1;
-                        traffic_service::run_until_disconnect(
-                            pool_bg.clone(),
-                            client,
-                            cfg_bg.stats.sync_interval_secs,
-                            cfg_bg.stats.quota_alert_percent,
-                            std::sync::Arc::new(cfg_bg.clone()),
-                            tx_bg.clone(),
-                        )
-                        .await;
-                    }
-                    Err(e) => {
-                        let _ = tx_bg.send(TrafficEvent::GrpcError(e.to_string())).await;
-                        // 与 daemon 模式对齐：gRPC 不通时仍执行自动控制
-                        // （月重置 / 超额禁用 / 到期禁用），避免纯 TUI 场景下这些逻辑失效
-                        match service::user_service::apply_automatic_controls(&pool_bg).await {
-                            Ok(changed) => {
-                                if !changed.is_empty() {
-                                    auto_sync_dirty = true;
-                                    let _ = tx_bg.send(TrafficEvent::AutoControl(changed)).await;
-                                }
-                                if auto_sync_dirty {
-                                    if let Err(sync_err) =
-                                        service::runtime_service::apply_user_runtime_changes(
-                                            &pool_bg, &cfg_bg,
-                                        )
-                                        .await
-                                    {
-                                        let _ = tx_bg
-                                            .send(TrafficEvent::RuntimeSyncError(
-                                                sync_err.to_string(),
-                                            ))
-                                            .await;
-                                    } else {
-                                        auto_sync_dirty = false;
-                                    }
-                                }
-                            }
-                            Err(err) => {
-                                let _ = tx_bg
-                                    .send(TrafficEvent::RuntimeSyncError(format!(
-                                        "执行自动控制失败: {}",
-                                        err
-                                    )))
-                                    .await;
-                            }
-                        }
-                    }
-                }
-                tokio::time::sleep(Duration::from_secs(backoff)).await;
-                backoff = (backoff * 2).min(60);
-            }
+            traffic_supervisor(pool_bg, cfg_bg, tx_bg).await;
         });
     }
 
@@ -434,7 +464,10 @@ async fn run_tui(pool: sqlx::SqlitePool, cfg: AppConfig) -> Result<()> {
         });
     }
 
-    tui::runner::run(app, rx, users, nodes, pool, cfg).await
+    let result = tui::runner::run(app, rx, users, nodes, pool.clone(), cfg.clone()).await;
+    // 退出 TUI 也顺手把流量落一次库
+    shutdown_flush(&pool, &cfg).await;
+    result
 }
 
 async fn run_user(
@@ -685,7 +718,14 @@ async fn run_node(cmd: cli::node::NodeCommands, cfg: &AppConfig) -> Result<()> {
                 &cfg.singbox.config_path,
                 Some(&cfg.singbox.binary_path),
                 true,
-                |cfg_json, ops| core::config::add_node(cfg_json, &req, ops),
+                |cfg_json, ops| {
+                    core::config::add_node(
+                        cfg_json,
+                        &req,
+                        Some(cfg.singbox.binary_path.as_str()),
+                        ops,
+                    )
+                },
             )
             .await?;
             service::runtime_service::validate_and_reload(&pool, cfg).await?;
@@ -852,6 +892,9 @@ async fn run_kernel(cmd: cli::kernel::KernelCommands, cfg: &AppConfig) -> Result
             }
             core::singbox::install_latest().await?;
             println!("✓ 官方版 sing-box 已安装");
+            if let Some(warn) = core::singbox::probe_v2ray_api(&cfg.singbox.grpc_addr).await {
+                println!("! {}", warn);
+            }
         }
         K::InstallV2rayApi => {
             if let Some(msg) = flush_live_traffic_before_kernel_action(cfg).await {
@@ -859,6 +902,11 @@ async fn run_kernel(cmd: cli::kernel::KernelCommands, cfg: &AppConfig) -> Result
             }
             core::singbox::install_v2rayapi(&cfg.kernel.update_repo).await?;
             println!("✓ v2ray_api 版 sing-box 已安装");
+            if let Some(warn) = core::singbox::probe_v2ray_api(&cfg.singbox.grpc_addr).await {
+                println!("! {}", warn);
+            } else {
+                println!("✓ gRPC 统计接口已就绪 ({})", cfg.singbox.grpc_addr);
+            }
         }
         K::Uninstall => {
             if let Some(msg) = flush_live_traffic_before_kernel_action(cfg).await {
@@ -973,8 +1021,6 @@ async fn run_token(
 }
 
 fn print_sub_url(u: &model::user::User, public_base: &str) {
-    // 注意：TG 绑定码（tg_bind_token）的展示与管理已迁移至 TG admin 面板
-    // （admin user card → "TG 绑定"），CLI 不再显示。
     if u.sub_token.is_empty() {
         println!("(该用户无 token，运行 sb token regen {} 生成)", u.name);
         return;
@@ -986,6 +1032,70 @@ fn print_sub_url(u: &model::user::User, public_base: &str) {
         let base = public_base.trim_end_matches('/');
         println!("sing-box: {}/sub/{}", base, u.sub_token);
         println!("mihomo:   {}/sub/{}?type=clash", base, u.sub_token);
+    }
+}
+
+/// Telegram 绑定码管理。与 TG admin 面板的"TG 绑定"卡片操作等价，
+/// 方便脚本化和在没配管理员 chat_id 时从服务器侧发码。
+async fn run_bind(
+    cmd: cli::bind::BindCommands,
+    pool: &sqlx::SqlitePool,
+    _cfg: &AppConfig,
+) -> Result<()> {
+    use cli::bind::BindCommands as B;
+    use service::user_service;
+    match cmd {
+        B::Show { name } => {
+            let u = db::user_repo::get(pool, &name)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("用户不存在: {}", name))?;
+            print_bind_status(&u);
+        }
+        B::Regen { name } => {
+            let token = user_service::regen_tg_bind_token(pool, &name).await?;
+            println!("✓ '{}' 的绑定码已重置（旧码立即失效）", name);
+            println!("让该用户在 Telegram 里发送：");
+            println!("  /bind {}", token);
+            println!("(绑定码一次性使用，绑定成功后自动作废)");
+        }
+        B::Unbind { name } => match user_service::unbind_tg(pool, &name).await? {
+            Some(chat_id) => println!("✓ '{}' 已解绑 (原 chat_id: {})", name, chat_id),
+            None => println!("'{}' 当前未绑定任何 Telegram 账号", name),
+        },
+        B::List => {
+            let users = user_service::list_users(pool).await?;
+            println!("{:<20}{:<10}{:<16}绑定码", "用户名", "状态", "chat_id");
+            println!("{}", "─".repeat(74));
+            for u in &users {
+                let (state, chat, code) = if u.tg_is_bound() {
+                    ("已绑定", u.tg_chat_id.to_string(), "─".to_string())
+                } else if u.tg_bind_token.is_empty() {
+                    ("未绑定", "─".into(), "(未生成)".to_string())
+                } else {
+                    ("未绑定", "─".into(), u.tg_bind_token.clone())
+                };
+                println!("{:<20}{:<10}{:<16}{}", u.name, state, chat, code);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_bind_status(u: &model::user::User) {
+    println!("用户名:  {}", u.name);
+    if u.tg_is_bound() {
+        println!("状态:    已绑定");
+        println!("chat_id: {}", u.tg_chat_id);
+        println!("(解绑: sb bind unbind {})", u.name);
+    } else if u.tg_bind_token.is_empty() {
+        println!("状态:    未绑定");
+        println!("绑定码:  未生成");
+        println!("(生成: sb bind regen {})", u.name);
+    } else {
+        println!("状态:    未绑定");
+        println!("绑定码:  {}", u.tg_bind_token);
+        println!("让该用户在 Telegram 里发送：");
+        println!("  /bind {}", u.tg_bind_token);
     }
 }
 

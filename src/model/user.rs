@@ -42,6 +42,10 @@ pub struct User {
     pub tg_last_quota_level: i64,
     #[sqlx(default)]
     pub tg_last_schedule_dates: String,
+    /// true = 当前的禁用状态由系统自动控制（超额）造成，可在月重置日自动解封；
+    /// false = 管理员手动停用，任何自动流程都不会替他恢复。
+    #[sqlx(default)]
+    pub auto_disabled: bool,
 }
 
 impl User {

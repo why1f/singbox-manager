@@ -216,6 +216,14 @@ pub enum ModalAction {
     RestoreBackup(String),
 }
 
+impl ModalAction {
+    /// 是否是会改动数据（DB / config.json / 磁盘）的动作。
+    /// 这类动作需要防重入，不能在上一次还没跑完时再提交一次。
+    pub fn is_write(&self) -> bool {
+        !matches!(self, ModalAction::None | ModalAction::Close)
+    }
+}
+
 impl Modal {
     pub fn handle(&mut self, k: KeyEvent) -> ModalAction {
         if matches!(k.code, KeyCode::Esc) {
@@ -401,9 +409,7 @@ fn handle_node_edit(f: &mut NodeEditForm, k: KeyEvent) -> ModalAction {
             f.port_reuse = !f.port_reuse;
             ModalAction::None
         }
-        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
-            if focused == Some(NodeField::Ipv6) =>
-        {
+        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if focused == Some(NodeField::Ipv6) => {
             f.ipv6 = !f.ipv6;
             ModalAction::None
         }
@@ -444,13 +450,17 @@ fn handle_node_edit(f: &mut NodeEditForm, k: KeyEvent) -> ModalAction {
                 ipv6: Some(f.ipv6),
             }
         }
-        KeyCode::Backspace if focused != Some(NodeField::PortReuse) && focused != Some(NodeField::Ipv6) => {
+        KeyCode::Backspace
+            if focused != Some(NodeField::PortReuse) && focused != Some(NodeField::Ipv6) =>
+        {
             if let Some(s) = node_edit_field_mut(f, focused) {
                 s.pop();
             }
             ModalAction::None
         }
-        KeyCode::Char(c) if focused != Some(NodeField::PortReuse) && focused != Some(NodeField::Ipv6) => {
+        KeyCode::Char(c)
+            if focused != Some(NodeField::PortReuse) && focused != Some(NodeField::Ipv6) =>
+        {
             if let Some(s) = node_edit_field_mut(f, focused) {
                 s.push(c);
             }
@@ -688,13 +698,23 @@ fn handle_node(f: &mut NodeForm, k: KeyEvent) -> ModalAction {
                 ipv6: f.ipv6,
             }
         }
-        KeyCode::Backspace if !matches!(focused, NodeField::Protocol | NodeField::PortReuse | NodeField::Ipv6) => {
+        KeyCode::Backspace
+            if !matches!(
+                focused,
+                NodeField::Protocol | NodeField::PortReuse | NodeField::Ipv6
+            ) =>
+        {
             if let Some(s) = node_field_mut(f, focused) {
                 s.pop();
             }
             ModalAction::None
         }
-        KeyCode::Char(c) if !matches!(focused, NodeField::Protocol | NodeField::PortReuse | NodeField::Ipv6) => {
+        KeyCode::Char(c)
+            if !matches!(
+                focused,
+                NodeField::Protocol | NodeField::PortReuse | NodeField::Ipv6
+            ) =>
+        {
             if let Some(s) = node_field_mut(f, focused) {
                 s.push(c);
             }
@@ -895,12 +915,15 @@ fn render_node(f: &mut Frame, area: Rect, form: &NodeForm) {
         } else {
             Style::default().fg(Color::White)
         };
-        let cursor =
-            if i == form.focus && !matches!(*field, NodeField::Protocol | NodeField::PortReuse | NodeField::Ipv6) {
-                "_"
-            } else {
-                ""
-            };
+        let cursor = if i == form.focus
+            && !matches!(
+                *field,
+                NodeField::Protocol | NodeField::PortReuse | NodeField::Ipv6
+            ) {
+            "_"
+        } else {
+            ""
+        };
         lines.push(Line::from(vec![
             Span::styled(
                 format!(" {:<24}", label),
@@ -989,11 +1012,12 @@ fn render_node_edit(f: &mut Frame, area: Rect, form: &NodeEditForm) {
         } else {
             Style::default().fg(Color::White)
         };
-        let cursor = if i == form.focus && *field != NodeField::PortReuse && *field != NodeField::Ipv6 {
-            "_"
-        } else {
-            ""
-        };
+        let cursor =
+            if i == form.focus && *field != NodeField::PortReuse && *field != NodeField::Ipv6 {
+                "_"
+            } else {
+                ""
+            };
         lines.push(Line::from(vec![
             Span::styled(
                 format!(" {:<28}", label),

@@ -123,9 +123,12 @@ pub enum AddNodeMeta {
     },
 }
 
+/// 新增 inbound。`binary_path` 用于 reality 密钥生成时定位 sing-box 二进制，
+/// 传 None 时回落到常见安装路径。
 pub fn add_node(
     cfg: &mut Value,
     req: &AddNodeRequest,
+    binary_path: Option<&str>,
     ops: &mut Vec<MetaOp>,
 ) -> Result<AddNodeMeta> {
     let root = ensure_object(cfg);
@@ -141,7 +144,7 @@ pub fn add_node(
     {
         anyhow::bail!("节点 tag 已存在: {}", req.tag);
     }
-    let (mut inbound, meta) = build_inbound(req, ops)?;
+    let (mut inbound, meta) = build_inbound(req, binary_path, ops)?;
     if req.port_reuse {
         // 端口复用：inbound 只监听 127.0.0.1，由 nginx stream 做 SNI 分流回源
         inbound["listen"] = json!("127.0.0.1");
@@ -333,10 +336,14 @@ fn parse_uuid_bytes(s: &str) -> [u8; 16] {
         .unwrap_or([0u8; 16])
 }
 
-fn build_inbound(req: &AddNodeRequest, ops: &mut Vec<MetaOp>) -> Result<(Value, AddNodeMeta)> {
+fn build_inbound(
+    req: &AddNodeRequest,
+    binary_path: Option<&str>,
+    ops: &mut Vec<MetaOp>,
+) -> Result<(Value, AddNodeMeta)> {
     match req.protocol {
         Protocol::VlessReality => {
-            let (private_key, public_key) = generate_reality_keypair()?;
+            let (private_key, public_key) = generate_reality_keypair(binary_path)?;
             let short_id = random_short_id();
             let sni = req
                 .server_name
@@ -525,15 +532,12 @@ fn build_inbound(req: &AddNodeRequest, ops: &mut Vec<MetaOp>) -> Result<(Value, 
                 AddNodeMeta::Plain,
             ))
         }
-        Protocol::Unknown => Ok((
-            json!({
-                "type": "direct",
-                "tag":  req.tag,
-                "listen": "::",
-                "listen_port": req.listen_port
-            }),
-            AddNodeMeta::Plain,
-        )),
+        // 不给未知协议生成兜底 inbound：以前这里落成 direct，一个打错的协议名
+        // 会静默生成一个开放的直连入站。宁可让 add 失败也不要生成非预期的监听。
+        Protocol::Unknown => anyhow::bail!(
+            "未知协议，无法生成 inbound；支持: vless-reality / vless-ws / vmess-ws / \
+             trojan / shadowsocks / hysteria2 / tuic / anytls"
+        ),
     }
 }
 
@@ -581,21 +585,28 @@ fn ensure_self_signed_cert(tag: &str, sni: &str) -> Result<(String, String)> {
     Ok((crt.display().to_string(), key.display().to_string()))
 }
 
-/// 调用 `sing-box generate reality-keypair`，返回 (private_key, public_key)
-fn generate_reality_keypair() -> Result<(String, String)> {
-    let bin = [
+/// 调用 `sing-box generate reality-keypair`，返回 (private_key, public_key)。
+/// 优先用调用方传入的 binary_path（来自 config.toml），再回落到常见安装位置。
+fn generate_reality_keypair(binary_path: Option<&str>) -> Result<(String, String)> {
+    let fallbacks = [
         "/etc/sing-box/bin/sing-box",
         "/usr/local/bin/sing-box",
         "/usr/bin/sing-box",
-    ]
-    .iter()
-    .find(|p| std::path::Path::new(p).exists())
-    .copied()
-    .unwrap_or("sing-box");
-    let out = Command::new(bin)
+    ];
+    let bin = binary_path
+        .filter(|p| !p.trim().is_empty() && Path::new(p).exists())
+        .map(str::to_string)
+        .or_else(|| {
+            fallbacks
+                .iter()
+                .find(|p| Path::new(p).exists())
+                .map(|p| p.to_string())
+        })
+        .unwrap_or_else(|| "sing-box".to_string());
+    let out = Command::new(&bin)
         .args(["generate", "reality-keypair"])
         .output()
-        .with_context(|| "调用 sing-box generate reality-keypair 失败")?;
+        .with_context(|| format!("调用 {} generate reality-keypair 失败", bin))?;
     if !out.status.success() {
         anyhow::bail!(
             "sing-box generate reality-keypair 返回非零: {}",
@@ -646,8 +657,20 @@ fn sync_v2ray_api_users(cfg: &mut Value, users: &[&User], grpc_addr: &str) {
     let experimental = ensure_object(experimental);
     let api = experimental.entry("v2ray_api").or_insert_with(|| json!({}));
     let api = ensure_object(api);
-    api.entry("listen")
-        .or_insert_with(|| Value::String(grpc_addr.to_string()));
+    // listen 必须与 config.toml 的 grpc_addr 一致，否则 daemon 永远连不上统计接口。
+    // 之前这里用 or_insert，管理员改了 grpc_addr 后 config.json 不会跟着走，
+    // 只能靠 doctor 报不一致，没有自动修复路径。
+    let previous = api.get("listen").and_then(Value::as_str).map(String::from);
+    if previous.as_deref() != Some(grpc_addr) {
+        if let Some(old) = previous {
+            tracing::info!(
+                old = %old,
+                new = %grpc_addr,
+                "v2ray_api.listen 与配置的 grpc_addr 不一致，已按 config.toml 更新"
+            );
+        }
+        api.insert("listen".into(), Value::String(grpc_addr.to_string()));
+    }
     let stats = api.entry("stats").or_insert_with(|| json!({}));
     let stats = ensure_object(stats);
     stats.insert("enabled".into(), Value::Bool(true));
@@ -706,6 +729,7 @@ mod tests {
             tg_schedule_times: "[]".into(),
             tg_last_quota_level: 0,
             tg_last_schedule_dates: "{}".into(),
+            auto_disabled: false,
         }
     }
 
@@ -780,7 +804,17 @@ mod tests {
             }]
         });
         let mut ops = Vec::new();
-        edit_node(&mut cfg, "trojan-1", None, None, None, Some(true), None, &mut ops).unwrap();
+        edit_node(
+            &mut cfg,
+            "trojan-1",
+            None,
+            None,
+            None,
+            Some(true),
+            None,
+            &mut ops,
+        )
+        .unwrap();
 
         assert_eq!(cfg["inbounds"][0]["listen"], "127.0.0.1");
         assert_eq!(ops.len(), 1, "port_reuse 改动应入队一个 MetaOp");

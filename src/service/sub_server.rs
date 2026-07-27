@@ -310,6 +310,7 @@ mod tests {
             tg_schedule_times: "[]".into(),
             tg_last_quota_level: 0,
             tg_last_schedule_dates: "{}".into(),
+            auto_disabled: false,
         }
     }
 

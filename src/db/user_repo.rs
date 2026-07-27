@@ -21,14 +21,16 @@ pub async fn get(pool: &SqlitePool, name: &str) -> Result<Option<User>> {
 }
 
 pub async fn insert(pool: &SqlitePool, u: &User) -> Result<()> {
-    // manual_bytes 在 schema 里保留为冗余列（默认 0），不再由应用写入
+    // 注：users 表里还有一个 001 时代的 manual_bytes 冗余列，应用早已不用。
+    // 保留该列是为了让旧版本二进制回滚后仍能工作，新代码一概不碰它。
     sqlx::query(
         r#"INSERT INTO users(name,uuid,password,enabled,quota_gb,used_up_bytes,used_down_bytes,
         last_live_up,last_live_down,reset_day,last_reset_ym,
         expire_at,allow_all_nodes,created_at,allowed_nodes,sub_token,traffic_multiplier,
         tg_chat_id,tg_bind_token,tg_notify_quota_80,tg_notify_quota_90,tg_notify_quota_100,
-        tg_schedule_enabled,tg_schedule_times,tg_last_quota_level,tg_last_schedule_dates)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"#,
+        tg_schedule_enabled,tg_schedule_times,tg_last_quota_level,tg_last_schedule_dates,
+        auto_disabled)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"#,
     )
     .bind(&u.name)
     .bind(&u.uuid)
@@ -56,6 +58,7 @@ pub async fn insert(pool: &SqlitePool, u: &User) -> Result<()> {
     .bind(&u.tg_schedule_times)
     .bind(u.tg_last_quota_level)
     .bind(&u.tg_last_schedule_dates)
+    .bind(u.auto_disabled)
     .execute(pool)
     .await?;
     Ok(())
@@ -190,8 +193,10 @@ pub async fn set_allow_all_nodes(
     Ok(())
 }
 
+/// 管理员手动启停。总是清掉 auto_disabled 标记——手动动作代表管理员的明确意图，
+/// 之后的月重置不应再把它当作"系统自动禁用"来解封。
 pub async fn set_enabled(pool: &SqlitePool, name: &str, v: bool) -> Result<()> {
-    sqlx::query("UPDATE users SET enabled=? WHERE name=?")
+    sqlx::query("UPDATE users SET enabled=?, auto_disabled=0 WHERE name=?")
         .bind(v)
         .bind(name)
         .execute(pool)
@@ -199,7 +204,19 @@ pub async fn set_enabled(pool: &SqlitePool, name: &str, v: bool) -> Result<()> {
     Ok(())
 }
 
-/// 原子翻转启用状态，返回新值；用户不存在返回 Ok(None)。
+/// 自动控制专用：禁用时打上 auto_disabled 标记，解封时清掉。
+/// 与 set_enabled 分开，使"管理员手动停用"与"系统自动停用"在库里可区分。
+pub async fn set_enabled_auto(pool: &SqlitePool, name: &str, enabled: bool) -> Result<()> {
+    sqlx::query("UPDATE users SET enabled=?, auto_disabled=? WHERE name=?")
+        .bind(enabled)
+        .bind(!enabled)
+        .bind(name)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 原子翻转启用状态，返回新值；用户不存在返回 Ok(None)。手动操作，清 auto_disabled。
 pub async fn toggle_enabled(pool: &SqlitePool, name: &str) -> Result<Option<bool>> {
     let mut tx = pool.begin().await?;
     let row: Option<(bool,)> = sqlx::query_as("SELECT enabled FROM users WHERE name=?")
@@ -210,7 +227,7 @@ pub async fn toggle_enabled(pool: &SqlitePool, name: &str) -> Result<Option<bool
         return Ok(None);
     };
     let next = !cur;
-    sqlx::query("UPDATE users SET enabled=? WHERE name=?")
+    sqlx::query("UPDATE users SET enabled=?, auto_disabled=0 WHERE name=?")
         .bind(next)
         .bind(name)
         .execute(&mut *tx)
@@ -226,7 +243,7 @@ pub async fn reset_usage(pool: &SqlitePool, name: &str) -> Result<()> {
     // 下次同步 calc_delta(gRPC累计值, 0) 会把历史累计量全部计入 used_bytes（虚报峰值）。
     // 保留 last_live 可确保增量计算 delta = 新累计 - 旧累计，只统计重置后的新增量。
     sqlx::query(
-        r#"UPDATE users SET used_up_bytes=0,used_down_bytes=0,manual_bytes=0,
+        r#"UPDATE users SET used_up_bytes=0,used_down_bytes=0,
         last_reset_ym=? WHERE name=?"#,
     )
     .bind(&ym)
@@ -241,13 +258,10 @@ pub async fn reset_usage(pool: &SqlitePool, name: &str) -> Result<()> {
 /// 保证同月内手动重置后当月定期重置仍会在重置日正常触发。
 /// 同样不重置 last_live_up/down，原因同 reset_usage。
 pub async fn reset_usage_manual(pool: &SqlitePool, name: &str) -> Result<()> {
-    sqlx::query(
-        r#"UPDATE users SET used_up_bytes=0,used_down_bytes=0,manual_bytes=0
-        WHERE name=?"#,
-    )
-    .bind(name)
-    .execute(pool)
-    .await?;
+    sqlx::query("UPDATE users SET used_up_bytes=0,used_down_bytes=0 WHERE name=?")
+        .bind(name)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 

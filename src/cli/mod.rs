@@ -1,3 +1,4 @@
+pub mod bind;
 pub mod kernel;
 pub mod nginx;
 pub mod node;
@@ -67,6 +68,8 @@ pub enum Commands {
     Kernel(kernel::KernelArgs),
     #[command(about = "订阅 token 管理")]
     Token(token::TokenArgs),
+    #[command(about = "Telegram 绑定码管理")]
+    Bind(bind::BindArgs),
     #[command(about = "nginx 管理")]
     Nginx(nginx::NginxArgs),
     #[command(about = "兼容旧用户命令")]

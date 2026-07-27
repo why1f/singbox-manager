@@ -30,7 +30,7 @@ LockPersonality=true
 # 必须存在的可写路径
 ReadWritePaths=/etc/sing-box
 # 可能不存在的可写路径（nginx/sing-box 尚未装时）— 前缀 "-" 表示不存在就跳过
-ReadWritePaths=-/etc/sing-box -/etc/nginx/conf.d -/etc/nginx/certs -/etc/systemd/system
+ReadWritePaths=-/etc/nginx/conf.d -/etc/nginx/certs -/etc/systemd/system
 
 [Install]
 WantedBy=multi-user.target

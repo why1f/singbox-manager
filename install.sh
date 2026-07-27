@@ -2,7 +2,6 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PREFIX="/usr/local"
 BIN_PATH="/etc/sing-box/bin/sb"
 CONFIG_DIR="/etc/sing-box/manager"
 CONFIG_PATH="$CONFIG_DIR/config.toml"
@@ -163,7 +162,9 @@ reload_systemd() {
   note "若当前 shell 报 'sb 找不到命令' 或指向错误路径："
   note "  unalias sb sing-box 2>/dev/null; hash -r       # 当前 shell 立即生效"
   note "  或重新登录（/etc/profile.d/sb-manager.sh 会自动清理）"
-  [ -z "${SB_BIN:-}" ] && note "sing-box 未安装 — 进 TUI（sb）后到「内核[5]」页一键安装。"
+  if [ -z "${SB_BIN:-}" ]; then
+    note "sing-box 未安装 — 进 TUI（sb）后到「内核[5]」页一键安装。"
+  fi
 }
 
 require_root

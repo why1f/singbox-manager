@@ -26,17 +26,49 @@ use crate::{
 pub enum UiEvent {
     UsersRefreshed(Vec<User>),
     NodesRefreshed(Vec<InboundNode>),
+    /// tag -> (端口复用, 订阅优先 IPv6)。渲染要用，缓存在 AppState 里避免每帧读盘。
+    NodeMetaRefreshed(std::collections::HashMap<String, (bool, bool)>),
     SingboxRunning(Option<bool>),
-    UserEnabled { name: String, enabled: bool },
-    TrafficReset { name: String },
-    SubscriptionExported { name: String, text: String },
-    Status { msg: String, level: StatusLevel },
+    UserEnabled {
+        name: String,
+        enabled: bool,
+    },
+    TrafficReset {
+        name: String,
+    },
+    SubscriptionExported {
+        name: String,
+        text: String,
+    },
+    Status {
+        msg: String,
+        level: StatusLevel,
+    },
     KernelStatus(crate::core::singbox::KernelStatus),
     KernelBusy(Option<&'static str>),
     NginxStatus(crate::core::nginx::NginxStatus),
     NginxBusy(Option<&'static str>),
-    SysMetrics { cpu: u8, rx: u64, tx: u64 },
+    SysMetrics {
+        cpu: u8,
+        rx: u64,
+        tx: u64,
+    },
     ShowBackupPicker(Vec<String>),
+    /// 写操作开始/结束。Some=占用，None=释放
+    OpBusy(Option<&'static str>),
+}
+
+/// 写操作进行中的守卫：drop 时自动发 `OpBusy(None)`，覆盖所有 early-return 分支，
+/// 不用在每个 `return` 前手动清标记。
+struct OpGuard(mpsc::Sender<UiEvent>);
+
+impl Drop for OpGuard {
+    fn drop(&mut self) {
+        let tx = self.0.clone();
+        tokio::spawn(async move {
+            let _ = tx.send(UiEvent::OpBusy(None)).await;
+        });
+    }
 }
 
 pub async fn run(
@@ -45,15 +77,16 @@ pub async fn run(
     users: Vec<User>,
     nodes: Vec<InboundNode>,
     pool: sqlx::SqlitePool,
-    cfg: AppConfig,
+    cfg: Arc<AppConfig>,
 ) -> Result<()> {
     s.users = users;
     s.nodes = nodes;
+    s.reload_node_meta();
     enable_raw_mode()?;
     let mut out = io::stdout();
     execute!(out, EnterAlternateScreen)?;
     let mut term = Terminal::new(CrosstermBackend::new(out))?;
-    let r = event_loop(&mut term, &mut s, &mut rx, Arc::new(pool), Arc::new(cfg)).await;
+    let r = event_loop(&mut term, &mut s, &mut rx, Arc::new(pool), cfg).await;
     disable_raw_mode()?;
     execute!(term.backend_mut(), LeaveAlternateScreen)?;
     term.show_cursor()?;
@@ -122,23 +155,29 @@ async fn event_loop(
         tokio::select! {
             biased;
             _ = tokio::time::sleep(Duration::from_millis(50)) => {
-                if event::poll(Duration::from_millis(0))? {
-                    if let CE::Key(k) = event::read()? {
-                        if k.kind == KeyEventKind::Press {
-                            if s.modal.is_some() {
-                                if handle_modal_key(s, k, pool.clone(), cfg.clone(), ui_tx.clone()) {
-                                    return Ok(());
-                                }
-                            } else {
-                                if is_quit(&k) { return Ok(()); }
-                                handle_page_key(s, k, pool.clone(), cfg.clone(), ui_tx.clone());
-                            }
+                // 排空键盘队列：每轮只处理一个按键会让快速连按 / 粘贴文本
+                // 以 50ms 一个字符的速度回显（粘贴 20 字符要 1 秒）。
+                while event::poll(Duration::from_millis(0))? {
+                    let CE::Key(k) = event::read()? else { continue };
+                    if k.kind != KeyEventKind::Press {
+                        continue;
+                    }
+                    if s.modal.is_some() {
+                        if handle_modal_key(s, k, pool.clone(), cfg.clone(), ui_tx.clone()) {
+                            return Ok(());
                         }
+                    } else {
+                        if is_quit(&k) { return Ok(()); }
+                        handle_page_key(s, k, pool.clone(), cfg.clone(), ui_tx.clone());
+                    }
+                    // 按键可能触发挂起式外部命令，需要立刻回到主循环处理
+                    if s.pending_cmd.is_some() {
+                        break;
                     }
                 }
             }
             Some(ev) = ui_rx.recv() => apply_ui_event(s, ev),
-            Some(bg) = rx.recv() => apply_traffic_event(s, bg),
+            Some(bg) = rx.recv() => apply_traffic_event(s, bg, &pool, &cfg, &ui_tx),
         }
     }
 }
@@ -276,6 +315,7 @@ fn apply_ui_event(s: &mut AppState, ev: UiEvent) {
             s.nodes = n;
             s.node_table.clamp(s.nodes.len());
         }
+        UiEvent::NodeMetaRefreshed(meta) => s.node_meta = meta,
         UiEvent::SingboxRunning(v) => s.singbox_running = v,
         UiEvent::UserEnabled { name, enabled } => {
             if let Some(u) = s.users.iter_mut().find(|u| u.name == name) {
@@ -304,6 +344,7 @@ fn apply_ui_event(s: &mut AppState, ev: UiEvent) {
             s.modal = Some(Modal::SelectRestore { files, cursor: 0 });
         }
         UiEvent::Status { msg, level } => s.set_status(msg, level),
+        UiEvent::OpBusy(op) => s.op_busy = op,
         UiEvent::KernelStatus(k) => {
             s.singbox_running = k.running;
             s.kernel = Some(k);
@@ -328,7 +369,13 @@ fn apply_ui_event(s: &mut AppState, ev: UiEvent) {
     }
 }
 
-fn apply_traffic_event(s: &mut AppState, ev: TrafficEvent) {
+fn apply_traffic_event(
+    s: &mut AppState,
+    ev: TrafficEvent,
+    pool: &Arc<sqlx::SqlitePool>,
+    cfg: &Arc<AppConfig>,
+    ui_tx: &mpsc::Sender<UiEvent>,
+) {
     match ev {
         TrafficEvent::Tick => s.uptime_secs += 1,
         TrafficEvent::Synced(deltas) => {
@@ -369,6 +416,9 @@ fn apply_traffic_event(s: &mut AppState, ev: TrafficEvent) {
             for item in c {
                 s.push_log(format!("[INFO] 自动控制: {}", item));
             }
+            // 自动控制直接改了库（清零流量 / 启停用户），必须重新拉一次，
+            // 否则用户页会一直显示重置前的旧数据直到手动按 R。
+            spawn_refresh_quiet(pool.clone(), cfg.clone(), ui_tx.clone());
         }
     }
 }
@@ -387,7 +437,15 @@ fn handle_modal_key(
     let Some(modal) = s.modal.as_mut() else {
         return false;
     };
-    match modal.handle(k) {
+    let action = modal.handle(k);
+    // 写类动作在上一个操作跑完前拒绝，避免重复提交（连按 Enter / 删两次）
+    if action.is_write() {
+        if let Some(op) = s.op_busy {
+            s.set_status(format!("正在{}，请稍候", op), StatusLevel::Warn);
+            return false;
+        }
+    }
+    match action {
         ModalAction::None => {}
         ModalAction::Close => s.modal = None,
         ModalAction::SubmitUser {
@@ -398,6 +456,7 @@ fn handle_modal_key(
             multiplier,
         } => {
             s.modal = None;
+            s.op_busy = Some("添加用户");
             spawn_add_user(pool, cfg, ui_tx, name, quota, reset_day, expire, multiplier);
         }
         ModalAction::SubmitUserEdit {
@@ -408,6 +467,7 @@ fn handle_modal_key(
             multiplier,
         } => {
             s.modal = None;
+            s.op_busy = Some("更新用户");
             spawn_edit_user(pool, cfg, ui_tx, name, quota, reset_day, expire, multiplier);
         }
         ModalAction::SubmitNode {
@@ -420,8 +480,18 @@ fn handle_modal_key(
             ipv6,
         } => {
             s.modal = None;
+            s.op_busy = Some("添加节点");
             spawn_add_node(
-                pool, cfg, ui_tx, tag, protocol, port, server_name, path, port_reuse, ipv6,
+                pool,
+                cfg,
+                ui_tx,
+                tag,
+                protocol,
+                port,
+                server_name,
+                path,
+                port_reuse,
+                ipv6,
             );
         }
         ModalAction::SubmitNodeEdit {
@@ -433,34 +503,52 @@ fn handle_modal_key(
             ipv6,
         } => {
             s.modal = None;
-            spawn_edit_node(pool, cfg, ui_tx, tag, port, server_name, path, port_reuse, ipv6);
+            s.op_busy = Some("更新节点");
+            spawn_edit_node(
+                pool,
+                cfg,
+                ui_tx,
+                tag,
+                port,
+                server_name,
+                path,
+                port_reuse,
+                ipv6,
+            );
         }
         ModalAction::DeleteUser(name) => {
             s.modal = None;
+            s.op_busy = Some("删除用户");
             spawn_delete_user(pool, cfg, ui_tx, name);
         }
         ModalAction::DeleteNode(tag) => {
             s.modal = None;
+            s.op_busy = Some("删除节点");
             spawn_delete_node(pool, cfg, ui_tx, tag);
         }
         ModalAction::ResetTraffic(name) => {
             s.modal = None;
+            s.op_busy = Some("重置流量");
             spawn_reset(pool, cfg, ui_tx, name);
         }
         ModalAction::SaveNodePicker { user, all, tags } => {
             s.modal = None;
+            s.op_busy = Some("保存节点分配");
             spawn_save_nodes(pool, cfg, ui_tx, user, all, tags);
         }
         ModalAction::RegenToken(name) => {
             s.modal = None;
+            s.op_busy = Some("重置 token");
             spawn_regen_token(pool, ui_tx, name);
         }
         ModalAction::RevokeToken(name) => {
             s.modal = None;
+            s.op_busy = Some("撤销 token");
             spawn_revoke_token(pool, ui_tx, name);
         }
         ModalAction::RestoreBackup(file) => {
             s.modal = None;
+            s.op_busy = Some("恢复备份");
             spawn_restore_backup(ui_tx, file);
         }
     }
@@ -543,13 +631,15 @@ fn handle_page_key(
             }
             Page::Nodes => {
                 if let Some(n) = s.selected_node() {
-                    let meta = crate::core::config::get_node_meta(&n.tag);
-                    let port_reuse = meta.as_ref().map(|m| m.port_reuse).unwrap_or(false);
-                    let ipv6 = meta.map(|m| m.ipv6).unwrap_or(false);
+                    let tag = n.tag.clone();
+                    let protocol = n.protocol.to_string();
+                    let port = n.listen_port.to_string();
+                    let port_reuse = s.node_port_reuse(&tag);
+                    let ipv6 = s.node_ipv6(&tag);
                     s.modal = Some(Modal::EditNode(crate::tui::forms::NodeEditForm {
-                        tag: n.tag.clone(),
-                        protocol: n.protocol.to_string(),
-                        port: n.listen_port.to_string(),
+                        tag,
+                        protocol,
+                        port,
                         server_name: String::new(),
                         path: String::new(),
                         port_reuse,
@@ -593,7 +683,10 @@ fn handle_page_key(
             }
         }
         KeyCode::Char('t') if s.page == Page::Users => {
-            if let Some(name) = s.selected_user().map(|u| u.name.clone()) {
+            if let Some(op) = s.op_busy {
+                s.set_status(format!("正在{}，请稍候", op), StatusLevel::Warn);
+            } else if let Some(name) = s.selected_user().map(|u| u.name.clone()) {
+                s.op_busy = Some("切换用户状态");
                 spawn_toggle(pool, cfg, ui_tx, name);
             }
         }
@@ -1070,10 +1163,14 @@ fn spawn_kernel_install_latest(
         let _ = tx.send(UiEvent::KernelBusy(None)).await;
         match result {
             Ok(()) => {
-                let msg = if let Some(flush_msg) = flush_msg {
-                    format!("{} 成功（已自动 enable + restart）；{}", label, flush_msg)
-                } else {
-                    format!("{} 成功（已自动 enable + restart）", label)
+                // 官方版不带 with_v2ray_api，装完流量统计其实不可用，这里主动探一次
+                let api_warn = crate::core::singbox::probe_v2ray_api(&cfg.singbox.grpc_addr).await;
+                let msg = match (flush_msg, api_warn) {
+                    (_, Some(w)) => format!("{} 成功，但 {}", label, w),
+                    (Some(flush_msg), None) => {
+                        format!("{} 成功（已自动 enable + restart）；{}", label, flush_msg)
+                    }
+                    (None, None) => format!("{} 成功（已自动 enable + restart）", label),
                 };
                 let _ = tx
                     .send(UiEvent::Status {
@@ -1132,10 +1229,16 @@ fn spawn_kernel_install_v2rayapi(
         let _ = tx.send(UiEvent::KernelBusy(None)).await;
         match result {
             Ok(()) => {
-                let msg = if let Some(flush_msg) = flush_msg {
-                    format!("{} 成功（已自动 enable + restart）；{}", label, flush_msg)
-                } else {
-                    format!("{} 成功（已自动 enable + restart）", label)
+                let api_warn = crate::core::singbox::probe_v2ray_api(&cfg.singbox.grpc_addr).await;
+                let msg = match (flush_msg, api_warn) {
+                    (_, Some(w)) => format!("{} 成功，但 {}", label, w),
+                    (Some(flush_msg), None) => format!(
+                        "{} 成功（已 enable + restart，gRPC 已就绪）；{}",
+                        label, flush_msg
+                    ),
+                    (None, None) => {
+                        format!("{} 成功（已 enable + restart，gRPC 统计接口已就绪）", label)
+                    }
                 };
                 let _ = tx
                     .send(UiEvent::Status {
@@ -1190,6 +1293,8 @@ fn spawn_save_nodes(
     tags: Vec<String>,
 ) {
     tokio::spawn(async move {
+        // drop 时自动清 op_busy，覆盖下面所有 early-return 分支
+        let _guard = OpGuard(tx.clone());
         let res = if all {
             crate::service::user_service::grant_all_nodes(&pool, &user).await
         } else {
@@ -1242,6 +1347,8 @@ fn spawn_edit_user(
     multiplier: Option<f64>,
 ) {
     tokio::spawn(async move {
+        // drop 时自动清 op_busy，覆盖下面所有 early-return 分支
+        let _guard = OpGuard(tx.clone());
         if let Err(e) = crate::service::user_service::update_package(
             &pool,
             &name,
@@ -1294,6 +1401,8 @@ fn spawn_edit_node(
     ipv6: Option<bool>,
 ) {
     tokio::spawn(async move {
+        // drop 时自动清 op_busy，覆盖下面所有 early-return 分支
+        let _guard = OpGuard(tx.clone());
         if let Err(e) = crate::service::runtime_service::mutate_config_locked(
             &pool,
             &cfg.singbox.config_path,
@@ -1328,11 +1437,11 @@ fn spawn_edit_node(
                 Err(e) => Some(format!("sing-box 校验/reload 失败: {}（改动已保存）", e)),
             };
         if let Ok(v) = crate::core::config::load(&cfg.singbox.config_path) {
+            let nodes = crate::service::node_service::list_nodes(&v);
             let _ = tx
-                .send(UiEvent::NodesRefreshed(
-                    crate::service::node_service::list_nodes(&v),
-                ))
+                .send(UiEvent::NodeMetaRefreshed(read_node_meta(&nodes)))
                 .await;
+            let _ = tx.send(UiEvent::NodesRefreshed(nodes)).await;
         }
         let (msg, level) = match check_msg {
             Some(w) => (w, StatusLevel::Error),
@@ -1349,12 +1458,22 @@ fn spawn_toggle(
     name: String,
 ) {
     tokio::spawn(async move {
+        // drop 时自动清 op_busy，覆盖下面所有 early-return 分支
+        let _guard = OpGuard(tx.clone());
         match crate::service::user_service::toggle_user(&pool, &name).await {
             Ok(enabled) => {
                 if let Err(e) = crate::apply_runtime_changes(&pool, &cfg).await {
+                    // DB 已经翻转但 config 没同步：仍要把新状态推给 UI，
+                    // 否则界面显示的启停状态与库里相反。
+                    let _ = tx
+                        .send(UiEvent::UserEnabled {
+                            name: name.clone(),
+                            enabled,
+                        })
+                        .await;
                     let _ = tx
                         .send(UiEvent::Status {
-                            msg: format!("配置同步失败: {}", e),
+                            msg: format!("{} 状态已改，但配置同步失败: {}", name, e),
                             level: StatusLevel::Error,
                         })
                         .await;
@@ -1376,6 +1495,8 @@ fn spawn_toggle(
 
 fn spawn_regen_token(pool: Arc<sqlx::SqlitePool>, tx: mpsc::Sender<UiEvent>, name: String) {
     tokio::spawn(async move {
+        // drop 时自动清 op_busy，覆盖下面所有 early-return 分支
+        let _guard = OpGuard(tx.clone());
         match crate::service::user_service::regen_sub_token(&pool, &name).await {
             Ok(_) => {
                 if let Ok(users) = crate::service::user_service::list_users(&pool).await {
@@ -1402,6 +1523,8 @@ fn spawn_regen_token(pool: Arc<sqlx::SqlitePool>, tx: mpsc::Sender<UiEvent>, nam
 
 fn spawn_revoke_token(pool: Arc<sqlx::SqlitePool>, tx: mpsc::Sender<UiEvent>, name: String) {
     tokio::spawn(async move {
+        // drop 时自动清 op_busy，覆盖下面所有 early-return 分支
+        let _guard = OpGuard(tx.clone());
         match crate::service::user_service::revoke_sub_token(&pool, &name).await {
             Ok(()) => {
                 if let Ok(users) = crate::service::user_service::list_users(&pool).await {
@@ -1433,6 +1556,8 @@ fn spawn_reset(
     name: String,
 ) {
     tokio::spawn(async move {
+        // drop 时自动清 op_busy，覆盖下面所有 early-return 分支
+        let _guard = OpGuard(tx.clone());
         if let Err(e) = crate::service::user_service::reset_traffic(&pool, &name).await {
             let _ = tx
                 .send(UiEvent::Status {
@@ -1469,7 +1594,10 @@ fn spawn_export(cfg: Arc<AppConfig>, tx: mpsc::Sender<UiEvent>, name: String) {
                 return;
             }
         };
-        let addrs = match crate::service::node_service::resolve_server_host(
+        // 与 CLI `sb sub` / `sb export` 走同一套地址解析，尊重
+        // [subscription].use_public_base_as_server 开关，避免两个入口导出的 server 不一致。
+        let addrs = match crate::service::node_service::resolve_export_server(
+            cfg.subscription.use_public_base_as_server,
             &cfg.subscription.public_base,
             None,
         )
@@ -1513,21 +1641,7 @@ fn spawn_export(cfg: Arc<AppConfig>, tx: mpsc::Sender<UiEvent>, name: String) {
 
 fn spawn_refresh(pool: Arc<sqlx::SqlitePool>, cfg: Arc<AppConfig>, tx: mpsc::Sender<UiEvent>) {
     tokio::spawn(async move {
-        if let Ok(users) = crate::service::user_service::list_users(&pool).await {
-            let _ = tx.send(UiEvent::UsersRefreshed(users)).await;
-        }
-        if let Ok(v) = crate::core::config::load(&cfg.singbox.config_path) {
-            let _ = tx
-                .send(UiEvent::NodesRefreshed(
-                    crate::service::node_service::list_nodes(&v),
-                ))
-                .await;
-        }
-        let proc = crate::core::singbox::SingboxProcess::new(
-            &cfg.singbox.binary_path,
-            &cfg.singbox.config_path,
-        );
-        let _ = tx.send(UiEvent::SingboxRunning(proc.is_running())).await;
+        refresh_all(&pool, &cfg, &tx).await;
         let _ = tx
             .send(UiEvent::Status {
                 msg: "已刷新".into(),
@@ -1535,6 +1649,48 @@ fn spawn_refresh(pool: Arc<sqlx::SqlitePool>, cfg: Arc<AppConfig>, tx: mpsc::Sen
             })
             .await;
     });
+}
+
+/// 与 spawn_refresh 相同，但不推送"已刷新"状态条——用于后台事件驱动的刷新，
+/// 避免把用户正在看的状态提示冲掉。
+fn spawn_refresh_quiet(
+    pool: Arc<sqlx::SqlitePool>,
+    cfg: Arc<AppConfig>,
+    tx: mpsc::Sender<UiEvent>,
+) {
+    tokio::spawn(async move {
+        refresh_all(&pool, &cfg, &tx).await;
+    });
+}
+
+async fn refresh_all(pool: &sqlx::SqlitePool, cfg: &AppConfig, tx: &mpsc::Sender<UiEvent>) {
+    if let Ok(users) = crate::service::user_service::list_users(pool).await {
+        let _ = tx.send(UiEvent::UsersRefreshed(users)).await;
+    }
+    if let Ok(v) = crate::core::config::load(&cfg.singbox.config_path) {
+        let nodes = crate::service::node_service::list_nodes(&v);
+        let _ = tx
+            .send(UiEvent::NodeMetaRefreshed(read_node_meta(&nodes)))
+            .await;
+        let _ = tx.send(UiEvent::NodesRefreshed(nodes)).await;
+    }
+    let proc = crate::core::singbox::SingboxProcess::new(
+        &cfg.singbox.binary_path,
+        &cfg.singbox.config_path,
+    );
+    let _ = tx.send(UiEvent::SingboxRunning(proc.is_running())).await;
+}
+
+/// 一次性读出所有节点的 meta，供渲染层查表。渲染函数每帧都跑，
+/// 不能在里面直接读 nodes.meta.json（每帧 N 次磁盘 IO）。
+fn read_node_meta(nodes: &[InboundNode]) -> std::collections::HashMap<String, (bool, bool)> {
+    nodes
+        .iter()
+        .filter_map(|n| {
+            crate::core::config::get_node_meta(&n.tag)
+                .map(|m| (n.tag.clone(), (m.port_reuse, m.ipv6)))
+        })
+        .collect()
 }
 
 fn spawn_check(cfg: Arc<AppConfig>, tx: mpsc::Sender<UiEvent>) {
@@ -1563,6 +1719,8 @@ fn spawn_add_user(
     multiplier: f64,
 ) {
     tokio::spawn(async move {
+        // drop 时自动清 op_busy，覆盖下面所有 early-return 分支
+        let _guard = OpGuard(tx.clone());
         match crate::service::user_service::add_user(
             &pool, &name, quota, reset_day, &expire, multiplier,
         )
@@ -1606,6 +1764,8 @@ fn spawn_delete_user(
     name: String,
 ) {
     tokio::spawn(async move {
+        // drop 时自动清 op_busy，覆盖下面所有 early-return 分支
+        let _guard = OpGuard(tx.clone());
         if let Err(e) = crate::service::user_service::delete_user(&pool, &name).await {
             let _ = tx
                 .send(UiEvent::Status {
@@ -1649,6 +1809,8 @@ fn spawn_add_node(
     ipv6: bool,
 ) {
     tokio::spawn(async move {
+        // drop 时自动清 op_busy，覆盖下面所有 early-return 分支
+        let _guard = OpGuard(tx.clone());
         let p = match crate::model::node::Protocol::try_from(protocol.as_str()) {
             Ok(p) => p,
             Err(e) => {
@@ -1675,7 +1837,14 @@ fn spawn_add_node(
             &cfg.singbox.config_path,
             Some(&cfg.singbox.binary_path),
             true,
-            |cfg_json, ops| crate::core::config::add_node(cfg_json, &req, ops),
+            |cfg_json, ops| {
+                crate::core::config::add_node(
+                    cfg_json,
+                    &req,
+                    Some(cfg.singbox.binary_path.as_str()),
+                    ops,
+                )
+            },
         )
         .await
         {
@@ -1700,11 +1869,11 @@ fn spawn_add_node(
                 )),
             };
         if let Ok(v) = crate::core::config::load(&cfg.singbox.config_path) {
+            let nodes = crate::service::node_service::list_nodes(&v);
             let _ = tx
-                .send(UiEvent::NodesRefreshed(
-                    crate::service::node_service::list_nodes(&v),
-                ))
+                .send(UiEvent::NodeMetaRefreshed(read_node_meta(&nodes)))
                 .await;
+            let _ = tx.send(UiEvent::NodesRefreshed(nodes)).await;
         }
         let done_msg = match meta {
             crate::core::config::AddNodeMeta::RealityKeys {
@@ -1731,6 +1900,8 @@ fn spawn_delete_node(
     tag: String,
 ) {
     tokio::spawn(async move {
+        // drop 时自动清 op_busy，覆盖下面所有 early-return 分支
+        let _guard = OpGuard(tx.clone());
         let removed = match crate::service::runtime_service::mutate_config_locked(
             &pool,
             &cfg.singbox.config_path,
@@ -1769,11 +1940,11 @@ fn spawn_delete_node(
                 )),
             };
         if let Ok(v) = crate::core::config::load(&cfg.singbox.config_path) {
+            let nodes = crate::service::node_service::list_nodes(&v);
             let _ = tx
-                .send(UiEvent::NodesRefreshed(
-                    crate::service::node_service::list_nodes(&v),
-                ))
+                .send(UiEvent::NodeMetaRefreshed(read_node_meta(&nodes)))
                 .await;
+            let _ = tx.send(UiEvent::NodesRefreshed(nodes)).await;
         }
         let cleaned = match crate::service::user_service::remove_allowed_tag_from_all_users(
             &pool, &tag,
@@ -1858,6 +2029,8 @@ fn spawn_list_backups(tx: mpsc::Sender<UiEvent>) {
 
 fn spawn_restore_backup(tx: mpsc::Sender<UiEvent>, file: String) {
     tokio::spawn(async move {
+        // drop 时自动清 op_busy，覆盖下面所有 early-return 分支
+        let _guard = OpGuard(tx.clone());
         match crate::core::backup::restore_backup(&file) {
             Ok(()) => {
                 let _ = tx

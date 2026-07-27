@@ -73,6 +73,9 @@ pub struct AppState {
     pub page: Page,
     pub users: Vec<User>,
     pub nodes: Vec<InboundNode>,
+    /// tag -> (端口复用, 订阅优先 IPv6)。渲染层查这张表，
+    /// 避免在每帧 draw 里读 nodes.meta.json（50ms 一帧 × 节点数次磁盘 IO）。
+    pub node_meta: std::collections::HashMap<String, (bool, bool)>,
     pub singbox_running: Option<bool>,
     pub grpc_connected: bool,
     pub last_sync_time: Option<chrono::DateTime<chrono::Local>>,
@@ -97,6 +100,9 @@ pub struct AppState {
     pub net_tx_history: Vec<u64>,
     /// 按键处理设置后，主 loop 下一次 iteration 会挂起 TUI 执行它然后清空
     pub pending_cmd: Option<ExternalCmd>,
+    /// 正在执行的用户/节点异步操作名。非 None 时忽略新的写操作按键，
+    /// 避免连按两次 [t] 让状态翻转两次回到原点这类不可预期结果。
+    pub op_busy: Option<&'static str>,
 }
 
 impl Default for AppState {
@@ -111,6 +117,7 @@ impl AppState {
             page: Page::Dashboard,
             users: vec![],
             nodes: vec![],
+            node_meta: std::collections::HashMap::new(),
             singbox_running: None,
             grpc_connected: false,
             last_sync_time: None,
@@ -133,6 +140,7 @@ impl AppState {
             net_rx_history: Vec::new(),
             net_tx_history: Vec::new(),
             pending_cmd: None,
+            op_busy: None,
         }
     }
     pub fn selected_user(&self) -> Option<&User> {
@@ -140,6 +148,25 @@ impl AppState {
     }
     pub fn selected_node(&self) -> Option<&InboundNode> {
         self.nodes.get(self.node_table.selected)
+    }
+    /// 节点是否开启了端口复用（查缓存，不读盘）
+    pub fn node_port_reuse(&self, tag: &str) -> bool {
+        self.node_meta.get(tag).map(|m| m.0).unwrap_or(false)
+    }
+    /// 节点订阅是否优先导出 IPv6（查缓存，不读盘）
+    pub fn node_ipv6(&self, tag: &str) -> bool {
+        self.node_meta.get(tag).map(|m| m.1).unwrap_or(false)
+    }
+    /// 启动时同步读一次 meta 填充缓存；之后由 UiEvent::NodeMetaRefreshed 更新。
+    pub fn reload_node_meta(&mut self) {
+        self.node_meta = self
+            .nodes
+            .iter()
+            .filter_map(|n| {
+                crate::core::config::get_node_meta(&n.tag)
+                    .map(|m| (n.tag.clone(), (m.port_reuse, m.ipv6)))
+            })
+            .collect();
     }
     pub fn push_log(&mut self, s: String) {
         self.log_lines.push(s);

@@ -77,28 +77,14 @@ fn detect(ib: &Value) -> Protocol {
     }
 }
 
-/// 优先级：public_base 主机 > 请求 Host > 公网 IP 探测。
-pub async fn resolve_server_host(public_base: &str, request_host: Option<&str>) -> Result<ServerAddresses> {
-    if let Some(host) = public_base_host(public_base) {
-        return Ok(ServerAddresses {
-            ipv4: host.clone(),
-            ipv6: host,
-        });
-    }
-    if let Some(host) = request_host.and_then(authority_host) {
-        return Ok(ServerAddresses {
-            ipv4: host.clone(),
-            ipv6: host,
-        });
-    }
-    get_server_ips().await
-}
-
 /// 导出订阅时节点 server 的优先级：
 /// 1. 若启用 use_public_base_as_server，则先取 public_base 主机
 /// 2. 公网 IP 探测
 /// 3. public_base 主机
 /// 4. 请求 Host
+///
+/// CLI（`sb sub` / `sb export`）、TUI（用户页 `[s]`）、TG bot 导出统一走这里，
+/// 避免同一用户从不同入口拿到不同的节点地址。
 pub async fn resolve_export_server(
     use_public_base_as_server: bool,
     public_base: &str,
@@ -178,12 +164,12 @@ pub async fn get_server_ips() -> Result<ServerAddresses> {
                     Some(ip) => ip,
                     None => {
                         return Err(anyhow!(
-                            "无法探测公网 IP；请配置 subscription.public_base 或通过反代域名访问订阅"
-                        ))
+                        "无法探测公网 IP；请配置 subscription.public_base 或通过反代域名访问订阅"
+                    ))
                     }
                 }
             }
-        }
+        },
     };
     let v6 = v6.unwrap_or_else(|| v4.clone());
 

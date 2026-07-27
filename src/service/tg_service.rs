@@ -437,17 +437,36 @@ async fn handle_callback(ctx: &TgContext, chat_id: i64, msg_id: i64, data: &str)
     Ok(())
 }
 
+/// 绑定账号。绑定码是**一次性**的：核销成功后立即作废，避免绑定码泄露后被
+/// 第三方重放抢绑（抢绑等于拿到该用户的订阅 URL 和全部节点明文凭据）。
+/// 顶掉他人已有绑定时会通知原 chat，让被顶的人能察觉。
 async fn bind_user(ctx: &TgContext, chat_id: i64, code: &str) -> Result<()> {
     let user = user_repo::find_by_tg_bind_token(&ctx.pool, code)
         .await?
-        .ok_or_else(|| anyhow!("绑定码无效"))?;
+        .ok_or_else(|| anyhow!("绑定码无效或已被使用，请联系管理员重新生成"))?;
+    let previous_chat = user.tg_chat_id;
     user_repo::clear_tg_binding_for_chat(&ctx.pool, chat_id).await?;
     user_repo::set_tg_binding(&ctx.pool, &user.name, chat_id).await?;
+    // 核销：绑定码用过即废，需要再绑得由管理员重新生成
+    crate::service::user_service::consume_tg_bind_token(&ctx.pool, &user.name).await?;
+
+    if previous_chat != 0 && previous_chat != chat_id {
+        let notice = format!(
+            "⚠️ <b>账号绑定已转移</b>\n\n账号 <b>{name}</b> 刚被另一个 Telegram 账号绑定，\
+             你已不再接收该账号的流量通知。\n如非本人操作，请立即联系管理员。",
+            name = h(&user.name)
+        );
+        if let Err(e) = send_html(ctx, previous_chat, &notice, None).await {
+            warn!(error = %e, "通知原绑定 chat 失败");
+        }
+    }
+
     send_html(
         ctx,
         chat_id,
         &format!(
-            "🎉 <b>绑定成功</b>\n\n账号:  <b>{name}</b>\n\n现在可以用下方按钮或输入 /usage 查看流量。",
+            "🎉 <b>绑定成功</b>\n\n账号:  <b>{name}</b>\n\n现在可以用下方按钮或输入 /usage 查看流量。\n\
+             <i>该绑定码已作废，如需重新绑定请联系管理员。</i>",
             name = h(&user.name)
         ),
         Some(start_keyboard(true, is_admin(ctx, chat_id))),
@@ -706,11 +725,7 @@ async fn admin_bind_regen(
     if !is_admin(ctx, chat_id) {
         anyhow::bail!("仅管理员可管理 TG 绑定");
     }
-    user_repo::get(&ctx.pool, username)
-        .await?
-        .ok_or_else(|| anyhow!("用户不存在: {}", username))?;
-    let new_token = crate::service::user_service::new_tg_bind_token();
-    user_repo::set_tg_bind_token(&ctx.pool, username, &new_token).await?;
+    crate::service::user_service::regen_tg_bind_token(&ctx.pool, username).await?;
     send_admin_bind_card(ctx, chat_id, edit, username).await
 }
 
@@ -723,12 +738,7 @@ async fn admin_bind_unbind(
     if !is_admin(ctx, chat_id) {
         anyhow::bail!("仅管理员可管理 TG 绑定");
     }
-    let user = user_repo::get(&ctx.pool, username)
-        .await?
-        .ok_or_else(|| anyhow!("用户不存在: {}", username))?;
-    if user.tg_is_bound() {
-        user_repo::set_tg_binding(&ctx.pool, username, 0).await?;
-    }
+    crate::service::user_service::unbind_tg(&ctx.pool, username).await?;
     send_admin_bind_card(ctx, chat_id, edit, username).await
 }
 
@@ -1122,6 +1132,11 @@ async fn normalize_quota_levels(ctx: &TgContext) -> Result<()> {
     Ok(())
 }
 
+/// 逐用户 / 逐管理员发送定时播报。
+///
+/// 单个 chat 发送失败（被拉黑、账号注销等）只记 warn 并跳过，不能用 `?` 中断整轮——
+/// 否则排在后面的用户当分钟收不到播报，且失败者的 due 日期没落库会每 30s 重试，
+/// 持续阻塞所有人。
 async fn run_due_schedules(ctx: &TgContext) -> Result<()> {
     let now = local_now(ctx);
     let today = now.format("%Y-%m-%d").to_string();
@@ -1145,19 +1160,26 @@ async fn run_due_schedules(ctx: &TgContext) -> Result<()> {
             h(&now.format("%Y-%m-%d %H:%M").to_string()),
             user_usage_text(&user, false)
         );
-        send_html(ctx, user.tg_chat_id, &text, Some(user_usage_keyboard())).await?;
+        if let Err(e) = send_html(ctx, user.tg_chat_id, &text, Some(user_usage_keyboard())).await {
+            warn!(user = %user.name, error = %e, "定时播报发送失败，跳过该用户");
+            continue;
+        }
         for item in due {
             dates.insert(item, today.clone());
         }
-        user_repo::set_tg_last_schedule_dates(
+        if let Err(e) = user_repo::set_tg_last_schedule_dates(
             &ctx.pool,
             &user.name,
             &serde_json::to_string(&dates)?,
         )
-        .await?;
+        .await
+        {
+            warn!(user = %user.name, error = %e, "记录定时播报日期失败");
+        }
     }
 
     let admins = tg_repo::list_admin_prefs(&ctx.pool, &ctx.cfg.telegram.admin_chat_ids).await?;
+    let mut all_users: Option<Vec<User>> = None;
     for prefs in admins {
         if !prefs.schedule_enabled {
             continue;
@@ -1171,18 +1193,32 @@ async fn run_due_schedules(ctx: &TgContext) -> Result<()> {
         if due.is_empty() {
             continue;
         }
-        let users = user_repo::list_all(&ctx.pool).await?;
-        let text = scheduled_all_usages_text(&now.format("%m-%d %H:%M").to_string(), &users);
-        send_html(ctx, prefs.chat_id, &text, Some(admin_overview_keyboard())).await?;
+        // 多个管理员同一分钟到点时只查一次库
+        let snapshot = match &all_users {
+            Some(v) => v,
+            None => {
+                all_users = Some(user_repo::list_all(&ctx.pool).await?);
+                all_users.as_ref().expect("刚刚赋值")
+            }
+        };
+        let text = scheduled_all_usages_text(&now.format("%m-%d %H:%M").to_string(), snapshot);
+        if let Err(e) = send_html(ctx, prefs.chat_id, &text, Some(admin_overview_keyboard())).await
+        {
+            warn!(chat_id = prefs.chat_id, error = %e, "管理员定时汇总发送失败，跳过");
+            continue;
+        }
         for item in due {
             dates.insert(item, today.clone());
         }
-        tg_repo::set_admin_last_schedule_dates(
+        if let Err(e) = tg_repo::set_admin_last_schedule_dates(
             &ctx.pool,
             prefs.chat_id,
             &serde_json::to_string(&dates)?,
         )
-        .await?;
+        .await
+        {
+            warn!(chat_id = prefs.chat_id, error = %e, "记录管理员汇总日期失败");
+        }
     }
 
     Ok(())
@@ -1222,7 +1258,10 @@ async fn handle_quota_alert(ctx: &TgContext, username: &str, percent: u8) -> Res
             pct_f = pct_f,
             reset = h(&reset_label(user.reset_day)),
         );
-        send_html(ctx, user.tg_chat_id, &text, Some(user_alert_keyboard())).await?;
+        // 用户侧发送失败不应吞掉管理员通知，也不应阻止档位落库（否则每轮重试）
+        if let Err(e) = send_html(ctx, user.tg_chat_id, &text, Some(user_alert_keyboard())).await {
+            warn!(user = %user.name, error = %e, "阈值告警推送给用户失败");
+        }
     }
 
     let admins = tg_repo::list_admin_prefs(&ctx.pool, &ctx.cfg.telegram.admin_chat_ids).await?;
@@ -1239,7 +1278,10 @@ async fn handle_quota_alert(ctx: &TgContext, username: &str, percent: u8) -> Res
             quota = h(&quota_label(user.quota_gb)),
             remain = h(&remaining_label(&user)),
         );
-        send_html(ctx, admin.chat_id, &text, Some(admin_overview_keyboard())).await?;
+        if let Err(e) = send_html(ctx, admin.chat_id, &text, Some(admin_overview_keyboard())).await
+        {
+            warn!(chat_id = admin.chat_id, error = %e, "阈值告警推送给管理员失败");
+        }
     }
 
     user_repo::set_tg_last_quota_level(&ctx.pool, &user.name, i64::from(level)).await?;
@@ -1260,7 +1302,10 @@ async fn build_export_payloads(
     )
     .await?;
     let links = crate::service::sub_service::generate_links(&cfg_json, &user.name, &addrs)?;
-    let plain_links = links.iter().map(|item| item.link.clone()).collect::<Vec<_>>();
+    let plain_links = links
+        .iter()
+        .map(|item| item.link.clone())
+        .collect::<Vec<_>>();
     let base64 = crate::service::sub_service::generate_subscription(&links);
     let url = if !ctx.cfg.subscription.public_base.trim().is_empty() && !user.sub_token.is_empty() {
         Some(format!(
@@ -1875,7 +1920,11 @@ async fn send_long_code_text(
             None
         };
         let text = if idx == 0 {
-            format!("{title}\n\n<code>{body}</code>", title = title_html, body = h(chunk))
+            format!(
+                "{title}\n\n<code>{body}</code>",
+                title = title_html,
+                body = h(chunk)
+            )
         } else {
             format!("<code>{}</code>", h(chunk))
         };

@@ -1,10 +1,11 @@
 # singbox-manager
 
-面向 sing-box 的**轻量 CLI + TUI 管理工具**（Rust）。不做 Web，不做平台，只干四件事：节点搭建 / 用户管理 / 流量统计 / 订阅导出。
+面向 sing-box 的**轻量 CLI + TUI 管理工具**（Rust）。不做 Web，不做平台，只干五件事：节点搭建 / 用户管理 / 流量统计 / 订阅导出 / Telegram 通知。
 
 - **单机/小规模** 一台机一人管，别装一堆东西
 - **静态 musl 二进制** ~10 MB，不依赖 glibc 版本
 - **内核管理内置** 在 TUI 里一键装官方 sing-box 或带 `with_v2ray_api` 的自编译版
+- **Telegram Bot 内置** 用户自助查流量/订阅，管理员远程管账号
 
 ---
 
@@ -124,6 +125,20 @@ sb token revoke alice                           # 撤销 token（关闭订阅，
 
 其中 mihomo 等客户端用自己的 UA 拉订阅会自动拿到 yaml，不必手写 `?type=`；显式参数优先级最高。
 
+> token 走 URL 路径，会留在 nginx access log 里。生产环境建议对 `/sub/` 关掉 access_log，或用
+> `log_format` 把路径脱敏。
+
+### Telegram 绑定码
+
+```bash
+sb bind list                                    # 所有用户的绑定状态一览
+sb bind show alice                              # 单个用户的绑定状态 / 当前绑定码
+sb bind regen alice                             # 生成（或重置）绑定码，旧码立即失效
+sb bind unbind alice                            # 解除已建立的绑定
+```
+
+**绑定码是一次性的**：用户 `/bind <码>` 成功后立即作废，需要再绑必须重新 `sb bind regen`。
+
 ### 节点
 
 ```bash
@@ -153,6 +168,8 @@ sb kernel uninstall
 sb doctor                           # 一键自检部署状态
 ```
 
+装完会自动探测一次 gRPC 统计接口：装官方版时会明确提示"流量统计不可用"，不用等到发现流量一直是 0。
+
 ### nginx 反代
 
 ```bash
@@ -175,11 +192,84 @@ sb doctor                           # 检查 config / db / gRPC / v2ray_api / �
 
 `sb doctor` 会输出 `OK / WARN / ERR` 三类结果，重点检查：
 - `config.toml` / `config.json` 是否存在且可解析
-- 数据库是否可读写
+- 数据库是否可读写、**结构版本是否跟得上当前二进制**
 - sing-box 二进制路径、`sing-box check`、gRPC 连通性
 - `experimental.v2ray_api` 是否启用且地址匹配
 - TLS 引用的证书/私钥文件是否存在
 - 订阅配置和 nginx `-t` 是否正常
+
+---
+
+## Telegram Bot
+
+内置的 TG bot 让用户自助查流量/取订阅、管理员远程管账号，不必登服务器。**daemon 与 TUI 模式都会启动它**。
+
+### 配置
+
+1. 找 [@BotFather](https://t.me/BotFather) 建 bot 拿 token
+2. 找 [@userinfobot](https://t.me/userinfobot) 拿自己的 chat_id（管理员用）
+3. 填 `config.toml`：
+
+```toml
+[telegram]
+enabled        = true
+bot_token      = "123456:ABC-DEF..."
+admin_chat_ids = [123456789]          # 管理员 chat_id，可多个
+timezone       = "Asia/Shanghai"      # 见下方"时区"说明
+```
+
+4. `systemctl restart sb-manager`
+
+### 让用户绑定
+
+```bash
+sb bind regen alice          # 生成绑定码
+```
+
+把输出的 `/bind <码>` 发给用户，他在 bot 里发一次即可。**绑定码一次性**，用过即废；泄露了直接 `sb bind regen` 换一个。也可以在 bot 的管理员面板里点「用户列表 → 某用户 → TG 绑定」完成同样操作。
+
+### 命令与面板
+
+| 命令 | 谁能用 | 作用 |
+|---|---|---|
+| `/start` | 所有人 | 主菜单：已绑定→个人面板，管理员→管理面板 |
+| `/bind <绑定码>` | 持码者 | 绑定账号 |
+| `/usage` | 已绑定用户 | 我的流量 |
+| `/usages` | 仅管理员 | 全部用户流量汇总 |
+
+**用户面板**（按钮）：我的流量 / 我的订阅（URL、Base64、明文节点）/ 刷新流量（实时拉一次 gRPC）/ 通知设置（80%、90%、100% 三档阈值开关 + 定时播报时间）
+
+**管理员面板**：用户概览（总数/启用/停用/超额/到期/已绑定/整体流量）、全部用户流量、用户列表（点进去可查流量、导订阅、管绑定、刷新）、管理员通知设置
+
+### 通知
+
+- **阈值告警**：用量到 80% / 90% / 100% 各推一次，只升不重发；月重置后自动复位，下个周期可再触发
+- **定时播报**：用户和管理员各自可设时间（默认 `09:00` / `21:30`），按 `[telegram].timezone` 计时
+
+### 时区
+
+支持 `±HH:MM` 偏移和**无夏令时**的 IANA 名（`Asia/Shanghai`、`Asia/Tokyo`、`Australia/Brisbane` 等）。
+有夏令时的时区（`Europe/London`、`America/New_York` …）**会被故意拒绝**并回落 `+08:00` 且打 warn——固定偏移在 DST 期间会偏 1 小时，静默算错比明确拒绝更糟。这类时区请直接填偏移量，如 `+00:00` / `-05:00`。
+
+### 完整配置项
+
+```toml
+[telegram]
+enabled                 = false
+bot_token               = ""
+timezone                = "Asia/Shanghai"
+admin_chat_ids          = []
+poll_interval_secs      = 2       # 无更新时的轮询间隔（getUpdates 本身是 25s long-poll）
+request_timeout_secs    = 10
+default_notify_quota_80 = true    # 新建用户的默认阈值开关
+default_notify_quota_90 = true
+default_notify_quota_100 = true
+default_schedule_enabled = true
+default_schedule_times  = ["09:00", "21:30"]
+admin_notify_quota      = true    # 管理员默认收阈值告警
+admin_schedule_enabled  = true
+admin_schedule_times    = ["09:00", "21:30"]
+```
 
 ---
 
@@ -210,6 +300,7 @@ sb doctor                           # 检查 config / db / gRPC / v2ray_api / �
 - 发版前至少跑一次 `cargo fmt --all -- --check`
 - 确认 `cargo build --locked`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all` 都通过
 - 部署机上跑一次 `sb doctor`，比单独看 `sb status` 更容易发现缺失证书、gRPC 不通、`v2ray_api` 没开这类问题
+- 升级二进制后记得 `systemctl restart sb-manager`：数据库迁移是启动时跑的，不重启的话 `sb doctor` 会报"结构版本落后"
 
 ---
 
@@ -294,6 +385,9 @@ sb kernel uninstall
 | `/etc/sing-box/bin/sb` | sb-manager 主二进制 |
 | `/etc/sing-box/manager/config.toml` | sb-manager 配置 |
 | `/etc/sing-box/manager/manager.db` | SQLite 数据（用户、流量历史） |
+| `/etc/sing-box/manager/nodes.meta.json` | 节点导出元数据（reality 公钥、SS 密码、端口复用、IPv6 偏好） |
+| `/etc/sing-box/certs/` | 各节点的自签证书 |
+| `/etc/sing-box/backup/` | 备份归档 |
 | `/etc/systemd/system/sb-manager.service` | systemd unit |
 | `/etc/profile.d/sb-manager.sh` | 清 stale alias |
 | `/etc/sing-box/bin/sing-box` | sing-box 内核二进制 |
@@ -315,7 +409,7 @@ path = "/etc/sing-box/manager/manager.db"
 
 [stats]
 sync_interval_secs  = 30    # 流量同步间隔
-quota_alert_percent = 80    # 用户用量到达此百分比触发告警
+quota_alert_percent = 80    # 告警首档；另外两档固定 90 / 100
 
 [kernel]
 # TUI 内核页「安装 v2ray_api 版」从此仓库 release 拉取
@@ -326,8 +420,18 @@ update_repo = "why1f/singbox-manager"
 enabled     = true
 listen      = "127.0.0.1:18081"           # 订阅 HTTP 监听（nginx 反代上游）
 public_base = ""                          # 例: "https://sub.example.com"；填了才能拼对外订阅 URL
+# 订阅里节点的 server 是否跟随 public_base 主机；默认 false，直接导出公网 IP
+use_public_base_as_server = false
 nginx_conf  = "/etc/nginx/conf.d/sb-manager.conf"
+
+# Telegram Bot（可选），见上方「Telegram Bot」章节
+[telegram]
+enabled   = false
+bot_token = ""
+admin_chat_ids = []
 ```
+
+`grpc_addr` 改了之后不必手工改 `config.json`——下一次用户同步会自动把 `experimental.v2ray_api.listen` 对齐过去。
 
 ---
 
@@ -337,24 +441,43 @@ nginx_conf  = "/etc/nginx/conf.d/sb-manager.conf"
 ┌──────────┐        ┌──────────┐        ┌─────────────┐
 │   TUI    │◄──────►│ sb-mgr   │◄──gRPC►│  sing-box   │
 │  (你)    │ UiEvent│ (daemon) │ 18080  │ +v2ray_api  │
-└──────────┘        └──┬────┬──┘        └─────────────┘
-                       │    │ sqlx
-                       │    ▼
-                       │  ┌──────────┐
-                       │  │  SQLite  │ 用户、流量历史
-                       │  └──────────┘
-                       │ HTTP 18081
-                       ▼
-                   ┌──────────┐      ┌──────────┐
-                   │ 订阅服务 │◄─反代│   nginx  │◄── 客户端拉订阅
-                   └──────────┘      └──────────┘
+└──────────┘        └─┬──┬──┬──┘        └─────────────┘
+                      │  │  │ sqlx
+                      │  │  ▼
+                      │  │ ┌──────────┐
+                      │  │ │  SQLite  │ 用户、流量历史
+                      │  │ └──────────┘
+                      │  │ HTTP 18081
+                      │  ▼
+                      │ ┌──────────┐      ┌──────────┐
+                      │ │ 订阅服务 │◄─反代│   nginx  │◄── 客户端拉订阅
+                      │ └──────────┘      └──────────┘
+                      │ long-poll
+                      ▼
+                  ┌──────────┐
+                  │ TG Bot   │◄── 用户查流量 / 管理员管账号
+                  └──────────┘
 ```
 
 - TUI 是客户端，一切改动走 `service/` 层写 SQLite + 重写 `/etc/sing-box/config.json`，然后 `systemctl reload sing-box`
+- 配置落盘是 **写 `.tmp` → `sing-box check` 预校验 → 原子 rename**，坏配置永远不会覆盖主路径；跨进程用 SQLite `BEGIN IMMEDIATE` 当写锁串行化
 - `sb daemon` 后台每 30 s 通过 gRPC 拉 sing-box 的用户流量统计，算增量写库；每分钟跑一次"到期禁用 / 月重置 / 超额禁用"
-- 掉线指数退避重连，上限 60 s
+- 掉线指数退避重连，上限 60 s；**gRPC 断开期间自动控制照常执行**，恢复后补同步配置
+- 收到 SIGTERM / Ctrl-C 会**先把内存里的流量增量落库再退出**，`systemctl stop` 不丢最后一个同步周期的数据
 - 订阅 HTTP 服务按 token 分发 sing-box / mihomo 订阅，**token 轮换**即可踢掉旧 URL
 - 各协议订阅链接由 `service/sub_service.rs` 按 inbound 实际字段生成：自签证书自动带 `insecure=1`，reality/acme 不带；每个协议的字段与 sing-box schema 对齐
+
+### 启用 / 禁用的两种来源
+
+`enabled` 之外还有一个 `auto_disabled` 标记，用来区分谁把用户停掉的：
+
+| 场景 | auto_disabled | 月重置日会否自动解封 |
+|---|---|---|
+| 超额被系统禁用 | 1 | ✅ 会 |
+| 到期被系统禁用 | 1 | ❌ 不会（到期判断优先） |
+| `sb off` / TUI `[t]` 手动停用 | 0 | ❌ 不会 |
+
+手动 `sb reset` 清零流量时，**只有超额自动禁用的用户**会立即恢复可用。
 
 ---
 

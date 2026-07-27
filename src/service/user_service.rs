@@ -68,6 +68,7 @@ pub async fn add_user(
         tg_schedule_times: "[]".into(),
         tg_last_quota_level: 0,
         tg_last_schedule_dates: "{}".into(),
+        auto_disabled: false,
     };
     user_repo::insert(pool, &user).await?;
     Ok(user)
@@ -145,10 +146,43 @@ pub async fn toggle_user(pool: &SqlitePool, name: &str) -> Result<bool> {
 
 pub async fn reset_traffic(pool: &SqlitePool, name: &str) -> Result<()> {
     // 手动重置：不写 last_reset_ym，避免污染本月定期重置的去重标记
+    let user = user_repo::get(pool, name)
+        .await?
+        .ok_or_else(|| anyhow!("用户不存在: {}", name))?;
+    user_repo::reset_usage_manual(pool, name).await?;
+    // 因超额被系统自动禁用的用户，清零后应立即恢复可用——否则要等到下个重置日。
+    // 管理员手动停用的（auto_disabled=false）不动。
+    if !user.enabled && user.auto_disabled {
+        user_repo::set_enabled_auto(pool, name, true).await?;
+    }
+    Ok(())
+}
+
+/// TG 绑定码：重新生成（旧码立即失效，已绑定的 chat 不受影响）。
+pub async fn regen_tg_bind_token(pool: &SqlitePool, name: &str) -> Result<String> {
     if user_repo::get(pool, name).await?.is_none() {
         return Err(anyhow!("用户不存在: {}", name));
     }
-    user_repo::reset_usage_manual(pool, name).await
+    let token = new_tg_bind_token();
+    user_repo::set_tg_bind_token(pool, name, &token).await?;
+    Ok(token)
+}
+
+/// 解除该用户的 TG 绑定，返回被解绑的 chat_id（原本未绑定时返回 None）。
+pub async fn unbind_tg(pool: &SqlitePool, name: &str) -> Result<Option<i64>> {
+    let user = user_repo::get(pool, name)
+        .await?
+        .ok_or_else(|| anyhow!("用户不存在: {}", name))?;
+    if !user.tg_is_bound() {
+        return Ok(None);
+    }
+    user_repo::set_tg_binding(pool, name, 0).await?;
+    Ok(Some(user.tg_chat_id))
+}
+
+/// 绑定成功后作废绑定码：绑定码是一次性的，避免泄露后被重放抢绑。
+pub async fn consume_tg_bind_token(pool: &SqlitePool, name: &str) -> Result<()> {
+    user_repo::set_tg_bind_token(pool, name, "").await
 }
 
 pub async fn update_package(
@@ -238,7 +272,6 @@ pub async fn grant_all_nodes(pool: &SqlitePool, name: &str) -> Result<()> {
 }
 
 /// 直接设置允许列表（覆盖式）
-#[allow(dead_code)]
 pub async fn set_allowed_tags(pool: &SqlitePool, name: &str, tags: &[String]) -> Result<()> {
     if user_repo::get(pool, name).await?.is_none() {
         return Err(anyhow!("用户不存在: {}", name));
@@ -271,7 +304,7 @@ pub async fn apply_automatic_controls(pool: &SqlitePool) -> Result<Vec<String>> 
     let mut changed = Vec::new();
     for user in &users {
         if user.is_expired() && user.enabled {
-            user_repo::set_enabled(pool, &user.name, false).await?;
+            user_repo::set_enabled_auto(pool, &user.name, false).await?;
             changed.push(format!("{}(到期禁用)", user.name));
             continue;
         }
@@ -282,14 +315,18 @@ pub async fn apply_automatic_controls(pool: &SqlitePool) -> Result<Vec<String>> 
         };
         if eff > 0 && day == eff && user.last_reset_ym != ym {
             user_repo::reset_usage(pool, &user.name).await?;
-            // 同时恢复启用：超额被禁的用户在重置日应自动解封
-            // 注意：到期禁用的用户已在上面 continue 跳过，不会在这里被错误恢复
-            user_repo::set_enabled(pool, &user.name, true).await?;
-            changed.push(format!("{}(月重置)", user.name));
+            // 只解封"系统自动禁用"的用户（超额），管理员手动停用的保持停用。
+            // 到期禁用的用户已在上面 continue 跳过，不会走到这里。
+            if !user.enabled && user.auto_disabled {
+                user_repo::set_enabled_auto(pool, &user.name, true).await?;
+                changed.push(format!("{}(月重置+解封)", user.name));
+            } else {
+                changed.push(format!("{}(月重置)", user.name));
+            }
             continue; // 跳过本轮超额检查，流量刚清零不应立刻再被禁
         }
         if user.is_over_quota() && user.enabled {
-            user_repo::set_enabled(pool, &user.name, false).await?;
+            user_repo::set_enabled_auto(pool, &user.name, false).await?;
             changed.push(format!("{}(超额禁用)", user.name));
         }
     }
@@ -359,9 +396,11 @@ fn last_day_of_month(d: chrono::NaiveDate) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        delete_user, last_day_of_month, reset_traffic, update_package, validate_expire,
+        add_user, apply_automatic_controls, consume_tg_bind_token, delete_user, last_day_of_month,
+        regen_tg_bind_token, reset_traffic, unbind_tg, update_package, validate_expire,
         validate_multiplier, validate_quota, validate_reset_day,
     };
+    use crate::db::user_repo;
     use chrono::NaiveDate;
     use std::path::PathBuf;
     use uuid::Uuid;
@@ -420,5 +459,110 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("用户不存在"));
+    }
+
+    /// 管理员手动停用的用户，在重置日不能被自动解封。
+    #[tokio::test]
+    async fn monthly_reset_does_not_revive_manually_disabled_user() {
+        let pool = temp_pool().await;
+        let today = chrono::Local::now().date_naive();
+        let reset_day = chrono::Datelike::day(&today) as i64;
+
+        add_user(&pool, "manual", 10.0, reset_day, "", 1.0)
+            .await
+            .unwrap();
+        add_user(&pool, "overquota", 10.0, reset_day, "", 1.0)
+            .await
+            .unwrap();
+
+        // manual：管理员手动停用（set_enabled 会清 auto_disabled）
+        user_repo::set_enabled(&pool, "manual", false)
+            .await
+            .unwrap();
+        // overquota：系统因超额自动停用
+        user_repo::set_enabled_auto(&pool, "overquota", false)
+            .await
+            .unwrap();
+
+        apply_automatic_controls(&pool).await.unwrap();
+
+        let manual = user_repo::get(&pool, "manual").await.unwrap().unwrap();
+        let auto = user_repo::get(&pool, "overquota").await.unwrap().unwrap();
+        assert!(!manual.enabled, "手动停用的用户不应被月重置解封");
+        assert!(auto.enabled, "超额自动停用的用户应在月重置日解封");
+    }
+
+    /// 手动清零流量后，超额被自动禁用的用户应立刻恢复；手动停用的保持停用。
+    #[tokio::test]
+    async fn manual_reset_revives_only_auto_disabled_user() {
+        let pool = temp_pool().await;
+        add_user(&pool, "auto", 1.0, 0, "", 1.0).await.unwrap();
+        add_user(&pool, "manual", 1.0, 0, "", 1.0).await.unwrap();
+        user_repo::set_enabled_auto(&pool, "auto", false)
+            .await
+            .unwrap();
+        user_repo::set_enabled(&pool, "manual", false)
+            .await
+            .unwrap();
+
+        reset_traffic(&pool, "auto").await.unwrap();
+        reset_traffic(&pool, "manual").await.unwrap();
+
+        assert!(
+            user_repo::get(&pool, "auto")
+                .await
+                .unwrap()
+                .unwrap()
+                .enabled
+        );
+        assert!(
+            !user_repo::get(&pool, "manual")
+                .await
+                .unwrap()
+                .unwrap()
+                .enabled
+        );
+    }
+
+    /// 绑定码一次性：核销后查不到，重生成后是新码。
+    #[tokio::test]
+    async fn bind_token_is_single_use_and_regenerable() {
+        let pool = temp_pool().await;
+        let user = add_user(&pool, "alice", 0.0, 0, "", 1.0).await.unwrap();
+        let original = user.tg_bind_token.clone();
+        assert!(!original.is_empty());
+        assert!(user_repo::find_by_tg_bind_token(&pool, &original)
+            .await
+            .unwrap()
+            .is_some());
+
+        consume_tg_bind_token(&pool, "alice").await.unwrap();
+        assert!(
+            user_repo::find_by_tg_bind_token(&pool, &original)
+                .await
+                .unwrap()
+                .is_none(),
+            "核销后旧码不应还能用来绑定"
+        );
+
+        let fresh = regen_tg_bind_token(&pool, "alice").await.unwrap();
+        assert_ne!(fresh, original);
+        assert!(user_repo::find_by_tg_bind_token(&pool, &fresh)
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn unbind_reports_previous_chat_and_is_idempotent() {
+        let pool = temp_pool().await;
+        add_user(&pool, "alice", 0.0, 0, "", 1.0).await.unwrap();
+        assert_eq!(unbind_tg(&pool, "alice").await.unwrap(), None);
+
+        user_repo::set_tg_binding(&pool, "alice", 12345)
+            .await
+            .unwrap();
+        assert_eq!(unbind_tg(&pool, "alice").await.unwrap(), Some(12345));
+        assert_eq!(unbind_tg(&pool, "alice").await.unwrap(), None);
     }
 }
