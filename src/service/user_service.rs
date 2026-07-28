@@ -105,11 +105,16 @@ pub async fn ensure_sub_tokens(pool: &SqlitePool) -> Result<usize> {
     Ok(count)
 }
 
+/// 给还没有绑定码、且**尚未绑定**的用户补发一个。
+///
+/// 关键是"尚未绑定"这个条件：绑定成功后 `tg_bind_token` 会被核销为空串，
+/// 如果这里不加判断，下一次 daemon/TUI 启动就会给已绑定用户重新生成一个可用的码——
+/// 等于给每个账号常备一把能把绑定抢走的钥匙，一次性绑定码就白做了。
 pub async fn ensure_tg_bind_tokens(pool: &SqlitePool) -> Result<usize> {
     let users = user_repo::list_all(pool).await?;
     let mut count = 0;
     for u in &users {
-        if u.tg_bind_token.is_empty() {
+        if u.tg_bind_token.is_empty() && !u.tg_is_bound() {
             let t = new_tg_bind_token();
             user_repo::set_tg_bind_token(pool, &u.name, &t).await?;
             count += 1;
@@ -396,9 +401,9 @@ fn last_day_of_month(d: chrono::NaiveDate) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        add_user, apply_automatic_controls, consume_tg_bind_token, delete_user, last_day_of_month,
-        regen_tg_bind_token, reset_traffic, unbind_tg, update_package, validate_expire,
-        validate_multiplier, validate_quota, validate_reset_day,
+        add_user, apply_automatic_controls, consume_tg_bind_token, delete_user,
+        ensure_tg_bind_tokens, last_day_of_month, regen_tg_bind_token, reset_traffic, unbind_tg,
+        update_package, validate_expire, validate_multiplier, validate_quota, validate_reset_day,
     };
     use crate::db::user_repo;
     use chrono::NaiveDate;
@@ -564,5 +569,36 @@ mod tests {
             .unwrap();
         assert_eq!(unbind_tg(&pool, "alice").await.unwrap(), Some(12345));
         assert_eq!(unbind_tg(&pool, "alice").await.unwrap(), None);
+    }
+
+    /// 补发绑定码只针对**未绑定**的用户。
+    /// 已绑定用户的空 token 是"绑定码已核销"的正常状态，
+    /// 给它补一个新码等于常备一把能把绑定抢走的钥匙。
+    #[tokio::test]
+    async fn backfill_skips_already_bound_users() {
+        let pool = temp_pool().await;
+        add_user(&pool, "bound", 0.0, 0, "", 1.0).await.unwrap();
+        add_user(&pool, "unbound", 0.0, 0, "", 1.0).await.unwrap();
+
+        // bound：完成绑定并核销绑定码
+        user_repo::set_tg_binding(&pool, "bound", 777)
+            .await
+            .unwrap();
+        consume_tg_bind_token(&pool, "bound").await.unwrap();
+        // unbound：模拟老库里没有绑定码
+        user_repo::set_tg_bind_token(&pool, "unbound", "")
+            .await
+            .unwrap();
+
+        let filled = ensure_tg_bind_tokens(&pool).await.unwrap();
+        assert_eq!(filled, 1, "只该给未绑定的那个补发");
+
+        let bound = user_repo::get(&pool, "bound").await.unwrap().unwrap();
+        assert!(
+            bound.tg_bind_token.is_empty(),
+            "已绑定用户的绑定码不该被复活"
+        );
+        let unbound = user_repo::get(&pool, "unbound").await.unwrap().unwrap();
+        assert!(!unbound.tg_bind_token.is_empty(), "未绑定用户应补到绑定码");
     }
 }

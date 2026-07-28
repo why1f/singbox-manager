@@ -17,6 +17,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/004_traffic_multiplier.sql"),
     include_str!("migrations/005_telegram.sql"),
     include_str!("migrations/006_auto_disabled.sql"),
+    include_str!("migrations/007_tg_bot_lease.sql"),
 ];
 
 /// 当前程序期望的 schema 版本（= 迁移脚本数量），供 doctor 比对实际库版本。
@@ -96,7 +97,11 @@ async fn migrate(url: &str) -> Result<()> {
             .await?;
         tx.commit().await?;
     }
-    conn.close().await?;
+    // 迁移本身已提交，关闭连接失败无关紧要（连接 drop 时也会释放），
+    // 不该因此让整个 init_pool 失败。
+    if let Err(e) = conn.close().await {
+        tracing::warn!(error = %e, "关闭迁移连接失败（迁移已提交，可忽略）");
+    }
     Ok(())
 }
 

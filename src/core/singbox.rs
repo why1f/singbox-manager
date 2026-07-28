@@ -258,15 +258,28 @@ pub async fn install_latest() -> Result<()> {
 /// 官方 release 的 sing-box **不带 `with_v2ray_api` 编译标签**，装完能跑代理但
 /// 流量统计永远不工作，且安装本身是"成功"的——不主动探一次，用户要等到发现
 /// 流量一直是 0 才会去 `sb doctor`。返回 Some(提示) 表示有问题。
+///
+/// 整体有硬上限：端口开着但不响应时，单次 connect 会一直等到超时，
+/// 逐次重试叠加起来足够让"安装中"卡住半分钟。
 pub async fn probe_v2ray_api(grpc_addr: &str) -> Option<String> {
-    // 内核刚 restart，给它几秒把 gRPC 端口挂起来
-    for attempt in 0..6u32 {
-        if attempt > 0 {
-            tokio::time::sleep(Duration::from_millis(800)).await;
+    const PROBE_BUDGET: Duration = Duration::from_secs(8);
+    let ok = tokio::time::timeout(PROBE_BUDGET, async {
+        // 内核刚 restart，给它几秒把 gRPC 端口挂起来
+        for attempt in 0..6u32 {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_millis(800)).await;
+            }
+            if crate::core::grpc::connect(grpc_addr).await.is_ok() {
+                return true;
+            }
         }
-        if crate::core::grpc::connect(grpc_addr).await.is_ok() {
-            return None;
-        }
+        false
+    })
+    .await
+    .unwrap_or(false);
+
+    if ok {
+        return None;
     }
     Some(format!(
         "已安装，但 gRPC 统计接口 {} 连不上：\

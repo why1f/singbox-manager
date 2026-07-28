@@ -1,6 +1,9 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
@@ -29,18 +32,28 @@ struct TgContext {
     client: Client,
     offset: FixedOffset,
     pending_inputs: Arc<Mutex<HashMap<i64, PendingInput>>>,
+    /// bot 租约标识（`<pid>@<模式>`），用于续租和日志
+    lease_owner: String,
+    /// 租约还在自己手上。失去租约后各个循环据此自行退出，
+    /// 避免两个实例同时往用户那儿推消息。
+    active: Arc<AtomicBool>,
 }
+
+impl TgContext {
+    fn is_active(&self) -> bool {
+        self.active.load(Ordering::Relaxed)
+    }
+}
+
+/// 租约多久没心跳就算失效，可被其他实例接管。
+/// 取值要明显大于心跳周期，避免 GC 卡顿之类的抖动导致误抢。
+const LEASE_STALE_SECS: i64 = 90;
+const LEASE_HEARTBEAT: Duration = Duration::from_secs(25);
 
 #[derive(Clone)]
 enum PendingInput {
     UserSchedule { username: String },
     AdminSchedule,
-}
-
-#[derive(Debug, Deserialize)]
-struct TgResponse<T> {
-    ok: bool,
-    result: T,
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,12 +87,37 @@ struct TgCallbackQuery {
     message: Option<TgMessage>,
 }
 
-pub async fn start(pool: SqlitePool, cfg: Arc<AppConfig>) -> Result<mpsc::Sender<TgEvent>> {
+/// 启动 Telegram Bot。
+///
+/// `mode` 只用于日志和租约标识（"daemon" / "tui"）。
+///
+/// 返回 `Ok(None)` 表示**另一个实例已经在跑 bot**，本次主动跳过——这不是错误：
+/// 同一个 bot_token 只允许一个 getUpdates 长轮询，两个进程一起轮询时 Telegram
+/// 会对其中一个返回 409，双方都会随机丢 update。
+pub async fn start(
+    pool: SqlitePool,
+    cfg: Arc<AppConfig>,
+    mode: &str,
+) -> Result<Option<mpsc::Sender<TgEvent>>> {
     if !cfg.telegram.enabled {
         anyhow::bail!("telegram 未启用");
     }
     if cfg.telegram.bot_token.trim().is_empty() {
         anyhow::bail!("telegram.bot_token 为空");
+    }
+
+    let lease_owner = format!("{}@{}", std::process::id(), mode);
+    if !tg_repo::try_acquire_bot_lease(&pool, &lease_owner, LEASE_STALE_SECS).await? {
+        let holder = tg_repo::bot_lease_holder(&pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "未知进程".into());
+        tracing::info!(
+            holder = %holder,
+            "另一个进程已在运行 Telegram Bot，本进程跳过（同一 bot_token 只能有一个长轮询）"
+        );
+        return Ok(None);
     }
 
     let client = Client::builder()
@@ -101,6 +139,8 @@ pub async fn start(pool: SqlitePool, cfg: Arc<AppConfig>) -> Result<mpsc::Sender
         client,
         offset,
         pending_inputs: Arc::new(Mutex::new(HashMap::new())),
+        lease_owner,
+        active: Arc::new(AtomicBool::new(true)),
     };
     ensure_admin_defaults(&ctx).await?;
     // 注册 BotFather 命令菜单（输入框左下角的 / 快捷键）。失败仅 warn，
@@ -113,6 +153,9 @@ pub async fn start(pool: SqlitePool, cfg: Arc<AppConfig>) -> Result<mpsc::Sender
         let ctx = ctx.clone();
         tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
+                if !ctx.is_active() {
+                    continue;
+                }
                 match event {
                     TgEvent::QuotaAlert { username, percent } => {
                         if let Err(e) = handle_quota_alert(&ctx, &username, percent).await {
@@ -138,7 +181,40 @@ pub async fn start(pool: SqlitePool, cfg: Arc<AppConfig>) -> Result<mpsc::Sender
         });
     }
 
-    Ok(tx)
+    {
+        let ctx = ctx.clone();
+        tokio::spawn(async move {
+            lease_heartbeat_loop(ctx).await;
+        });
+    }
+
+    Ok(Some(tx))
+}
+
+/// 定期续租。续不上说明租约被别人接管（通常是本进程曾长时间卡住），
+/// 此时把自己标记为非活跃，其余循环会各自退出，避免两个实例同时推消息。
+async fn lease_heartbeat_loop(ctx: TgContext) {
+    let mut iv = tokio::time::interval(LEASE_HEARTBEAT);
+    iv.tick().await;
+    loop {
+        iv.tick().await;
+        if !ctx.is_active() {
+            return;
+        }
+        match tg_repo::renew_bot_lease(&ctx.pool, &ctx.lease_owner).await {
+            Ok(true) => {}
+            Ok(false) => {
+                warn!(
+                    owner = %ctx.lease_owner,
+                    "Telegram Bot 租约已被其他进程接管，本实例停止工作"
+                );
+                ctx.active.store(false, Ordering::Relaxed);
+                return;
+            }
+            // 续租失败多半是 DB 临时忙，保持活跃等下一轮；租约超时前还有余量
+            Err(e) => warn!(error = %e, "续租 Telegram Bot 失败，稍后重试"),
+        }
+    }
 }
 
 async fn ensure_admin_defaults(ctx: &TgContext) -> Result<()> {
@@ -180,6 +256,10 @@ async fn poll_updates_loop(ctx: TgContext) {
     let update_timeout_secs = (ctx.cfg.telegram.request_timeout_secs.max(3) * 3).max(30);
     let update_slots = Arc::new(Semaphore::new(8));
     loop {
+        if !ctx.is_active() {
+            tracing::info!("Telegram Bot 已失去租约，停止轮询");
+            return;
+        }
         match get_updates(&ctx, offset).await {
             Ok(updates) => {
                 backoff_secs = 1;
@@ -219,6 +299,17 @@ async fn poll_updates_loop(ctx: TgContext) {
                     tokio::time::sleep(Duration::from_secs(normal_secs)).await;
                 }
             }
+            Err(e) if is_conflict_error(&e) => {
+                // 409 = 另一处也在对同一个 bot_token 跑 getUpdates。租约本该挡住同机
+                // 多开，走到这里通常是另一台机器/另一份部署共用了同一个 token。
+                // 继续轮询只会两边互相抢 update，不如停下并给出明确指引。
+                tracing::error!(
+                    "Telegram 返回 409 Conflict：同一个 bot_token 在别处也在轮询。\
+                     请确认没有第二处部署（或本地调试进程）使用同一个 token；本实例已停止轮询"
+                );
+                ctx.active.store(false, Ordering::Relaxed);
+                return;
+            }
             Err(e) => {
                 warn!(
                     error = %e,
@@ -230,6 +321,12 @@ async fn poll_updates_loop(ctx: TgContext) {
             }
         }
     }
+}
+
+/// 识别 Telegram 的 409 Conflict（多处同时 getUpdates）。
+fn is_conflict_error(e: &anyhow::Error) -> bool {
+    let msg = e.to_string();
+    msg.contains("error_code: 409") || msg.contains("Conflict: terminated by other")
 }
 
 async fn get_updates(ctx: &TgContext, offset: i64) -> Result<Vec<TgUpdate>> {
@@ -247,11 +344,25 @@ async fn get_updates(ctx: &TgContext, offset: i64) -> Result<Vec<TgUpdate>> {
         .send()
         .await
         .context("请求 Telegram getUpdates 失败")?;
-    let data: TgResponse<Vec<TgUpdate>> = resp.json().await.context("解析 getUpdates 失败")?;
-    if !data.ok {
-        anyhow::bail!("Telegram getUpdates 返回 ok=false");
+    // 先按 Value 读：ok=false 时响应里没有 result 字段，直接 deserialize 成
+    // TgResponse<Vec<TgUpdate>> 会退化成"解析失败"，把 409 这类明确错误盖掉。
+    let value: Value = resp.json().await.context("解析 getUpdates 响应失败")?;
+    if value.get("ok").and_then(Value::as_bool) != Some(true) {
+        let code = value
+            .get("error_code")
+            .and_then(Value::as_i64)
+            .unwrap_or_default();
+        let desc = value
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("无描述");
+        anyhow::bail!("Telegram getUpdates 失败 (error_code: {}): {}", code, desc);
     }
-    Ok(data.result)
+    let result = value
+        .get("result")
+        .cloned()
+        .ok_or_else(|| anyhow!("Telegram getUpdates 响应缺少 result"))?;
+    serde_json::from_value(result).context("解析 getUpdates 的 result 失败")
 }
 
 async fn handle_update(ctx: &TgContext, update: TgUpdate) -> Result<()> {
@@ -1112,6 +1223,9 @@ async fn schedule_loop(ctx: TgContext) {
     let mut iv = tokio::time::interval(Duration::from_secs(30));
     loop {
         iv.tick().await;
+        if !ctx.is_active() {
+            return;
+        }
         if let Err(e) = normalize_quota_levels(&ctx).await {
             warn!("刷新 Telegram 阈值状态失败: {}", e);
         }
@@ -2265,5 +2379,61 @@ mod tests {
         assert_eq!(h("\"'"), "\"'");
         // 用户名里夹 HTML 标签会被打散成字面量
         assert_eq!(h("<script>x</script>"), "&lt;script&gt;x&lt;/script&gt;");
+    }
+
+    #[test]
+    fn conflict_error_is_recognised() {
+        let e = anyhow::anyhow!(
+            "Telegram getUpdates 失败 (error_code: 409): Conflict: terminated by other getUpdates request"
+        );
+        assert!(super::is_conflict_error(&e));
+        let other = anyhow::anyhow!("Telegram getUpdates 失败 (error_code: 401): Unauthorized");
+        assert!(!super::is_conflict_error(&other));
+    }
+
+    /// 租约必须是互斥的：第二个实例拿不到，持有者可以续，
+    /// 心跳过期后才允许接管。
+    #[tokio::test]
+    async fn bot_lease_is_mutually_exclusive() {
+        use crate::db::tg_repo;
+        let path = std::env::temp_dir().join(format!("sbm-lease-{}.db", uuid::Uuid::new_v4()));
+        let pool = crate::db::init_pool(path.to_string_lossy().as_ref())
+            .await
+            .unwrap();
+
+        assert!(tg_repo::try_acquire_bot_lease(&pool, "1@daemon", 90)
+            .await
+            .unwrap());
+        // 第二个进程抢不到
+        assert!(!tg_repo::try_acquire_bot_lease(&pool, "2@tui", 90)
+            .await
+            .unwrap());
+        // 持有者可重入 + 续租
+        assert!(tg_repo::try_acquire_bot_lease(&pool, "1@daemon", 90)
+            .await
+            .unwrap());
+        assert!(tg_repo::renew_bot_lease(&pool, "1@daemon").await.unwrap());
+        // 非持有者续不了
+        assert!(!tg_repo::renew_bot_lease(&pool, "2@tui").await.unwrap());
+        assert_eq!(
+            tg_repo::bot_lease_holder(&pool).await.unwrap().as_deref(),
+            Some("1@daemon")
+        );
+
+        // 模拟持有者进程已死：把心跳改成 10 分钟前，其他实例即可接管。
+        // 直接改库而不是 sleep，测试才能既确定又快。
+        sqlx::query("UPDATE tg_bot_lease SET heartbeat = datetime('now', '-10 minutes')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(tg_repo::try_acquire_bot_lease(&pool, "2@tui", 90)
+            .await
+            .unwrap());
+        assert_eq!(
+            tg_repo::bot_lease_holder(&pool).await.unwrap().as_deref(),
+            Some("2@tui")
+        );
+        // 被接管后原持有者续租失败，据此停掉自己的 bot
+        assert!(!tg_repo::renew_bot_lease(&pool, "1@daemon").await.unwrap());
     }
 }

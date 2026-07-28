@@ -169,7 +169,10 @@ fn load_or_init_config(path: &Path, allow_create: bool) -> Result<AppConfig> {
     } else if allow_create {
         let d = AppConfig::default();
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).ok();
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("创建配置目录 {} 失败", parent.display()))?;
+            }
         }
         std::fs::write(path, toml::to_string_pretty(&d)?)
             .with_context(|| format!("写入默认配置 {} 失败", path.display()))?;
@@ -209,20 +212,7 @@ async fn run_daemon(pool: sqlx::SqlitePool, cfg: AppConfig) -> Result<()> {
         });
     }
 
-    let tg_tx = if cfg.telegram.enabled {
-        match service::tg_service::start(pool.clone(), cfg.clone()).await {
-            Ok(tx) => {
-                tracing::info!("Telegram Bot 已启动");
-                Some(tx)
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "Telegram Bot 启动失败");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let tg_tx = start_telegram(&pool, &cfg, "daemon").await;
 
     let (tx, mut rx) = mpsc::channel::<TrafficEvent>(128);
 
@@ -276,6 +266,32 @@ async fn run_daemon(pool: sqlx::SqlitePool, cfg: AppConfig) -> Result<()> {
     shutdown_flush(&pool, &cfg).await;
     pool.close().await;
     Ok(())
+}
+
+/// 启动 Telegram Bot（daemon / TUI 共用）。
+///
+/// 返回 None 的三种情况都不该让调用方失败：没开启、启动出错、
+/// 或者另一个进程已经持有 bot 租约（daemon 在跑时又开了 TUI 就属于这种）。
+async fn start_telegram(
+    pool: &sqlx::SqlitePool,
+    cfg: &std::sync::Arc<AppConfig>,
+    mode: &str,
+) -> Option<mpsc::Sender<service::tg_service::TgEvent>> {
+    if !cfg.telegram.enabled {
+        return None;
+    }
+    match service::tg_service::start(pool.clone(), cfg.clone(), mode).await {
+        Ok(Some(tx)) => {
+            tracing::info!(mode, "Telegram Bot 已启动");
+            Some(tx)
+        }
+        // 另一个实例持有租约，tg_service 内部已记录原因
+        Ok(None) => None,
+        Err(e) => {
+            tracing::error!(error = %e, mode, "Telegram Bot 启动失败");
+            None
+        }
+    }
 }
 
 /// 给老库补发订阅 token / TG 绑定码。失败只记日志——这是尽力而为的补数据，
@@ -414,12 +430,8 @@ async fn run_tui(pool: sqlx::SqlitePool, cfg: AppConfig) -> Result<()> {
 
     // Telegram Bot：与 daemon 模式一致。只跑 TUI 不跑 daemon 的部署里，
     // 不启动 bot 会让 TG 通知静默失效，看起来像故障。
-    if cfg.telegram.enabled {
-        match service::tg_service::start(pool.clone(), cfg.clone()).await {
-            Ok(_tx) => tracing::info!("Telegram Bot 已启动"),
-            Err(e) => tracing::warn!(error = %e, "Telegram Bot 启动失败"),
-        }
-    }
+    // daemon 已经在跑时会因为拿不到租约而跳过，不会两个实例抢同一个 token。
+    let tg_tx = start_telegram(&pool, &cfg, "tui").await;
 
     let users = service::user_service::list_users(&pool)
         .await
@@ -438,6 +450,32 @@ async fn run_tui(pool: sqlx::SqlitePool, cfg: AppConfig) -> Result<()> {
     app.singbox_running = proc.is_running();
 
     let (tx, rx) = mpsc::channel::<TrafficEvent>(128);
+
+    // bot 在本进程里跑时，把阈值告警复制一份给它——TUI 自己只负责显示，
+    // 不接这一段的话 TUI 模式下 TG 阈值提醒会完全收不到。
+    let rx = match tg_tx {
+        Some(tg) => {
+            let (ui_tx, ui_rx) = mpsc::channel::<TrafficEvent>(128);
+            let mut upstream = rx;
+            tokio::spawn(async move {
+                while let Some(event) = upstream.recv().await {
+                    if let TrafficEvent::QuotaAlert(name, percent) = &event {
+                        let _ = tg
+                            .send(service::tg_service::TgEvent::QuotaAlert {
+                                username: name.clone(),
+                                percent: *percent,
+                            })
+                            .await;
+                    }
+                    if ui_tx.send(event).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            ui_rx
+        }
+        None => rx,
+    };
 
     // 后台流量/重连任务（与 daemon 共用同一套逻辑）
     {
@@ -713,18 +751,15 @@ async fn run_node(cmd: cli::node::NodeCommands, cfg: &AppConfig) -> Result<()> {
                 port_reuse: args.port_reuse,
                 ipv6: args.ipv6,
             };
+            // 闭包要跑在阻塞线程池上，捕获的东西必须是 owned
+            let bin_for_keygen = cfg.singbox.binary_path.clone();
             let meta = service::runtime_service::mutate_config_locked(
                 &pool,
                 &cfg.singbox.config_path,
                 Some(&cfg.singbox.binary_path),
                 true,
-                |cfg_json, ops| {
-                    core::config::add_node(
-                        cfg_json,
-                        &req,
-                        Some(cfg.singbox.binary_path.as_str()),
-                        ops,
-                    )
+                move |cfg_json, ops| {
+                    core::config::add_node(cfg_json, &req, Some(bin_for_keygen.as_str()), ops)
                 },
             )
             .await?;
@@ -744,12 +779,13 @@ async fn run_node(cmd: cli::node::NodeCommands, cfg: &AppConfig) -> Result<()> {
         }
         NodeCommands::Edit(args) => {
             let pool = open_pool(cfg).await?;
+            let tag = args.tag.clone();
             service::runtime_service::mutate_config_locked(
                 &pool,
                 &cfg.singbox.config_path,
                 Some(&cfg.singbox.binary_path),
                 false,
-                |cfg_json, ops| {
+                move |cfg_json, ops| {
                     core::config::edit_node(
                         cfg_json,
                         &args.tag,
@@ -764,7 +800,7 @@ async fn run_node(cmd: cli::node::NodeCommands, cfg: &AppConfig) -> Result<()> {
             )
             .await?;
             service::runtime_service::validate_and_reload(&pool, cfg).await?;
-            println!("✓ 节点 '{}' 已更新", args.tag);
+            println!("✓ 节点 '{}' 已更新", tag);
         }
         NodeCommands::Del { tag } => {
             let pool = open_pool(cfg).await?;
@@ -773,7 +809,10 @@ async fn run_node(cmd: cli::node::NodeCommands, cfg: &AppConfig) -> Result<()> {
                 &cfg.singbox.config_path,
                 Some(&cfg.singbox.binary_path),
                 false,
-                |cfg_json, ops| Ok(core::config::remove_node(cfg_json, &tag, ops)),
+                {
+                    let tag = tag.clone();
+                    move |cfg_json, ops| Ok(core::config::remove_node(cfg_json, &tag, ops))
+                },
             )
             .await?;
             if !removed {

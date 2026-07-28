@@ -1408,17 +1408,21 @@ fn spawn_edit_node(
             &cfg.singbox.config_path,
             Some(&cfg.singbox.binary_path),
             false,
-            |cfg_json, ops| {
-                crate::core::config::edit_node(
-                    cfg_json,
-                    &tag,
-                    port,
-                    server_name,
-                    path,
-                    port_reuse,
-                    ipv6,
-                    ops,
-                )
+            {
+                // 闭包跑在阻塞线程池上，捕获必须 owned
+                let tag = tag.clone();
+                move |cfg_json, ops| {
+                    crate::core::config::edit_node(
+                        cfg_json,
+                        &tag,
+                        port,
+                        server_name,
+                        path,
+                        port_reuse,
+                        ipv6,
+                        ops,
+                    )
+                }
             },
         )
         .await
@@ -1837,13 +1841,16 @@ fn spawn_add_node(
             &cfg.singbox.config_path,
             Some(&cfg.singbox.binary_path),
             true,
-            |cfg_json, ops| {
-                crate::core::config::add_node(
-                    cfg_json,
-                    &req,
-                    Some(cfg.singbox.binary_path.as_str()),
-                    ops,
-                )
+            {
+                let bin_for_keygen = cfg.singbox.binary_path.clone();
+                move |cfg_json, ops| {
+                    crate::core::config::add_node(
+                        cfg_json,
+                        &req,
+                        Some(bin_for_keygen.as_str()),
+                        ops,
+                    )
+                }
             },
         )
         .await
@@ -1907,7 +1914,10 @@ fn spawn_delete_node(
             &cfg.singbox.config_path,
             Some(&cfg.singbox.binary_path),
             false,
-            |cfg_json, ops| Ok(crate::core::config::remove_node(cfg_json, &tag, ops)),
+            {
+                let tag = tag.clone();
+                move |cfg_json, ops| Ok(crate::core::config::remove_node(cfg_json, &tag, ops))
+            },
         )
         .await
         {

@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
-use sqlx::{pool::PoolConnection, Sqlite, SqlitePool};
+use sqlx::{Sqlite, SqliteConnection, SqlitePool, Transaction};
 use tracing::warn;
 
 use crate::{
@@ -18,50 +18,65 @@ use crate::{
 /// 跨进程写锁：用 SQLite `BEGIN IMMEDIATE` 把 CLI / daemon / TUI 三类进程对
 /// config.json 的"读 → 改 → 写"串行化。
 ///
-/// 未显式 commit/rollback 就被 drop（future 被取消、panic 等）时，Drop 里同步
-/// 发一次 ROLLBACK 兜底——否则带着未结事务的连接会回到池里，后续复用者会在
-/// 残留事务中执行语句，或长期占着 IMMEDIATE 锁把别的进程堵死。
+/// 底层是 sqlx 的 `Transaction`（经 `begin_with` 指定 `BEGIN IMMEDIATE`）而不是
+/// 裸执行 BEGIN：sqlx 的事务对象在 drop 时会把连接标记为需要回滚再还池，
+/// future 被取消或 panic 时不会留下"带着未结事务的连接被下一个使用者复用"的隐患。
 pub struct RuntimeLock {
-    conn: Option<PoolConnection<Sqlite>>,
+    tx: Option<Transaction<'static, Sqlite>>,
 }
 
 impl RuntimeLock {
     pub async fn acquire(pool: &SqlitePool) -> Result<Self> {
-        let mut conn = pool.acquire().await?;
-        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
-        Ok(Self { conn: Some(conn) })
+        // IMMEDIATE 而非默认的 DEFERRED：写锁必须在读之前就拿到，
+        // 否则两个进程都读完再升级写锁时会撞上 SQLITE_BUSY 死锁。
+        let tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+        Ok(Self { tx: Some(tx) })
     }
 
-    pub fn conn(&mut self) -> &mut PoolConnection<Sqlite> {
-        self.conn
+    pub fn conn(&mut self) -> &mut SqliteConnection {
+        self.tx
             .as_mut()
             .expect("RuntimeLock 在 commit/rollback 之后不应再被使用")
     }
 
     pub async fn commit(mut self) -> Result<()> {
-        if let Some(mut conn) = self.conn.take() {
-            sqlx::query("COMMIT").execute(&mut *conn).await?;
+        if let Some(tx) = self.tx.take() {
+            tx.commit().await?;
         }
         Ok(())
     }
 
     pub async fn rollback(mut self) {
-        if let Some(mut conn) = self.conn.take() {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.rollback().await;
         }
     }
 }
 
 impl Drop for RuntimeLock {
     fn drop(&mut self) {
-        // 仍持有连接 = 既没 commit 也没 rollback，说明是取消/panic 路径。
-        // 这里只能同步收尾：sqlx 的 SqliteConnection 在 drop 时会关闭底层连接，
-        // 未提交事务由 SQLite 自动回滚；显式丢弃可以让它尽快发生。
-        if let Some(conn) = self.conn.take() {
+        if self.tx.is_some() {
+            // 既没 commit 也没 rollback = 取消或 panic 路径。
+            // Transaction 自己的 Drop 会安排回滚，这里只记一笔便于排查。
             warn!("RuntimeLock 未显式结束事务即被丢弃（任务取消或 panic），事务将回滚");
-            drop(conn);
         }
     }
+}
+
+/// 在阻塞线程池上跑一段会 fork 子进程的同步逻辑。
+///
+/// `systemctl` / `sing-box check` / `openssl` 这类调用都必须走这里：
+/// tokio 只配了 2 个 worker，在 async 上下文里同步等子进程会把 UI 渲染和
+/// 后台流量同步一起卡住；这些调用又常常发生在持有跨进程写锁期间，
+/// 阻塞时间直接转化成别的进程拿锁失败。
+async fn blocking<T, F>(what: &'static str, f: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| anyhow!("{}任务异常终止: {}", what, e))?
 }
 
 pub async fn mutate_config_locked<T, F>(
@@ -72,22 +87,45 @@ pub async fn mutate_config_locked<T, F>(
     mutate: F,
 ) -> Result<T>
 where
-    F: FnOnce(&mut Value, &mut Vec<MetaOp>) -> Result<T>,
+    F: FnOnce(&mut Value, &mut Vec<MetaOp>) -> Result<T> + Send + 'static,
+    T: Send + 'static,
 {
     let lock = RuntimeLock::acquire(pool).await?;
-    let mut meta_ops: Vec<MetaOp> = Vec::new();
-    let result = (|| -> Result<T> {
-        let mut config_json = if Path::new(config_path).exists() {
-            config::load(config_path)?
-        } else if create_if_missing {
-            json!({ "inbounds": [], "outbounds": [] })
-        } else {
-            return Err(anyhow!("config.json 不存在"));
-        };
-        let out = mutate(&mut config_json, &mut meta_ops)?;
-        save_with_optional_validate(config_path, binary_path, &config_json)?;
-        Ok(out)
-    })();
+    let config_path_owned = config_path.to_string();
+    let binary_path_owned = binary_path.map(str::to_string);
+
+    // 整段"读 config → 改 → 写 tmp → sing-box check → rename"里既有磁盘 IO
+    // 又有子进程调用，全部挪到阻塞线程池，别占着 async worker。
+    let joined = tokio::task::spawn_blocking(move || {
+        let mut meta_ops: Vec<MetaOp> = Vec::new();
+        let out = (|| -> Result<T> {
+            let mut config_json = if Path::new(&config_path_owned).exists() {
+                config::load(&config_path_owned)?
+            } else if create_if_missing {
+                json!({ "inbounds": [], "outbounds": [] })
+            } else {
+                return Err(anyhow!("config.json 不存在"));
+            };
+            let out = mutate(&mut config_json, &mut meta_ops)?;
+            save_with_optional_validate(
+                &config_path_owned,
+                binary_path_owned.as_deref(),
+                &config_json,
+            )?;
+            Ok(out)
+        })();
+        (out, meta_ops)
+    })
+    .await;
+
+    let (result, meta_ops) = match joined {
+        Ok(v) => v,
+        Err(e) => {
+            lock.rollback().await;
+            return Err(anyhow!("配置写入任务异常终止: {}", e));
+        }
+    };
+
     match result {
         Ok(out) => {
             lock.commit().await?;
@@ -131,13 +169,32 @@ fn save_with_optional_validate(
 }
 
 pub async fn validate_and_reload(pool: &SqlitePool, cfg: &AppConfig) -> Result<()> {
-    let proc = SingboxProcess::new(&cfg.singbox.binary_path, &cfg.singbox.config_path);
-    proc.check_config()?;
-    if matches!(proc.is_running(), Some(true)) {
+    let bin = cfg.singbox.binary_path.clone();
+    let conf = cfg.singbox.config_path.clone();
+
+    {
+        let (bin, conf) = (bin.clone(), conf.clone());
+        blocking("sing-box 配置校验", move || {
+            SingboxProcess::new(&bin, &conf).check_config()
+        })
+        .await?;
+    }
+
+    let running = {
+        let (bin, conf) = (bin.clone(), conf.clone());
+        tokio::task::spawn_blocking(move || SingboxProcess::new(&bin, &conf).is_running())
+            .await
+            .unwrap_or(None)
+    };
+
+    if matches!(running, Some(true)) {
         if let Err(e) = flush_current_traffic(pool, &cfg.singbox.grpc_addr).await {
             warn!("reload 前预同步流量失败: {}", e);
         }
-        proc.reload()?;
+        blocking("sing-box reload", move || {
+            SingboxProcess::new(&bin, &conf).reload()
+        })
+        .await?;
     }
     Ok(())
 }
@@ -147,20 +204,31 @@ pub async fn apply_user_runtime_changes(pool: &SqlitePool, cfg: &AppConfig) -> R
         return Ok(());
     }
     let mut lock = RuntimeLock::acquire(pool).await?;
-    let result = async {
-        let mut config_json = config::load(&cfg.singbox.config_path)?;
-        let users = list_all_users(lock.conn()).await?;
-        config::sync_users(&mut config_json, &users, &cfg.singbox.grpc_addr);
-        // sync_users 不动 meta；走同样的"save .tmp + validate + rename"流程，
-        // 防止坏配置（理论上不会发生，但保险起见）覆盖主路径。
-        save_with_optional_validate(
-            &cfg.singbox.config_path,
-            Some(&cfg.singbox.binary_path),
-            &config_json,
-        )?;
-        Ok::<(), anyhow::Error>(())
-    }
+    let users = match list_all_users(lock.conn()).await {
+        Ok(users) => users,
+        Err(e) => {
+            lock.rollback().await;
+            return Err(e);
+        }
+    };
+
+    let config_path = cfg.singbox.config_path.clone();
+    let binary_path = cfg.singbox.binary_path.clone();
+    let grpc_addr = cfg.singbox.grpc_addr.clone();
+    // sync_users 不动 meta；走同样的"save .tmp + validate + rename"流程，
+    // 防止坏配置（理论上不会发生，但保险起见）覆盖主路径。
+    // 里面的 sing-box check 是子进程调用，放阻塞线程池执行。
+    let written = tokio::task::spawn_blocking(move || -> Result<()> {
+        let mut config_json = config::load(&config_path)?;
+        config::sync_users(&mut config_json, &users, &grpc_addr);
+        save_with_optional_validate(&config_path, Some(&binary_path), &config_json)
+    })
     .await;
+
+    let result = match written {
+        Ok(inner) => inner,
+        Err(e) => Err(anyhow!("同步用户配置任务异常终止: {}", e)),
+    };
     match result {
         Ok(()) => lock.commit().await?,
         Err(e) => {
@@ -208,7 +276,7 @@ async fn sync_current_traffic(
 }
 
 async fn sync_current_traffic_with_users_locked(
-    conn: &mut PoolConnection<Sqlite>,
+    conn: &mut SqliteConnection,
     snaps: &[crate::model::traffic::LiveTrafficSnapshot],
 ) -> Result<(Vec<User>, Vec<TrafficDelta>)> {
     let users = list_all_users(conn).await?;
@@ -224,23 +292,23 @@ async fn sync_current_traffic_with_users_locked(
             .bind(d.new_live_up)
             .bind(d.new_live_down)
             .bind(&d.username)
-            .execute(&mut **conn)
+            .execute(&mut *conn)
             .await?;
             sqlx::query("INSERT INTO traffic_history(username,up_bytes,down_bytes,recorded_at)VALUES(?,?,?,datetime('now'))")
                 .bind(&d.username)
                 .bind(d.delta_up)
                 .bind(d.delta_down)
-                .execute(&mut **conn)
+                .execute(&mut *conn)
                 .await?;
         }
     }
     Ok((users, deltas))
 }
 
-async fn list_all_users(conn: &mut PoolConnection<Sqlite>) -> Result<Vec<User>> {
+async fn list_all_users(conn: &mut SqliteConnection) -> Result<Vec<User>> {
     Ok(
         sqlx::query_as::<_, User>("SELECT * FROM users ORDER BY name")
-            .fetch_all(&mut **conn)
+            .fetch_all(&mut *conn)
             .await?,
     )
 }

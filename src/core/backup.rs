@@ -137,7 +137,53 @@ fn validate_backup_contents(backup_path: &Path) -> Result<()> {
             return Err(anyhow!("备份内包含不允许恢复的路径: {}", p));
         }
     }
+
+    reject_link_entries(backup_path)?;
     Ok(())
+}
+
+/// 拒绝含符号链接 / 硬链接的归档。
+///
+/// 上面的清单校验只看得到**条目名**：一个名字合规、但实际是指向 /etc/shadow 的
+/// 符号链接的条目照样能通过，解开后就在白名单目录里留下了一条通往外部的通道。
+///
+/// 这里只读 `tar tvzf` 每行开头的类型字符（`-` 普通文件 / `d` 目录 /
+/// `l` 符号链接 / `h` 硬链接）。权限位串的格式与语言环境无关，
+/// 比从冗长输出里反解文件名稳得多。
+fn reject_link_entries(backup_path: &Path) -> Result<()> {
+    let out = Command::new("tar")
+        .env("LC_ALL", "C")
+        .args(["tvzf"])
+        .arg(backup_path)
+        .output()?;
+    if !out.status.success() {
+        return Err(anyhow!("读取备份详细清单失败"));
+    }
+    let listing = String::from_utf8_lossy(&out.stdout);
+    for line in listing.lines().map(str::trim).filter(|s| !s.is_empty()) {
+        match entry_kind(line) {
+            Some('-') | Some('d') => {}
+            Some(other) => {
+                return Err(anyhow!(
+                "备份内包含非普通文件条目（类型 '{}'），可能借链接指向白名单之外，已拒绝恢复: {}",
+                other,
+                line
+            ))
+            }
+            None => return Err(anyhow!("无法识别的备份条目，已拒绝恢复: {}", line)),
+        }
+    }
+    Ok(())
+}
+
+/// 取 `tar tvzf` 行首权限串的类型字符。形如 `-rw-r--r-- root/root ...`。
+fn entry_kind(line: &str) -> Option<char> {
+    let mode = line.split_whitespace().next()?;
+    // 权限串固定 10 位（部分实现会在末尾追加 '+'/'.' 表示 ACL）
+    if mode.len() < 10 {
+        return None;
+    }
+    mode.chars().next()
 }
 
 fn normalize_path(raw: &str) -> Option<String> {
@@ -170,7 +216,7 @@ fn is_allowed_path(path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_allowed_path, normalize_path};
+    use super::{entry_kind, is_allowed_path, normalize_path};
 
     #[test]
     fn normalize_absolute_path() {
@@ -192,5 +238,31 @@ mod tests {
         assert!(is_allowed_path("/etc/sing-box/manager/config.toml"));
         assert!(is_allowed_path("/etc/sing-box/config.json"));
         assert!(!is_allowed_path("/etc/passwd"));
+    }
+
+    #[test]
+    fn entry_kind_reads_type_char() {
+        assert_eq!(
+            entry_kind("-rw-r--r-- root/root 1234 2026-01-01 12:00 /etc/sing-box/config.json"),
+            Some('-')
+        );
+        assert_eq!(
+            entry_kind("drwxr-xr-x root/root 0 2026-01-01 12:00 /etc/sing-box/manager/"),
+            Some('d')
+        );
+        // 符号链接必须被识别出来，随后整包拒绝
+        assert_eq!(
+            entry_kind(
+                "lrwxrwxrwx root/root 0 2026-01-01 12:00 /etc/sing-box/manager/x -> /etc/shadow"
+            ),
+            Some('l')
+        );
+        assert_eq!(
+            entry_kind("hrw-r--r-- root/root 0 2026-01-01 12:00 /etc/sing-box/manager/y link to /etc/shadow"),
+            Some('h')
+        );
+        // 认不出来的行一律当异常处理，宁可拒绝恢复
+        assert_eq!(entry_kind(""), None);
+        assert_eq!(entry_kind("garbage"), None);
     }
 }
