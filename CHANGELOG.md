@@ -1,5 +1,31 @@
 # CHANGELOG
 
+## v0.6.0
+
+### Added
+
+- **中转节点**：每个节点可选填「中转 IP/域名」+「中转端口」，填了之后**订阅里该节点的地址和端口换成中转机的**，SNI / 凭据 / 传输参数以及 sing-box `config.json` 都不变。适用于落地机线路差、前面挂一台中转机转发的场景。
+  ```bash
+  sb add-node hk -p vless-reality --port 4432 --relay-host relay.example.com --relay-port 12345
+  sb node edit hk --relay-host 203.0.113.9     # 只改地址，端口沿用节点端口
+  sb node edit hk --relay-host ""              # 关闭中转
+  ```
+  - TUI 添加/编辑节点表单新增两栏；节点列表新增「中转」列、节点摘要与仪表盘会标出 `→ 中转地址`；`sb nodes` 同样多一列。
+  - 中转地址填 IPv6 字面量时导出会自动补方括号。
+  - 只填端口不填地址会直接报错，不会静默丢弃。
+  - **转发本身需要在中转机上自行搭建**（iptables DNAT / socat / gost / realm 等），本工具只负责把订阅指向它。
+
+### Fixed
+
+- **`--ipv6` 对 6 种协议无效**：v0.4.18 引入的节点级 IPv6 导出，只在 `vless-reality` 和 `shadowsocks` 两个分支里写了 meta，其余 6 种协议（vless-ws / vmess-ws / trojan / hysteria2 / tuic / anytls）加了 `--ipv6` 会被静默丢掉。导出侧的 meta 现在统一在 `add_node` 里落盘。
+- **`sb nodes` 协议列不对齐**：`Protocol` 的 `Display` 实现直接 `write!` 内层字符串、不处理 formatter 的宽度，`{:<16}` 被忽略，协议名和端口会粘在一起。
+
+### Changed
+
+- `edit_node` 由 8 个位置参数改为接收 `EditNodeRequest` 结构体——同型参数（`server_name` / `path`）挨在一起太容易传反，加上中转后会到 10 个。
+- 订阅导出的地址与端口解析合并为单个 `resolve_endpoint`，顺带把每个节点两次 `nodes.meta.json` 读取减为一次。
+- 测试 69 → 77，新增覆盖：中转的地址/端口优先级、只填地址、IPv6 字面量、空白地址、整组覆盖与清除、以及"不传中转字段不应改动 meta"。
+
 ## v0.5.1
 
 修 v0.5.0 引入的三个问题，外加一轮并发与阻塞相关的加固。**建议 v0.5.0 用户直接升到本版**。

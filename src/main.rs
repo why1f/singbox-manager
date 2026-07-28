@@ -710,12 +710,25 @@ async fn run_node(cmd: cli::node::NodeCommands, cfg: &AppConfig) -> Result<()> {
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("config.json 不存在"))?;
             let ns = service::node_service::list_nodes(config);
-            println!("{:<22}{:<16}{:<8}{:<8}", "Tag", "协议", "端口", "用户数");
-            println!("{}", "─".repeat(56));
+            println!(
+                "{:<22}{:<16}{:<8}{:<8}中转",
+                "Tag", "协议", "端口", "用户数"
+            );
+            println!("{}", "─".repeat(76));
             for n in &ns {
+                let relay = core::config::get_node_meta(&n.tag)
+                    .and_then(|m| m.relay_label())
+                    .map(|l| format!("→ {}", l))
+                    .unwrap_or_else(|| "─".into());
+                // 先转成 String 再套宽度：Protocol 的 Display 直接 write! 内层字符串，
+                // 不处理 formatter 的 width，`{:<16}` 加在它身上会被忽略导致列错位
                 println!(
-                    "{:<22}{:<16}{:<8}{:<8}",
-                    n.tag, n.protocol, n.listen_port, n.user_count
+                    "{:<22}{:<16}{:<8}{:<8}{}",
+                    n.tag,
+                    n.protocol.to_string(),
+                    n.listen_port,
+                    n.user_count,
+                    relay
                 );
             }
         }
@@ -750,6 +763,10 @@ async fn run_node(cmd: cli::node::NodeCommands, cfg: &AppConfig) -> Result<()> {
                 path: args.path,
                 port_reuse: args.port_reuse,
                 ipv6: args.ipv6,
+                relay: model::node::RelaySetting {
+                    host: args.relay_host.unwrap_or_default(),
+                    port: args.relay_port,
+                },
             };
             // 闭包要跑在阻塞线程池上，捕获的东西必须是 owned
             let bin_for_keygen = cfg.singbox.binary_path.clone();
@@ -786,16 +803,21 @@ async fn run_node(cmd: cli::node::NodeCommands, cfg: &AppConfig) -> Result<()> {
                 Some(&cfg.singbox.binary_path),
                 false,
                 move |cfg_json, ops| {
-                    core::config::edit_node(
-                        cfg_json,
-                        &args.tag,
-                        args.port,
-                        args.server_name,
-                        args.path,
-                        args.port_reuse,
-                        args.ipv6,
-                        ops,
-                    )
+                    // relay_host 没给就不动中转设置；给了空串则关闭中转
+                    let relay = args.relay_host.as_ref().map(|h| model::node::RelaySetting {
+                        host: h.clone(),
+                        port: args.relay_port,
+                    });
+                    let req = model::node::EditNodeRequest {
+                        tag: args.tag.clone(),
+                        listen_port: args.port,
+                        server_name: args.server_name,
+                        path: args.path,
+                        port_reuse: args.port_reuse,
+                        ipv6: args.ipv6,
+                        relay,
+                    };
+                    core::config::edit_node(cfg_json, &req, ops)
                 },
             )
             .await?;

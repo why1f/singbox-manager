@@ -268,6 +268,15 @@ fn render_nodes(f: &mut Frame, area: Rect, s: &AppState) {
                     format!(" 用户 {}", n.user_count),
                     Style::default().fg(Color::Green),
                 ),
+                // 有中转时标出来：订阅里导出的其实是中转地址，
+                // 不标的话这一行的端口会跟客户端看到的对不上
+                Span::styled(
+                    match s.node_relay_label(&n.tag) {
+                        Some(label) => format!("  → 中转 {}", label),
+                        None => String::new(),
+                    },
+                    Style::default().fg(Color::Cyan),
+                ),
             ]));
         }
         if s.nodes.len() > 6 {

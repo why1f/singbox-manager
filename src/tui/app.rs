@@ -73,9 +73,9 @@ pub struct AppState {
     pub page: Page,
     pub users: Vec<User>,
     pub nodes: Vec<InboundNode>,
-    /// tag -> (端口复用, 订阅优先 IPv6)。渲染层查这张表，
+    /// tag -> NodeMeta。渲染层查这张表，
     /// 避免在每帧 draw 里读 nodes.meta.json（50ms 一帧 × 节点数次磁盘 IO）。
-    pub node_meta: std::collections::HashMap<String, (bool, bool)>,
+    pub node_meta: std::collections::HashMap<String, crate::core::config::NodeMeta>,
     pub singbox_running: Option<bool>,
     pub grpc_connected: bool,
     pub last_sync_time: Option<chrono::DateTime<chrono::Local>>,
@@ -151,21 +151,35 @@ impl AppState {
     }
     /// 节点是否开启了端口复用（查缓存，不读盘）
     pub fn node_port_reuse(&self, tag: &str) -> bool {
-        self.node_meta.get(tag).map(|m| m.0).unwrap_or(false)
+        self.node_meta
+            .get(tag)
+            .map(|m| m.port_reuse)
+            .unwrap_or(false)
     }
     /// 节点订阅是否优先导出 IPv6（查缓存，不读盘）
     pub fn node_ipv6(&self, tag: &str) -> bool {
-        self.node_meta.get(tag).map(|m| m.1).unwrap_or(false)
+        self.node_meta.get(tag).map(|m| m.ipv6).unwrap_or(false)
+    }
+    /// 中转摘要（`host` 或 `host:port`），未启用返回 None
+    pub fn node_relay_label(&self, tag: &str) -> Option<String> {
+        self.node_meta.get(tag).and_then(|m| m.relay_label())
+    }
+    /// 中转地址与端口的原始值，用于回填编辑表单
+    pub fn node_relay_fields(&self, tag: &str) -> (String, String) {
+        match self.node_meta.get(tag) {
+            Some(m) => (
+                m.relay_host.clone().unwrap_or_default(),
+                m.relay_port.map(|p| p.to_string()).unwrap_or_default(),
+            ),
+            None => (String::new(), String::new()),
+        }
     }
     /// 启动时同步读一次 meta 填充缓存；之后由 UiEvent::NodeMetaRefreshed 更新。
     pub fn reload_node_meta(&mut self) {
         self.node_meta = self
             .nodes
             .iter()
-            .filter_map(|n| {
-                crate::core::config::get_node_meta(&n.tag)
-                    .map(|m| (n.tag.clone(), (m.port_reuse, m.ipv6)))
-            })
+            .filter_map(|n| crate::core::config::get_node_meta(&n.tag).map(|m| (n.tag.clone(), m)))
             .collect();
     }
     pub fn push_log(&mut self, s: String) {

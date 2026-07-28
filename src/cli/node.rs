@@ -24,6 +24,12 @@ pub struct AddNodeArgs {
     /// 订阅导出时使用 IPv6 地址
     #[arg(long, default_value_t = false)]
     pub ipv6: bool,
+    /// 中转机 IP/域名：设了之后订阅里该节点的地址换成它（转发需中转机自己实现）
+    #[arg(long)]
+    pub relay_host: Option<String>,
+    /// 中转机端口，留空则沿用节点端口
+    #[arg(long)]
+    pub relay_port: Option<u16>,
 }
 
 #[derive(Args, Debug)]
@@ -39,6 +45,12 @@ pub struct EditNodeArgs {
     pub port_reuse: Option<bool>,
     #[arg(long)]
     pub ipv6: Option<bool>,
+    /// 中转机 IP/域名；传空串 `--relay-host ""` 即关闭中转
+    #[arg(long)]
+    pub relay_host: Option<String>,
+    /// 中转机端口，留空则沿用节点端口
+    #[arg(long)]
+    pub relay_port: Option<u16>,
 }
 
 #[derive(Subcommand, Debug)]

@@ -30,6 +30,8 @@ pub enum NodeField {
     Path,
     PortReuse,
     Ipv6,
+    RelayHost,
+    RelayPort,
 }
 
 /// 需要 TLS SNI 的协议（inbound tls.server_name 生效）。
@@ -62,6 +64,9 @@ fn add_fields(protocol: &str) -> Vec<NodeField> {
         v.push(NodeField::PortReuse);
     }
     v.push(NodeField::Ipv6);
+    // 中转对所有协议都适用：只换订阅里导出的落点，不碰 inbound
+    v.push(NodeField::RelayHost);
+    v.push(NodeField::RelayPort);
     v
 }
 
@@ -77,6 +82,8 @@ fn edit_fields(protocol: &str) -> Vec<NodeField> {
         v.push(NodeField::PortReuse);
     }
     v.push(NodeField::Ipv6);
+    v.push(NodeField::RelayHost);
+    v.push(NodeField::RelayPort);
     v
 }
 
@@ -109,6 +116,10 @@ pub struct NodeForm {
     pub path: String,
     pub port_reuse: bool,
     pub ipv6: bool,
+    /// 中转机地址；空 = 不启用中转
+    pub relay_host: String,
+    /// 中转机端口；留空则沿用节点端口
+    pub relay_port: String,
     pub focus: usize,
     pub error: Option<String>,
 }
@@ -157,6 +168,8 @@ pub struct NodeEditForm {
     pub path: String,
     pub port_reuse: bool, // 端口复用：开启时订阅 URL 的端口固定 443
     pub ipv6: bool,
+    pub relay_host: String,
+    pub relay_port: String,
     pub focus: usize,
     pub error: Option<String>,
 }
@@ -194,6 +207,7 @@ pub enum ModalAction {
         path: Option<String>,
         port_reuse: bool,
         ipv6: bool,
+        relay: crate::model::node::RelaySetting,
     },
     SubmitNodeEdit {
         tag: String,
@@ -202,6 +216,7 @@ pub enum ModalAction {
         path: Option<String>,
         port_reuse: Option<bool>,
         ipv6: Option<bool>,
+        relay: crate::model::node::RelaySetting,
     },
     DeleteUser(String),
     DeleteNode(String),
@@ -386,6 +401,35 @@ fn user_edit_field(f: &mut UserEditForm) -> &mut String {
     }
 }
 
+/// 解析表单里的中转设置。地址留空即关闭中转；端口留空表示沿用节点端口。
+/// 返回 Err 时是给用户看的报错文案。
+fn parse_relay(host_raw: &str, port_raw: &str) -> Result<crate::model::node::RelaySetting, String> {
+    let host = host_raw.trim();
+    let port_s = port_raw.trim();
+    if host.is_empty() {
+        // 只填端口没填地址属于填了一半，明确报错而不是静默丢弃
+        if !port_s.is_empty() {
+            return Err("填了中转端口就必须填中转 IP/域名".into());
+        }
+        return Ok(crate::model::node::RelaySetting::default());
+    }
+    if host.len() > 64 || host.chars().any(|c| c.is_whitespace()) {
+        return Err("中转 IP/域名不合法（不能含空格，长度 ≤64）".into());
+    }
+    let port = if port_s.is_empty() {
+        None
+    } else {
+        match port_s.parse::<u16>() {
+            Ok(v) if v > 0 => Some(v),
+            _ => return Err("中转端口需为 1-65535".into()),
+        }
+    };
+    Ok(crate::model::node::RelaySetting {
+        host: host.to_string(),
+        port,
+    })
+}
+
 fn handle_node_edit(f: &mut NodeEditForm, k: KeyEvent) -> ModalAction {
     let fields = edit_fields(&f.protocol);
     let n = fields.len().max(1);
@@ -441,6 +485,13 @@ fn handle_node_edit(f: &mut NodeEditForm, k: KeyEvent) -> ModalAction {
             } else {
                 None
             };
+            let relay = match parse_relay(&f.relay_host, &f.relay_port) {
+                Ok(r) => r,
+                Err(msg) => {
+                    f.error = Some(msg);
+                    return ModalAction::None;
+                }
+            };
             ModalAction::SubmitNodeEdit {
                 tag: f.tag.clone(),
                 port,
@@ -448,6 +499,7 @@ fn handle_node_edit(f: &mut NodeEditForm, k: KeyEvent) -> ModalAction {
                 path: pa,
                 port_reuse: pr,
                 ipv6: Some(f.ipv6),
+                relay,
             }
         }
         KeyCode::Backspace
@@ -475,6 +527,8 @@ fn node_edit_field_mut(f: &mut NodeEditForm, which: Option<NodeField>) -> Option
         NodeField::Port => Some(&mut f.port),
         NodeField::ServerName => Some(&mut f.server_name),
         NodeField::Path => Some(&mut f.path),
+        NodeField::RelayHost => Some(&mut f.relay_host),
+        NodeField::RelayPort => Some(&mut f.relay_port),
         _ => None,
     }
 }
@@ -688,6 +742,13 @@ fn handle_node(f: &mut NodeForm, k: KeyEvent) -> ModalAction {
                 None
             };
             let reuse = protocol_supports_port_reuse(&protocol) && f.port_reuse;
+            let relay = match parse_relay(&f.relay_host, &f.relay_port) {
+                Ok(r) => r,
+                Err(msg) => {
+                    f.error = Some(msg);
+                    return ModalAction::None;
+                }
+            };
             ModalAction::SubmitNode {
                 tag,
                 protocol,
@@ -696,6 +757,7 @@ fn handle_node(f: &mut NodeForm, k: KeyEvent) -> ModalAction {
                 path,
                 port_reuse: reuse,
                 ipv6: f.ipv6,
+                relay,
             }
         }
         KeyCode::Backspace
@@ -730,6 +792,8 @@ fn node_field_mut(f: &mut NodeForm, which: NodeField) -> Option<&mut String> {
         NodeField::Port => Some(&mut f.port),
         NodeField::ServerName => Some(&mut f.server_name),
         NodeField::Path => Some(&mut f.path),
+        NodeField::RelayHost => Some(&mut f.relay_host),
+        NodeField::RelayPort => Some(&mut f.relay_port),
         NodeField::Protocol | NodeField::PortReuse | NodeField::Ipv6 => None,
     }
 }
@@ -909,6 +973,8 @@ fn render_node(f: &mut Frame, area: Rect, form: &NodeForm) {
                 "订阅优先 IPv6 (Space/←→ 切换)",
                 format!("◀ {} ▶", if form.ipv6 { "开" } else { "关" }),
             ),
+            NodeField::RelayHost => ("中转 IP/域名 (留空=不中转)", form.relay_host.clone()),
+            NodeField::RelayPort => ("中转端口 (留空=同节点端口)", form.relay_port.clone()),
         };
         let style = if i == form.focus {
             Style::default().fg(Color::Black).bg(Color::Cyan)

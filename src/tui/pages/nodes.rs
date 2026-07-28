@@ -12,13 +12,15 @@ pub fn render(f: &mut Frame, area: Rect, s: &AppState) {
         .direction(ratatui::layout::Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(4)])
         .split(area);
-    let hdr = Row::new(["Tag", "协议", "端口", "用户数", "端口复用", ""].map(|h| {
-        Cell::from(h).style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )
-    }));
+    let hdr = Row::new(
+        ["Tag", "协议", "端口", "用户数", "端口复用", "中转", ""].map(|h| {
+            Cell::from(h).style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
+        }),
+    );
     let rows: Vec<Row> = s
         .nodes
         .iter()
@@ -43,12 +45,21 @@ pub fn render(f: &mut Frame, area: Rect, s: &AppState) {
             } else {
                 Cell::from("─ 不支持")
             };
+            // 中转：订阅里该节点的落点被换成这个地址，直接把它显示出来，
+            // 免得管理员对着"端口对不上"发懵
+            let relay_cell = match s.node_relay_label(&n.tag) {
+                Some(label) => {
+                    Cell::from(format!("→ {}", label)).style(Style::default().fg(Color::Cyan))
+                }
+                None => Cell::from("─"),
+            };
             Row::new(vec![
                 Cell::from(n.tag.clone()),
                 Cell::from(proto),
                 Cell::from(n.listen_port.to_string()),
                 Cell::from(n.user_count.to_string()),
                 reuse_cell,
+                relay_cell,
                 Cell::from(""),
             ])
             .style(style)
@@ -63,6 +74,7 @@ pub fn render(f: &mut Frame, area: Rect, s: &AppState) {
                 Constraint::Length(8),  // 端口
                 Constraint::Length(8),  // 用户数
                 Constraint::Length(12), // 端口复用
+                Constraint::Length(26), // 中转
                 Constraint::Min(0),     // 占位留白
             ],
         )
@@ -85,9 +97,13 @@ pub fn render(f: &mut Frame, area: Rect, s: &AppState) {
             } else {
                 ""
             };
+            let relay_part = match s.node_relay_label(&n.tag) {
+                Some(label) => format!("  中转: {} (订阅按此地址导出)", label),
+                None => String::new(),
+            };
             format!(
-                "  选中: {}  协议: {}  端口: {}{}",
-                n.tag, n.protocol, port_part, ipv6_part
+                "  选中: {}  协议: {}  端口: {}{}{}",
+                n.tag, n.protocol, port_part, ipv6_part, relay_part
             )
         })
         .unwrap_or_else(|| "  (无节点)".into());

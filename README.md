@@ -156,6 +156,28 @@ sb export alice                                 # Base64 订阅 + 明文链接
 - `vless-ws` / `vmess-ws`：`--path`
 - `hysteria2` / `shadowsocks`：只要 `--port`（多填会被忽略）
 
+### 中转节点
+
+落地机线路不好时，可以在前面挂一台中转机做转发。给节点填上中转地址后，**订阅里该节点的地址和端口会换成中转机的**，其余参数（SNI、凭据、传输方式）保持不变：
+
+```bash
+sb add-node hk -p vless-reality --port 4432 --relay-host relay.example.com --relay-port 12345
+sb node edit hk --relay-host 203.0.113.9          # 只改地址，端口沿用节点端口
+sb node edit hk --relay-host ""                   # 关闭中转，恢复导出本机地址
+```
+
+TUI 的添加/编辑节点表单里对应「中转 IP/域名」和「中转端口」两栏，节点列表和仪表盘都会标出 `→ 中转地址`。
+
+| | 未设中转 | 设了中转 |
+|---|---|---|
+| 订阅里的 server | 本机公网 IP（或 `public_base` 主机） | 中转机地址 |
+| 订阅里的 port | 节点端口（端口复用时为 443） | 中转端口，留空则同左 |
+| SNI / 凭据 / 传输 | — | 不变 |
+| sing-box `config.json` | — | 不变 |
+
+> **转发本身要你自己在中转机上搭**（iptables DNAT、socat、gost、realm 等均可）。本工具只负责把订阅指向中转机，不涉及转发的实现与部署。
+> 中转地址是 IPv6 字面量时直接填 `2001:db8::1`，导出时会自动补方括号。
+
 ### sing-box 内核
 
 ```bash
@@ -293,7 +315,7 @@ admin_schedule_times    = ["09:00", "21:30"]
 
 **用户页**：`[a]` 添加 `[E]` 编辑 `[d]` 删除 `[t]` 启禁 `[r]` 重置流量 `[T]` token 管理（生成 / 撤销）`[u]` 复制订阅 URL `[s]` 打印订阅链接 `[n]` 分配可用节点
 
-**节点页**：`[a]` 添加 `[E]` 编辑 `[d]` 删除（弹窗表单按当前协议显示字段：reality/trojan/tuic/anytls 多一行 `server_name`；vless-ws/vmess-ws 多一行 `path`；hysteria2/shadowsocks 只要端口；reality/trojan/anytls 编辑时还多一个"端口复用"开关）
+**节点页**：`[a]` 添加 `[E]` 编辑 `[d]` 删除（弹窗表单按当前协议显示字段：reality/trojan/tuic/anytls 多一行 `server_name`；vless-ws/vmess-ws 多一行 `path`；hysteria2/shadowsocks 只要端口；reality/trojan/anytls 编辑时还多一个"端口复用"开关；所有协议都有"订阅优先 IPv6"和"中转 IP/域名 + 中转端口"两组可选项）。列表里 `中转` 一列会显示 `→ 地址:端口`。
 
 **内核页**：`[i]` 装官方 `[v]` 装 v2ray_api 版 `[u]` 卸载 `[s/S/x]` 启/停/重启 `[e/d]` 开/关自启
 

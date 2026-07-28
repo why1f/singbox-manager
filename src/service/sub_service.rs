@@ -1,6 +1,7 @@
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::Value;
+use std::borrow::Cow;
 
 use super::node_service::ServerAddresses;
 
@@ -23,11 +24,11 @@ pub fn generate_links(
     for ib in inbounds {
         let tag = ib["tag"].as_str().unwrap_or("");
         let typ = ib["type"].as_str().unwrap_or("");
-        let port = effective_port(ib, tag);
         let Some(user) = find_user(ib, username) else {
             continue;
         };
-        let server = super::node_service::pick_server(addrs, tag);
+        let (server, port) = export_endpoint(ib, tag, addrs);
+        let server = server.as_ref();
         let link = match typ {
             "vless" => {
                 if ib["tls"]["reality"]["enabled"].as_bool() == Some(true) {
@@ -57,17 +58,45 @@ pub fn generate_links(
     Ok(links)
 }
 
-/// 订阅 URL 里用的端口：端口复用节点回 443，否则读 inbound.listen_port
-fn effective_port(ib: &Value, tag: &str) -> u64 {
-    let raw = ib["listen_port"].as_u64().unwrap_or(0);
-    if crate::core::config::get_node_meta(tag)
-        .map(|m| m.port_reuse)
-        .unwrap_or(false)
-    {
-        443
-    } else {
-        raw
+/// 订阅里对外暴露的 (地址, 端口)。
+///
+/// 优先级：
+/// - 地址：中转机地址 > 按节点的 IPv6 偏好选公网地址
+/// - 端口：中转机端口 > 端口复用固定 443 > inbound.listen_port
+///
+/// 中转只换订阅里的落点，SNI / 凭据 / 传输参数都不变——客户端连中转机，
+/// 由中转机把流量转到本机的 listen_port。
+fn export_endpoint<'a>(ib: &Value, tag: &str, addrs: &'a ServerAddresses) -> (Cow<'a, str>, u64) {
+    let meta = crate::core::config::get_node_meta(tag).unwrap_or_default();
+    resolve_endpoint(ib["listen_port"].as_u64().unwrap_or(0), &meta, addrs)
+}
+
+/// export_endpoint 的纯逻辑部分：不读盘，便于单测覆盖各种组合。
+fn resolve_endpoint<'a>(
+    listen_port: u64,
+    meta: &crate::core::config::NodeMeta,
+    addrs: &'a ServerAddresses,
+) -> (Cow<'a, str>, u64) {
+    let own_port = if meta.port_reuse { 443 } else { listen_port };
+    let port = meta.relay_port.map(u64::from).unwrap_or(own_port);
+    let host = match relay_host(meta) {
+        Some(h) => Cow::Owned(h),
+        None => Cow::Borrowed(if meta.ipv6 {
+            addrs.ipv6.as_str()
+        } else {
+            addrs.ipv4.as_str()
+        }),
+    };
+    (host, port)
+}
+
+/// 取中转地址并规范化（IPv6 字面量补方括号，否则拼进 URL 是非法的）。
+fn relay_host(meta: &crate::core::config::NodeMeta) -> Option<String> {
+    let raw = meta.relay_host.as_deref()?.trim();
+    if raw.is_empty() {
+        return None;
     }
+    super::node_service::normalize_server_ip(raw)
 }
 
 pub fn generate_subscription(links: &[ShareLink]) -> String {
@@ -101,12 +130,12 @@ pub fn generate_clash_yaml(cfg: &Value, username: &str, addrs: &ServerAddresses)
     for ib in inbounds {
         let tag = ib["tag"].as_str().unwrap_or("");
         let typ = ib["type"].as_str().unwrap_or("");
-        let port = effective_port(ib, tag);
         let Some(user) = find_user(ib, username) else {
             continue;
         };
 
-        let server = super::node_service::pick_server(addrs, tag);
+        let (server, port) = export_endpoint(ib, tag, addrs);
+        let server = server.as_ref();
         let proxy_name = tag.to_string();
         let added = match typ {
             "vless" => {
@@ -545,8 +574,88 @@ fn anytls(ib: &Value, user: &Value, s: &str, p: u64, tag: &str) -> Option<String
 
 #[cfg(test)]
 mod tests {
-    use super::{generate_clash_yaml, generate_links, ServerAddresses};
+    use super::{generate_clash_yaml, generate_links, resolve_endpoint, ServerAddresses};
+    use crate::core::config::NodeMeta;
     use serde_json::json;
+
+    #[test]
+    fn endpoint_defaults_to_public_ipv4_and_listen_port() {
+        let addrs = test_addrs();
+        let (host, port) = resolve_endpoint(8443, &NodeMeta::default(), &addrs);
+        assert_eq!(host.as_ref(), "1.2.3.4");
+        assert_eq!(port, 8443);
+    }
+
+    #[test]
+    fn endpoint_honours_ipv6_and_port_reuse() {
+        let meta = NodeMeta {
+            ipv6: true,
+            port_reuse: true,
+            ..Default::default()
+        };
+        let addrs = test_addrs();
+        let (host, port) = resolve_endpoint(4433, &meta, &addrs);
+        assert_eq!(host.as_ref(), "2001:db8::1");
+        assert_eq!(port, 443, "端口复用节点对外固定 443");
+    }
+
+    /// 中转优先级最高：地址和端口都换成中转机的。
+    #[test]
+    fn relay_overrides_host_and_port() {
+        let meta = NodeMeta {
+            relay_host: Some("relay.example.com".into()),
+            relay_port: Some(12345),
+            ..Default::default()
+        };
+        let addrs = test_addrs();
+        let (host, port) = resolve_endpoint(4433, &meta, &addrs);
+        assert_eq!(host.as_ref(), "relay.example.com");
+        assert_eq!(port, 12345);
+    }
+
+    /// 只填中转地址时，端口沿用节点自身对外端口（含端口复用的 443）。
+    #[test]
+    fn relay_without_port_keeps_node_port() {
+        let meta = NodeMeta {
+            relay_host: Some("relay.example.com".into()),
+            ..Default::default()
+        };
+        let addrs = test_addrs();
+        assert_eq!(resolve_endpoint(4433, &meta, &addrs).1, 4433);
+
+        let reuse = NodeMeta {
+            relay_host: Some("relay.example.com".into()),
+            port_reuse: true,
+            ..Default::default()
+        };
+        assert_eq!(resolve_endpoint(4433, &reuse, &addrs).1, 443);
+    }
+
+    /// 中转地址是 IPv6 字面量时必须补方括号，否则拼出来的链接非法。
+    #[test]
+    fn relay_ipv6_literal_gets_brackets() {
+        let meta = NodeMeta {
+            relay_host: Some("2001:db8::99".into()),
+            relay_port: Some(443),
+            ..Default::default()
+        };
+        let addrs = test_addrs();
+        let (host, _) = resolve_endpoint(4433, &meta, &addrs);
+        assert_eq!(host.as_ref(), "[2001:db8::99]");
+    }
+
+    /// 中转地址是空白串时视为未启用，不能把订阅指到空地址。
+    #[test]
+    fn blank_relay_host_is_ignored() {
+        let meta = NodeMeta {
+            relay_host: Some("   ".into()),
+            ..Default::default()
+        };
+        let addrs = test_addrs();
+        let (host, port) = resolve_endpoint(4433, &meta, &addrs);
+        assert_eq!(host.as_ref(), "1.2.3.4");
+        assert_eq!(port, 4433);
+    }
 
     fn test_addrs() -> ServerAddresses {
         ServerAddresses {

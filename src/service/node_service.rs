@@ -212,7 +212,8 @@ fn authority_host(authority: &str) -> Option<String> {
     normalize_server_ip(host)
 }
 
-fn normalize_server_ip(text: &str) -> Option<String> {
+/// 规范化成可直接拼进 URL 的主机部分：IPv6 字面量补方括号。
+pub fn normalize_server_ip(text: &str) -> Option<String> {
     let t = text.trim();
     if t.is_empty() || t.len() > 64 {
         return None;
@@ -223,18 +224,6 @@ fn normalize_server_ip(text: &str) -> Option<String> {
     } else {
         t.to_string()
     })
-}
-
-/// 根据节点 meta 选择 IPv4 或 IPv6 地址
-pub fn pick_server<'a>(addrs: &'a ServerAddresses, tag: &str) -> &'a str {
-    let ipv6 = crate::core::config::get_node_meta(tag)
-        .map(|m| m.ipv6)
-        .unwrap_or(false);
-    if ipv6 {
-        &addrs.ipv6
-    } else {
-        &addrs.ipv4
-    }
 }
 
 #[cfg(test)]

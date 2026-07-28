@@ -26,8 +26,8 @@ use crate::{
 pub enum UiEvent {
     UsersRefreshed(Vec<User>),
     NodesRefreshed(Vec<InboundNode>),
-    /// tag -> (端口复用, 订阅优先 IPv6)。渲染要用，缓存在 AppState 里避免每帧读盘。
-    NodeMetaRefreshed(std::collections::HashMap<String, (bool, bool)>),
+    /// tag -> NodeMeta。渲染要用，缓存在 AppState 里避免每帧读盘。
+    NodeMetaRefreshed(std::collections::HashMap<String, crate::core::config::NodeMeta>),
     SingboxRunning(Option<bool>),
     UserEnabled {
         name: String,
@@ -478,6 +478,7 @@ fn handle_modal_key(
             path,
             port_reuse,
             ipv6,
+            relay,
         } => {
             s.modal = None;
             s.op_busy = Some("添加节点");
@@ -492,6 +493,7 @@ fn handle_modal_key(
                 path,
                 port_reuse,
                 ipv6,
+                relay,
             );
         }
         ModalAction::SubmitNodeEdit {
@@ -501,6 +503,7 @@ fn handle_modal_key(
             path,
             port_reuse,
             ipv6,
+            relay,
         } => {
             s.modal = None;
             s.op_busy = Some("更新节点");
@@ -514,6 +517,7 @@ fn handle_modal_key(
                 path,
                 port_reuse,
                 ipv6,
+                relay,
             );
         }
         ModalAction::DeleteUser(name) => {
@@ -636,6 +640,7 @@ fn handle_page_key(
                     let port = n.listen_port.to_string();
                     let port_reuse = s.node_port_reuse(&tag);
                     let ipv6 = s.node_ipv6(&tag);
+                    let (relay_host, relay_port) = s.node_relay_fields(&tag);
                     s.modal = Some(Modal::EditNode(crate::tui::forms::NodeEditForm {
                         tag,
                         protocol,
@@ -644,6 +649,8 @@ fn handle_page_key(
                         path: String::new(),
                         port_reuse,
                         ipv6,
+                        relay_host,
+                        relay_port,
                         ..Default::default()
                     }));
                 }
@@ -1399,6 +1406,7 @@ fn spawn_edit_node(
     path: Option<String>,
     port_reuse: Option<bool>,
     ipv6: Option<bool>,
+    relay: crate::model::node::RelaySetting,
 ) {
     tokio::spawn(async move {
         // drop 时自动清 op_busy，覆盖下面所有 early-return 分支
@@ -1410,19 +1418,17 @@ fn spawn_edit_node(
             false,
             {
                 // 闭包跑在阻塞线程池上，捕获必须 owned
-                let tag = tag.clone();
-                move |cfg_json, ops| {
-                    crate::core::config::edit_node(
-                        cfg_json,
-                        &tag,
-                        port,
-                        server_name,
-                        path,
-                        port_reuse,
-                        ipv6,
-                        ops,
-                    )
-                }
+                let req = crate::model::node::EditNodeRequest {
+                    tag: tag.clone(),
+                    listen_port: port,
+                    server_name,
+                    path,
+                    port_reuse,
+                    ipv6,
+                    // TUI 每次都提交完整的中转设置（地址为空即关闭）
+                    relay: Some(relay),
+                };
+                move |cfg_json, ops| crate::core::config::edit_node(cfg_json, &req, ops)
             },
         )
         .await
@@ -1687,13 +1693,12 @@ async fn refresh_all(pool: &sqlx::SqlitePool, cfg: &AppConfig, tx: &mpsc::Sender
 
 /// 一次性读出所有节点的 meta，供渲染层查表。渲染函数每帧都跑，
 /// 不能在里面直接读 nodes.meta.json（每帧 N 次磁盘 IO）。
-fn read_node_meta(nodes: &[InboundNode]) -> std::collections::HashMap<String, (bool, bool)> {
+fn read_node_meta(
+    nodes: &[InboundNode],
+) -> std::collections::HashMap<String, crate::core::config::NodeMeta> {
     nodes
         .iter()
-        .filter_map(|n| {
-            crate::core::config::get_node_meta(&n.tag)
-                .map(|m| (n.tag.clone(), (m.port_reuse, m.ipv6)))
-        })
+        .filter_map(|n| crate::core::config::get_node_meta(&n.tag).map(|m| (n.tag.clone(), m)))
         .collect()
 }
 
@@ -1811,6 +1816,7 @@ fn spawn_add_node(
     path: Option<String>,
     port_reuse: bool,
     ipv6: bool,
+    relay: crate::model::node::RelaySetting,
 ) {
     tokio::spawn(async move {
         // drop 时自动清 op_busy，覆盖下面所有 early-return 分支
@@ -1835,6 +1841,7 @@ fn spawn_add_node(
             path,
             port_reuse,
             ipv6,
+            relay,
         };
         let meta = match crate::service::runtime_service::mutate_config_locked(
             &pool,

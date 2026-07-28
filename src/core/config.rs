@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::model::{
-    node::{AddNodeRequest, Protocol},
+    node::{AddNodeRequest, EditNodeRequest, Protocol},
     user::User,
 };
 
@@ -33,6 +33,27 @@ pub struct NodeMeta {
     /// 订阅导出时优先使用 IPv6 地址
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ipv6: bool,
+    /// 中转机地址（IP 或域名）。设了之后订阅导出的 server 用它，替代本机公网地址。
+    /// 只影响订阅链接，sing-box inbound 不变——转发由中转机自己实现。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_host: Option<String>,
+    /// 中转机端口。留空则沿用节点自身对外端口。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_port: Option<u16>,
+}
+
+impl NodeMeta {
+    /// 给 UI 展示用的中转摘要，未启用时返回 None。
+    pub fn relay_label(&self) -> Option<String> {
+        let host = self.relay_host.as_deref()?.trim();
+        if host.is_empty() {
+            return None;
+        }
+        Some(match self.relay_port {
+            Some(p) => format!("{}:{}", host, p),
+            None => host.to_string(),
+        })
+    }
 }
 
 fn load_meta_file() -> NodesMeta {
@@ -148,8 +169,21 @@ pub fn add_node(
     if req.port_reuse {
         // 端口复用：inbound 只监听 127.0.0.1，由 nginx stream 做 SNI 分流回源
         inbound["listen"] = json!("127.0.0.1");
-        merge_or_push_meta(ops, &req.tag, |m| m.port_reuse = true);
     }
+    // 导出侧的 meta 统一在这里落盘。
+    // 以前 ipv6 只写在 build_inbound 的 reality / shadowsocks 两个分支里，
+    // 其余 6 种协议加 --ipv6 会被静默丢掉；集中到这里顺带修掉。
+    merge_or_push_meta(ops, &req.tag, |m| {
+        m.port_reuse = req.port_reuse;
+        m.ipv6 = req.ipv6;
+        if req.relay.is_enabled() {
+            m.relay_host = Some(req.relay.host.trim().to_string());
+            m.relay_port = req.relay.port;
+        } else {
+            m.relay_host = None;
+            m.relay_port = None;
+        }
+    });
     inbounds.push(inbound);
     Ok(meta)
 }
@@ -168,18 +202,10 @@ pub fn remove_node(cfg: &mut Value, tag: &str, ops: &mut Vec<MetaOp>) -> bool {
     removed
 }
 
-/// 编辑已有节点：只能改 port / server_name / path / port_reuse / ipv6（不改协议或密钥，否则应删重建）
-#[allow(clippy::too_many_arguments)]
-pub fn edit_node(
-    cfg: &mut Value,
-    tag: &str,
-    new_port: Option<u16>,
-    new_server_name: Option<String>,
-    new_path: Option<String>,
-    new_port_reuse: Option<bool>,
-    new_ipv6: Option<bool>,
-    ops: &mut Vec<MetaOp>,
-) -> Result<()> {
+/// 编辑已有节点：只能改 port / server_name / path / port_reuse / ipv6 / 中转
+/// （不改协议或密钥，否则应删重建）
+pub fn edit_node(cfg: &mut Value, req: &EditNodeRequest, ops: &mut Vec<MetaOp>) -> Result<()> {
+    let tag = req.tag.as_str();
     let inbounds = cfg
         .get_mut("inbounds")
         .and_then(|v| v.as_array_mut())
@@ -188,10 +214,10 @@ pub fn edit_node(
         .iter_mut()
         .find(|ib| ib.get("tag").and_then(Value::as_str) == Some(tag))
         .ok_or_else(|| anyhow::anyhow!("节点不存在: {}", tag))?;
-    if let Some(p) = new_port {
+    if let Some(p) = req.listen_port {
         ib["listen_port"] = json!(p);
     }
-    if let Some(sn) = new_server_name {
+    if let Some(sn) = req.server_name.as_deref() {
         if let Some(tls) = ib.get_mut("tls").and_then(|v| v.as_object_mut()) {
             // 只对已经有 server_name 的 inbound 更新（避免向 hy2 这类不该有 server_name 的协议里硬塞字段）
             if tls.contains_key("server_name") {
@@ -204,12 +230,12 @@ pub fn edit_node(
             }
         }
     }
-    if let Some(p) = new_path {
+    if let Some(p) = req.path.as_deref() {
         if let Some(transport) = ib.get_mut("transport").and_then(|v| v.as_object_mut()) {
             transport.insert("path".into(), json!(p));
         }
     }
-    if let Some(reuse) = new_port_reuse {
+    if let Some(reuse) = req.port_reuse {
         // listen 字段按端口复用开关改写：开启 = 127.0.0.1（仅回环，给 nginx stream 回源用）；关闭 = ::（全部接口）
         ib["listen"] = Value::String(if reuse {
             "127.0.0.1".into()
@@ -218,8 +244,21 @@ pub fn edit_node(
         });
         merge_or_push_meta(ops, tag, |m| m.port_reuse = reuse);
     }
-    if let Some(ipv6) = new_ipv6 {
+    if let Some(ipv6) = req.ipv6 {
         merge_or_push_meta(ops, tag, |m| m.ipv6 = ipv6);
+    }
+    if let Some(relay) = req.relay.as_ref() {
+        // 整组覆盖：地址为空即关闭中转，顺带把端口也清掉，
+        // 避免留下"没有地址却有端口"的半截状态。
+        merge_or_push_meta(ops, tag, |m| {
+            if relay.is_enabled() {
+                m.relay_host = Some(relay.host.trim().to_string());
+                m.relay_port = relay.port;
+            } else {
+                m.relay_host = None;
+                m.relay_port = None;
+            }
+        });
     }
     Ok(())
 }
@@ -353,9 +392,7 @@ fn build_inbound(
                 req.tag.clone(),
                 NodeMeta {
                     public_key: Some(public_key.clone()),
-                    ss_password: None,
-                    port_reuse: false,
-                    ipv6: req.ipv6,
+                    ..Default::default()
                 },
             ));
             let inbound = json!({
@@ -448,10 +485,8 @@ fn build_inbound(
             ops.push(MetaOp::Set(
                 req.tag.clone(),
                 NodeMeta {
-                    public_key: None,
                     ss_password: Some(ss_pwd.clone()),
-                    port_reuse: false,
-                    ipv6: req.ipv6,
+                    ..Default::default()
                 },
             ));
             Ok((
@@ -698,6 +733,7 @@ fn ensure_object(value: &mut Value) -> &mut Map<String, Value> {
 #[cfg(test)]
 mod tests {
     use super::{edit_node, sync_users, MetaOp};
+    use crate::model::node::{EditNodeRequest, RelaySetting};
     use crate::model::user::User;
     use serde_json::json;
 
@@ -772,12 +808,11 @@ mod tests {
         let mut ops = Vec::new();
         edit_node(
             &mut cfg,
-            "hy2",
-            None,
-            Some("www.apple.com".into()),
-            None,
-            None,
-            None,
+            &EditNodeRequest {
+                tag: "hy2".into(),
+                server_name: Some("www.apple.com".into()),
+                ..Default::default()
+            },
             &mut ops,
         )
         .unwrap();
@@ -806,12 +841,11 @@ mod tests {
         let mut ops = Vec::new();
         edit_node(
             &mut cfg,
-            "trojan-1",
-            None,
-            None,
-            None,
-            Some(true),
-            None,
+            &EditNodeRequest {
+                tag: "trojan-1".into(),
+                port_reuse: Some(true),
+                ..Default::default()
+            },
             &mut ops,
         )
         .unwrap();
@@ -825,6 +859,84 @@ mod tests {
             }
             other => panic!("期望 MetaOp::Set，实际 {:?}", other),
         }
+    }
+
+    /// 中转是整组覆盖：设了就写进 meta，地址给空串就连端口一起清掉。
+    #[test]
+    fn edit_node_sets_and_clears_relay() {
+        let mut cfg = json!({
+            "inbounds": [{
+                "type": "vless", "tag": "n1", "listen": "::", "listen_port": 4433, "users": []
+            }]
+        });
+
+        let mut ops = Vec::new();
+        edit_node(
+            &mut cfg,
+            &EditNodeRequest {
+                tag: "n1".into(),
+                relay: Some(RelaySetting {
+                    host: "relay.example.com".into(),
+                    port: Some(12345),
+                }),
+                ..Default::default()
+            },
+            &mut ops,
+        )
+        .unwrap();
+        match &ops[0] {
+            MetaOp::Set(tag, m) => {
+                assert_eq!(tag, "n1");
+                assert_eq!(m.relay_host.as_deref(), Some("relay.example.com"));
+                assert_eq!(m.relay_port, Some(12345));
+                assert_eq!(m.relay_label().as_deref(), Some("relay.example.com:12345"));
+            }
+            other => panic!("expected MetaOp::Set, got {:?}", other),
+        }
+
+        // 地址给空串 = 关闭中转，端口也要一起清，不能留半截状态
+        let mut ops = Vec::new();
+        edit_node(
+            &mut cfg,
+            &EditNodeRequest {
+                tag: "n1".into(),
+                relay: Some(RelaySetting::default()),
+                ..Default::default()
+            },
+            &mut ops,
+        )
+        .unwrap();
+        match &ops[0] {
+            MetaOp::Set(_, m) => {
+                assert!(m.relay_host.is_none());
+                assert!(m.relay_port.is_none());
+                assert!(m.relay_label().is_none());
+            }
+            other => panic!("expected MetaOp::Set, got {:?}", other),
+        }
+    }
+
+    /// relay 为 None 表示"不改"，不应产生任何 meta 改动。
+    #[test]
+    fn edit_node_without_relay_field_leaves_meta_untouched() {
+        let mut cfg = json!({
+            "inbounds": [{
+                "type": "vless", "tag": "n1", "listen": "::", "listen_port": 4433, "users": []
+            }]
+        });
+        let mut ops = Vec::new();
+        edit_node(
+            &mut cfg,
+            &EditNodeRequest {
+                tag: "n1".into(),
+                listen_port: Some(8443),
+                ..Default::default()
+            },
+            &mut ops,
+        )
+        .unwrap();
+        assert_eq!(cfg["inbounds"][0]["listen_port"], 8443);
+        assert!(ops.is_empty(), "only changing the port must not touch meta");
     }
 
     #[test]
