@@ -155,7 +155,7 @@ fn render_summary(f: &mut Frame, area: Rect, s: &AppState) {
 
     let mut lines: Vec<Line> = vec![
         Line::from(vec![
-            Span::raw("  用户 "),
+            Span::raw("  用户:"),
             Span::styled(
                 format!("{} ", total),
                 Style::default().add_modifier(Modifier::BOLD),
@@ -198,11 +198,18 @@ fn render_summary(f: &mut Frame, area: Rect, s: &AppState) {
             } else {
                 Color::Green
             };
-            let bar = progress_bar(pct, bar_width, u.quota_gb > 0.0);
-            let quota = if u.quota_gb <= 0.0 {
-                "不限".to_string()
-            } else {
+            let has_quota = u.quota_gb > 0.0;
+            let (bar_fill, bar_rest) = progress_bar_parts(pct, bar_width, has_quota);
+            let quota = if has_quota {
                 format!("{:.0}G", u.quota_gb)
+            } else {
+                "不限".to_string()
+            };
+            // 不限配额的用户没有"用了百分之几"可言，显示 0.0% 只会误导
+            let pct_label = if has_quota {
+                format!(" {:>5.1}%", u.quota_used_percent())
+            } else {
+                "     ─".to_string()
             };
             lines.push(Line::from(vec![
                 Span::raw("  "),
@@ -215,11 +222,9 @@ fn render_summary(f: &mut Frame, area: Rect, s: &AppState) {
                     format!(" {:<6}", quota),
                     Style::default().fg(Color::DarkGray),
                 ),
-                Span::styled(bar, Style::default().fg(c)),
-                Span::styled(
-                    format!(" {:>5.1}%", u.quota_used_percent()),
-                    Style::default().fg(c),
-                ),
+                Span::styled(bar_fill, Style::default().fg(c)),
+                Span::styled(bar_rest, Style::default().fg(Color::DarkGray)),
+                Span::styled(pct_label, Style::default().fg(c)),
             ]));
         }
     }
@@ -264,18 +269,18 @@ fn render_nodes(f: &mut Frame, area: Rect, s: &AppState) {
                     format!(":{:<6}", n.listen_port),
                     Style::default().fg(Color::DarkGray),
                 ),
-                Span::styled(
-                    format!(" 用户 {}", n.user_count),
-                    Style::default().fg(Color::Green),
-                ),
-                // 有中转时标出来：订阅里导出的其实是中转地址，
-                // 不标的话这一行的端口会跟客户端看到的对不上
+                // 中转紧跟在 协议:端口 后面：它俩讲的是同一件事（客户端连哪儿），
+                // 中间插一个用户数会把这条线索打断
                 Span::styled(
                     match s.node_relay_label(&n.tag) {
-                        Some(label) => format!("  → 中转 {}", label),
-                        None => String::new(),
+                        Some(label) => format!("→ 中转 {:<22}", label),
+                        None => format!("{:<29}", ""),
                     },
                     Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(
+                    format!("{} 个用户", n.user_count),
+                    Style::default().fg(Color::Green),
                 ),
             ]));
         }
@@ -294,18 +299,21 @@ fn render_nodes(f: &mut Frame, area: Rect, s: &AppState) {
     );
 }
 
-/// 返回形如 `██████░░░░` 的进度条字符串；quota<=0 时返回空白占位
-pub fn progress_bar(pct: u8, width: usize, has_quota: bool) -> String {
-    if width < 2 || !has_quota {
-        return " ".repeat(width);
+/// 进度条的填充段与空白段，分开返回好让调用方给两段不同颜色。
+///
+/// 必须分色：空白段的 `░` 在不少等宽字体里是**密集网点**，和填充段同色时
+/// 0% 的条看起来也是满的，跟旁边的百分比数字自相矛盾。
+/// 无配额时返回等宽空格，只为让后面的列对齐。
+pub fn progress_bar_parts(pct: u8, width: usize, has_quota: bool) -> (String, String) {
+    if width < 2 {
+        return (String::new(), String::new());
+    }
+    if !has_quota {
+        return (String::new(), " ".repeat(width));
     }
     let p = pct.min(100) as usize;
     let filled = (p * width) / 100;
-    let empty = width - filled;
-    let mut s = String::with_capacity(width * 3);
-    s.push_str(&"█".repeat(filled));
-    s.push_str(&"░".repeat(empty));
-    s
+    ("█".repeat(filled), "░".repeat(width - filled))
 }
 
 fn fmt_bytes(n: u64) -> String {
@@ -326,4 +334,39 @@ fn fmt_bytes(n: u64) -> String {
 #[allow(dead_code)]
 fn _symbols_link() {
     let _ = symbols::DOT;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::progress_bar_parts;
+
+    /// 填充段的格数必须和百分比对得上——两段同色时看不出来，
+    /// 但只要分色渲染，0% 就应该是一条全暗的槽。
+    #[test]
+    fn bar_fill_matches_percentage() {
+        let (fill, rest) = progress_bar_parts(0, 20, true);
+        assert_eq!(fill.chars().count(), 0, "0% 不该有任何填充格");
+        assert_eq!(rest.chars().count(), 20);
+
+        let (fill, rest) = progress_bar_parts(50, 20, true);
+        assert_eq!(fill.chars().count(), 10);
+        assert_eq!(rest.chars().count(), 10);
+
+        let (fill, rest) = progress_bar_parts(100, 20, true);
+        assert_eq!(fill.chars().count(), 20);
+        assert_eq!(rest.chars().count(), 0);
+
+        // 超过 100 也不能溢出成负数宽度
+        let (fill, rest) = progress_bar_parts(250, 20, true);
+        assert_eq!(fill.chars().count(), 20);
+        assert_eq!(rest.chars().count(), 0);
+    }
+
+    /// 无配额时不画条，但要占住同样宽度以免后面的列错位。
+    #[test]
+    fn unlimited_quota_reserves_width_without_drawing() {
+        let (fill, rest) = progress_bar_parts(0, 20, false);
+        assert!(fill.is_empty());
+        assert_eq!(rest, " ".repeat(20));
+    }
 }

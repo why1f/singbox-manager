@@ -55,21 +55,22 @@ pub fn render(f: &mut Frame, area: Rect, s: &AppState) {
                 Color::Green
             };
             let has_quota = u.quota_gb > 0.0;
-            let quota_str = if has_quota {
-                let bar = super::super::pages::dashboard::progress_bar(
+            let quota_cell: Line = if has_quota {
+                let (fill, rest) = super::super::pages::dashboard::progress_bar_parts(
                     u.quota_used_percent() as u8,
                     10,
                     true,
                 );
-                let quota_label = format!("{:.0}G", u.quota_gb);
-                format!(
-                    "{:<5} {} {:>3.0}%",
-                    quota_label,
-                    bar,
-                    u.quota_used_percent()
-                )
+                Line::from(vec![
+                    Span::raw(format!("{:<5} ", format!("{:.0}G", u.quota_gb))),
+                    Span::styled(fill, Style::default().fg(sc)),
+                    // 空白段单独压暗：和填充段同色时 0% 看起来也是满的
+                    Span::styled(rest, Style::default().fg(Color::DarkGray)),
+                    Span::raw(format!(" {:>3.0}%", u.quota_used_percent())),
+                ])
             } else {
-                "不限".into()
+                // 无配额就没有"用了百分之几"，不画条也不给百分比
+                Line::from("不限")
             };
             let reset = match u.reset_day {
                 0 => "─".into(),
@@ -109,7 +110,7 @@ pub fn render(f: &mut Frame, area: Rect, s: &AppState) {
                 Cell::from(User::format_bytes(u.used_up_bytes)),
                 Cell::from(User::format_bytes(u.used_down_bytes)),
                 Cell::from(User::format_bytes(u.used_total_bytes())),
-                Cell::from(quota_str).style(Style::default().fg(sc)),
+                Cell::from(quota_cell).style(Style::default().fg(sc)),
                 Cell::from(reset),
                 Cell::from(exp),
                 Cell::from(billing),
