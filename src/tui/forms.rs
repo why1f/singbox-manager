@@ -20,6 +20,13 @@ pub const PROTOCOLS: [&str; 8] = [
     "anytls",
 ];
 
+/// 中转两栏的标签。地址与端口分开填而不是写成 `ip:port`——
+/// IPv6 字面量本身带冒号，混在一起没法无歧义地拆。
+const RELAY_HOST_LABEL: &str = "中转地址 (例 1.2.3.4 / relay.com)";
+const RELAY_PORT_LABEL: &str = "中转端口 (例 12345)";
+/// 中转语义放这行，标签里塞不下
+const RELAY_HINT: &str = "  中转：地址留空=不启用；只填地址则端口沿用节点端口；订阅按中转地址导出";
+
 /// 节点表单里的逻辑字段，用来按协议动态组装 add/edit 表单。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum NodeField {
@@ -799,13 +806,30 @@ fn node_field_mut(f: &mut NodeForm, which: NodeField) -> Option<&mut String> {
 }
 
 pub fn render(f: &mut Frame, area: Rect, modal: &Modal) {
+    // 节点表单的行数随协议和字段数变化，高度必须按实际内容算。
+    // 以前这里写死 16 行，加字段就会被无声裁掉——中转两栏正是这么丢的。
+    let node_panel = match modal {
+        Modal::AddNode(form) => Some((node_lines(form), " 添加节点 ")),
+        Modal::EditNode(form) => Some((node_edit_lines(form), " 编辑节点 ")),
+        _ => None,
+    };
+    if let Some((lines, title)) = node_panel {
+        let pop = centered(area, 76, lines.len() as u16 + 2);
+        f.render_widget(Clear, pop);
+        f.render_widget(
+            Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title)),
+            pop,
+        );
+        return;
+    }
+
     let pop = centered(area, 62, 16);
     f.render_widget(Clear, pop);
     match modal {
         Modal::AddUser(form) => render_user(f, pop, form, "添加用户"),
         Modal::EditUser(form) => render_user_edit(f, pop, form),
-        Modal::AddNode(form) => render_node(f, pop, form),
-        Modal::EditNode(form) => render_node_edit(f, pop, form),
+        // 上面已提前返回
+        Modal::AddNode(_) | Modal::EditNode(_) => {}
         Modal::ConfirmDeleteUser(name) => render_confirm(f, pop, " 确认删除用户 ", name),
         Modal::ConfirmDeleteNode(tag) => render_confirm(f, pop, " 确认删除节点 ", tag),
         Modal::ConfirmResetUser(name) => render_reset_confirm(f, pop, name),
@@ -953,7 +977,7 @@ fn render_user_edit(f: &mut Frame, area: Rect, form: &UserEditForm) {
     );
 }
 
-fn render_node(f: &mut Frame, area: Rect, form: &NodeForm) {
+fn node_lines(form: &NodeForm) -> Vec<Line<'static>> {
     let protocol = PROTOCOLS[form.protocol_idx];
     let fields = add_fields(protocol);
     let mut lines: Vec<Line> = Vec::new();
@@ -973,8 +997,8 @@ fn render_node(f: &mut Frame, area: Rect, form: &NodeForm) {
                 "订阅优先 IPv6 (Space/←→ 切换)",
                 format!("◀ {} ▶", if form.ipv6 { "开" } else { "关" }),
             ),
-            NodeField::RelayHost => ("中转 IP/域名 (留空=不中转)", form.relay_host.clone()),
-            NodeField::RelayPort => ("中转端口 (留空=同节点端口)", form.relay_port.clone()),
+            NodeField::RelayHost => (RELAY_HOST_LABEL, form.relay_host.clone()),
+            NodeField::RelayPort => (RELAY_PORT_LABEL, form.relay_port.clone()),
         };
         let style = if i == form.focus {
             Style::default().fg(Color::Black).bg(Color::Cyan)
@@ -1030,16 +1054,17 @@ fn render_node(f: &mut Frame, area: Rect, form: &NodeForm) {
         )));
     }
     lines.push(Line::from(Span::styled(
+        RELAY_HINT,
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(Span::styled(
         "  Tab/↑↓ 切换   ←/→ 选协议   Enter 提交   Esc 取消",
         Style::default().fg(Color::DarkGray),
     )));
-    f.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" 添加节点 ")),
-        area,
-    );
+    lines
 }
 
-fn render_node_edit(f: &mut Frame, area: Rect, form: &NodeEditForm) {
+fn node_edit_lines(form: &NodeEditForm) -> Vec<Line<'static>> {
     let fields = edit_fields(&form.protocol);
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(
@@ -1071,7 +1096,11 @@ fn render_node_edit(f: &mut Frame, area: Rect, form: &NodeEditForm) {
                 "订阅优先 IPv6 (Space/←→ 切换)",
                 format!("◀ {} ▶", if form.ipv6 { "开" } else { "关" }),
             ),
-            _ => continue,
+            NodeField::RelayHost => (RELAY_HOST_LABEL, form.relay_host.clone()),
+            NodeField::RelayPort => (RELAY_PORT_LABEL, form.relay_port.clone()),
+            // 不写 `_ => continue`：漏掉新字段时要编译报错，而不是让它在界面上
+            // 静默消失（中转两栏第一次加进来时就是这么丢的）。
+            NodeField::Tag | NodeField::Protocol => continue,
         };
         let style = if i == form.focus {
             Style::default().fg(Color::Black).bg(Color::Cyan)
@@ -1110,13 +1139,14 @@ fn render_node_edit(f: &mut Frame, area: Rect, form: &NodeEditForm) {
         )));
     }
     lines.push(Line::from(Span::styled(
+        RELAY_HINT,
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(Span::styled(
         "  Tab/↑↓ 切换   Enter 保存   Esc 取消",
         Style::default().fg(Color::DarkGray),
     )));
-    f.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" 编辑节点 ")),
-        area,
-    );
+    lines
 }
 
 fn render_confirm(f: &mut Frame, area: Rect, title: &str, target: &str) {
@@ -1343,4 +1373,107 @@ fn render_select_restore(f: &mut Frame, area: Rect, files: &[String], cursor: us
         Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" 恢复备份 ")),
         area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 表单里出现的每个字段都必须真的画出来。
+    ///
+    /// 中转两栏第一次加进来时，`add_fields`/`edit_fields` 里有、渲染的 match
+    /// 却因为末尾的 `_ => continue` 把它们跳过了：字段能聚焦、能提交，就是看不见。
+    /// 这里对每个协议逐字段核对渲染结果，防止再犯。
+    #[test]
+    fn every_field_in_the_form_is_rendered() {
+        for (idx, protocol) in PROTOCOLS.iter().enumerate() {
+            let add = NodeForm {
+                protocol_idx: idx,
+                ..Default::default()
+            };
+            let rendered = lines_to_text(&node_lines(&add));
+            for field in add_fields(protocol) {
+                let label = field_label(field);
+                assert!(
+                    rendered.contains(label),
+                    "添加表单({protocol}) 少画了字段: {label}"
+                );
+            }
+
+            let edit = NodeEditForm {
+                protocol: protocol.to_string(),
+                ..Default::default()
+            };
+            let rendered = lines_to_text(&node_edit_lines(&edit));
+            for field in edit_fields(protocol) {
+                let label = field_label(field);
+                assert!(
+                    rendered.contains(label),
+                    "编辑表单({protocol}) 少画了字段: {label}"
+                );
+            }
+        }
+    }
+
+    /// 中转对所有协议都该出现，且添加/编辑两处都有。
+    #[test]
+    fn relay_fields_present_for_every_protocol() {
+        for (idx, protocol) in PROTOCOLS.iter().enumerate() {
+            assert!(add_fields(protocol).contains(&NodeField::RelayHost));
+            assert!(add_fields(protocol).contains(&NodeField::RelayPort));
+            assert!(edit_fields(protocol).contains(&NodeField::RelayHost));
+            assert!(edit_fields(protocol).contains(&NodeField::RelayPort));
+
+            let add = NodeForm {
+                protocol_idx: idx,
+                ..Default::default()
+            };
+            assert!(lines_to_text(&node_lines(&add)).contains(RELAY_HOST_LABEL));
+            let edit = NodeEditForm {
+                protocol: protocol.to_string(),
+                ..Default::default()
+            };
+            assert!(lines_to_text(&node_edit_lines(&edit)).contains(RELAY_PORT_LABEL));
+        }
+    }
+
+    fn lines_to_text(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|sp| sp.content.to_string()))
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    fn field_label(field: NodeField) -> &'static str {
+        match field {
+            NodeField::Tag => "Tag",
+            NodeField::Protocol => "协议",
+            NodeField::Port => "端口",
+            NodeField::ServerName => "server_name",
+            NodeField::Path => "path",
+            NodeField::PortReuse => "端口复用",
+            NodeField::Ipv6 => "订阅优先 IPv6",
+            NodeField::RelayHost => RELAY_HOST_LABEL,
+            NodeField::RelayPort => RELAY_PORT_LABEL,
+        }
+    }
+
+    #[test]
+    fn parse_relay_accepts_host_only_and_rejects_port_only() {
+        assert_eq!(
+            parse_relay("", "").unwrap(),
+            crate::model::node::RelaySetting::default()
+        );
+        let r = parse_relay(" relay.com ", "").unwrap();
+        assert_eq!(r.host, "relay.com");
+        assert_eq!(r.port, None);
+        let r = parse_relay("1.2.3.4", "12345").unwrap();
+        assert_eq!(r.port, Some(12345));
+        // 只填端口不填地址是填了一半，应报错而不是静默丢弃
+        assert!(parse_relay("", "12345").is_err());
+        assert!(parse_relay("1.2.3.4", "0").is_err());
+        assert!(parse_relay("1.2.3.4", "abc").is_err());
+        assert!(parse_relay("a b", "").is_err());
+    }
 }
