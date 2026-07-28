@@ -26,3 +26,6 @@ desktop.ini
 
 # 本地配置（保留模板 config.toml，仅忽略实际运行时副本）
 /config.local.toml
+
+# 临时截图 / 排查用的图片，不进仓库
+1.png
