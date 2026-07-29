@@ -2,6 +2,7 @@ pub mod bind;
 pub mod kernel;
 pub mod nginx;
 pub mod node;
+pub mod outbound;
 pub mod token;
 pub mod user;
 use clap::{Parser, Subcommand};
@@ -72,6 +73,8 @@ pub enum Commands {
     Bind(bind::BindArgs),
     #[command(about = "nginx 管理")]
     Nginx(nginx::NginxArgs),
+    #[command(about = "出站地址族策略 (IPv4/IPv6 only 或优先)")]
+    Outbound(outbound::OutboundArgs),
     #[command(about = "兼容旧用户命令")]
     User(user::UserArgs),
     #[command(about = "兼容旧节点命令")]

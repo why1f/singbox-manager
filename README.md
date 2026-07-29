@@ -192,6 +192,38 @@ sb doctor                           # 一键自检部署状态
 
 装完会自动探测一次 gRPC 统计接口：装官方版时会明确提示"流量统计不可用"，不用等到发现流量一直是 0。
 
+### 出站地址族（IPv4 / IPv6 only 或优先）
+
+```bash
+sb outbound                          # 看当前策略
+sb outbound set prefer4              # 优先 IPv4
+sb outbound set prefer6              # 优先 IPv6
+sb outbound set v4only               # 仅 IPv4
+sb outbound set v6only               # 仅 IPv6
+sb outbound set auto                 # 恢复默认（不写该字段）
+```
+
+写进 `config.json` 的是 `route.default_domain_resolver`：
+
+```json
+{
+  "dns": { "servers": [ { "type": "local", "tag": "local" } ] },
+  "route": {
+    "default_domain_resolver": { "server": "local", "strategy": "ipv4_only" }
+  }
+}
+```
+
+几点要清楚：
+
+- **不是 `domain_strategy`。** 那个 dial 字段 sing-box 1.12.0 起弃用、**1.14.0 已移除**；`default_domain_resolver` 是官方指定的替代品，1.12.0 引入。内核低于 1.12.0 时本命令会直接拒绝并提示升级。
+- **只约束域名解析。** 客户端把目标写成 IP 字面量时不经过 DNS，这个策略管不到——要连字面量都限制得写路由规则。
+- **`v6only` 在没有 IPv6 出口的机器上会让所有域名目标全部连不上**，切之前先确认 `curl -6 https://api6.ipify.org` 通。
+- 和节点那个「订阅优先 IPv6」是两回事：后者只改**订阅链接里导出的地址**，跟出站怎么拨号无关。
+- 配置里已有 `dns.servers` 时只借用第一个带 `tag` 的 server，不改写你手配的上游。
+
+TUI 内核页按 `[o]` 循环切换同一个设置。
+
 ### nginx 反代
 
 ```bash
@@ -317,7 +349,7 @@ admin_schedule_times    = ["09:00", "21:30"]
 
 **节点页**：`[a]` 添加 `[E]` 编辑 `[d]` 删除（弹窗表单按当前协议显示字段：reality/trojan/tuic/anytls 多一行 `server_name`；vless-ws/vmess-ws 多一行 `path`；hysteria2/shadowsocks 只要端口；reality/trojan/anytls 编辑时还多一个"端口复用"开关；所有协议都有"订阅优先 IPv6"和"中转 IP/域名 + 中转端口"两组可选项）。列表里 `中转` 一列会显示 `→ 地址:端口`。
 
-**内核页**：`[i]` 装官方 `[v]` 装 v2ray_api 版 `[u]` 卸载 `[s/S/x]` 启/停/重启 `[e/d]` 开/关自启
+**内核页**：`[i]` 装官方 `[v]` 装 v2ray_api 版 `[u]` 卸载 `[s/S/x]` 启/停/重启 `[e/d]` 开/关自启 `[o]` 切换出站地址族策略
 
 **nginx 页**：`[i]` 装 `[g]` 生成反代 conf `[t]` 语法检查 `[s/S/x]` 启/停/重启 `[r]` reload `[e/d]` 开/关自启
 

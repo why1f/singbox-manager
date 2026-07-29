@@ -720,6 +720,184 @@ fn sync_v2ray_api_users(cfg: &mut Value, users: &[&User], grpc_addr: &str) {
     );
 }
 
+/// 出站地址族策略。落到 sing-box 的 `route.default_domain_resolver.strategy`。
+///
+/// 注意用的不是 dial 字段 `domain_strategy`——那个 1.12.0 起弃用、1.14.0 已移除。
+/// `default_domain_resolver` 是 1.12.0 引入的替代品，需要指向一个 DNS server tag。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutboundStrategy {
+    /// 不写 `default_domain_resolver`，交给 sing-box 默认行为（系统解析器返回什么用什么）
+    #[default]
+    Auto,
+    PreferIpv4,
+    PreferIpv6,
+    Ipv4Only,
+    Ipv6Only,
+}
+
+impl OutboundStrategy {
+    /// sing-box 侧的 strategy 取值；Auto 没有对应值。
+    pub fn as_str(self) -> Option<&'static str> {
+        match self {
+            Self::Auto => None,
+            Self::PreferIpv4 => Some("prefer_ipv4"),
+            Self::PreferIpv6 => Some("prefer_ipv6"),
+            Self::Ipv4Only => Some("ipv4_only"),
+            Self::Ipv6Only => Some("ipv6_only"),
+        }
+    }
+
+    /// CLI/TUI 用的短名。
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::PreferIpv4 => "prefer4",
+            Self::PreferIpv6 => "prefer6",
+            Self::Ipv4Only => "v4only",
+            Self::Ipv6Only => "v6only",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "自动 (跟随系统解析)",
+            Self::PreferIpv4 => "优先 IPv4",
+            Self::PreferIpv6 => "优先 IPv6",
+            Self::Ipv4Only => "仅 IPv4",
+            Self::Ipv6Only => "仅 IPv6",
+        }
+    }
+
+    pub const ALL: [Self; 5] = [
+        Self::Auto,
+        Self::PreferIpv4,
+        Self::PreferIpv6,
+        Self::Ipv4Only,
+        Self::Ipv6Only,
+    ];
+
+    /// TUI 里按一个键循环切换。
+    pub fn next(self) -> Self {
+        let i = Self::ALL.iter().position(|s| *s == self).unwrap_or(0);
+        Self::ALL[(i + 1) % Self::ALL.len()]
+    }
+
+    /// 同时接受短名和 sing-box 原值，容错几个常见写法。
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "auto" | "" | "default" => Some(Self::Auto),
+            "prefer4" | "prefer_ipv4" | "ipv4" => Some(Self::PreferIpv4),
+            "prefer6" | "prefer_ipv6" | "ipv6" => Some(Self::PreferIpv6),
+            "v4only" | "ipv4_only" | "ipv4only" => Some(Self::Ipv4Only),
+            "v6only" | "ipv6_only" | "ipv6only" => Some(Self::Ipv6Only),
+            _ => None,
+        }
+    }
+}
+
+/// `default_domain_resolver` 指向的 DNS server tag；配置里没有 DNS server 时新建这个。
+const LOCAL_DNS_TAG: &str = "local";
+
+/// 读当前出站策略。`default_domain_resolver` 允许写成裸 tag 字符串，
+/// 那种形式没带 strategy，等价于 Auto。
+pub fn get_outbound_strategy(cfg: &Value) -> OutboundStrategy {
+    cfg.get("route")
+        .and_then(|r| r.get("default_domain_resolver"))
+        .and_then(|d| d.get("strategy"))
+        .and_then(Value::as_str)
+        .and_then(OutboundStrategy::parse)
+        .unwrap_or(OutboundStrategy::Auto)
+}
+
+/// 写出站策略。
+///
+/// - Auto：删掉 `default_domain_resolver`（`route` 变空也一并删，别留空壳）。
+/// - 其余：确保有个可引用的 DNS server，再写 `{ server, strategy }`。
+///
+/// 已有的 `dns.servers` 一律不改写——里面可能是用户手配的上游，
+/// 这里只借它的 tag 用。
+pub fn set_outbound_strategy(cfg: &mut Value, strategy: OutboundStrategy) -> Result<()> {
+    let Some(value) = strategy.as_str() else {
+        let root = ensure_object(cfg);
+        if let Some(Value::Object(route)) = root.get_mut("route") {
+            route.remove("default_domain_resolver");
+            if route.is_empty() {
+                root.remove("route");
+            }
+        }
+        return Ok(());
+    };
+
+    let server_tag = ensure_dns_server(cfg)?;
+    let root = ensure_object(cfg);
+    let route = root
+        .entry("route")
+        .or_insert_with(|| Value::Object(Map::new()));
+    let route = route
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("route 字段不是对象"))?;
+    route.insert(
+        "default_domain_resolver".into(),
+        json!({ "server": server_tag, "strategy": value }),
+    );
+    Ok(())
+}
+
+/// 返回一个可供 `default_domain_resolver.server` 引用的 DNS server tag。
+/// 已有带 tag 的 server 就复用第一个；否则插入 `{ "type": "local", "tag": "local" }`
+/// ——1.12.0 起的新式写法，旧的 `{ "address": ... }` 形式 1.14.0 已移除。
+fn ensure_dns_server(cfg: &mut Value) -> Result<String> {
+    let root = ensure_object(cfg);
+    let dns = root
+        .entry("dns")
+        .or_insert_with(|| Value::Object(Map::new()));
+    let dns = dns
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("dns 字段不是对象"))?;
+    let servers = dns.entry("servers").or_insert_with(|| Value::Array(vec![]));
+    let servers = servers
+        .as_array_mut()
+        .ok_or_else(|| anyhow::anyhow!("dns.servers 字段不是数组"))?;
+
+    if let Some(tag) = servers
+        .iter()
+        .filter_map(|s| s.get("tag").and_then(Value::as_str))
+        .find(|t| !t.trim().is_empty())
+    {
+        return Ok(tag.to_string());
+    }
+    servers.push(json!({ "type": "local", "tag": LOCAL_DNS_TAG }));
+    Ok(LOCAL_DNS_TAG.to_string())
+}
+
+/// 删掉 1.13.0 已移除的老式特殊出站 `block` / `dns`。
+///
+/// 这两个 tag 在 1.11.0 弃用、1.13.0 移除，现在由路由规则动作
+/// (`reject` / `hijack-dns`) 承担。留着的话新内核 `sing-box check` 直接报错，
+/// 于是任何一次配置改写都会失败——所以顺手清掉。
+/// 返回被删掉的 tag，供调用方提示。
+pub fn strip_legacy_special_outbounds(cfg: &mut Value) -> Vec<String> {
+    let mut removed = vec![];
+    let Some(outbounds) = cfg.get_mut("outbounds").and_then(Value::as_array_mut) else {
+        return removed;
+    };
+    outbounds.retain(|ob| {
+        let ty = ob.get("type").and_then(Value::as_str).unwrap_or("");
+        if ty == "block" || ty == "dns" {
+            removed.push(
+                ob.get("tag")
+                    .and_then(Value::as_str)
+                    .unwrap_or(ty)
+                    .to_string(),
+            );
+            false
+        } else {
+            true
+        }
+    });
+    removed
+}
+
 fn ensure_object(value: &mut Value) -> &mut Map<String, Value> {
     if !matches!(value, Value::Object(_)) {
         *value = Value::Object(Map::new());
@@ -970,5 +1148,186 @@ mod tests {
         assert!(arr.iter().any(|item| item["name"] == "alice"));
         assert!(arr.iter().any(|item| item["name"] == "default"));
         assert!(!arr.iter().any(|item| item["name"] == "bob"));
+    }
+
+    // ——— 出站地址族策略 ———
+
+    use super::{
+        get_outbound_strategy, set_outbound_strategy, strip_legacy_special_outbounds,
+        OutboundStrategy,
+    };
+
+    /// 空配置上设策略要自己把 dns.servers 建起来，并且用 1.12.0 起的新式写法
+    /// （`type`+`tag`），不能退回 1.14.0 已移除的 `address` 形式。
+    #[test]
+    fn set_strategy_creates_modern_local_dns_server() {
+        let mut cfg = json!({ "inbounds": [], "outbounds": [] });
+        set_outbound_strategy(&mut cfg, OutboundStrategy::Ipv4Only).unwrap();
+
+        let servers = cfg["dns"]["servers"].as_array().unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0]["type"], "local");
+        assert_eq!(servers[0]["tag"], "local");
+        assert!(
+            servers[0].get("address").is_none(),
+            "不能用 1.14.0 已移除的 address 写法"
+        );
+        assert_eq!(
+            cfg["route"]["default_domain_resolver"],
+            json!({ "server": "local", "strategy": "ipv4_only" })
+        );
+    }
+
+    /// 用的必须是 default_domain_resolver，而不是 1.14.0 已移除的 dial 字段
+    /// domain_strategy——这是本功能的核心约束，专门钉一个测试。
+    #[test]
+    fn never_writes_the_removed_domain_strategy_field() {
+        for s in OutboundStrategy::ALL {
+            let mut cfg = json!({ "outbounds": [ { "type": "direct", "tag": "direct" } ] });
+            set_outbound_strategy(&mut cfg, s).unwrap();
+            let dumped = serde_json::to_string(&cfg).unwrap();
+            assert!(
+                !dumped.contains("domain_strategy"),
+                "{:?} 写出了 domain_strategy: {}",
+                s,
+                dumped
+            );
+        }
+    }
+
+    /// 已有 DNS server 的配置只借 tag，不该被改写或追加。
+    #[test]
+    fn set_strategy_reuses_existing_dns_server_tag() {
+        let mut cfg = json!({
+            "dns": { "servers": [ { "type": "udp", "server": "1.1.1.1", "tag": "cloudflare" } ] },
+            "outbounds": []
+        });
+        set_outbound_strategy(&mut cfg, OutboundStrategy::PreferIpv6).unwrap();
+
+        let servers = cfg["dns"]["servers"].as_array().unwrap();
+        assert_eq!(servers.len(), 1, "不该追加新的 DNS server");
+        assert_eq!(servers[0]["server"], "1.1.1.1", "不该改写已有 server");
+        assert_eq!(
+            cfg["route"]["default_domain_resolver"]["server"],
+            "cloudflare"
+        );
+        assert_eq!(
+            cfg["route"]["default_domain_resolver"]["strategy"],
+            "prefer_ipv6"
+        );
+    }
+
+    /// 已有 server 但都没 tag 时无从引用，得自己补一个。
+    #[test]
+    fn set_strategy_appends_local_when_existing_servers_have_no_tag() {
+        let mut cfg = json!({
+            "dns": { "servers": [ { "type": "udp", "server": "1.1.1.1" } ] },
+            "outbounds": []
+        });
+        set_outbound_strategy(&mut cfg, OutboundStrategy::Ipv6Only).unwrap();
+
+        let servers = cfg["dns"]["servers"].as_array().unwrap();
+        assert_eq!(servers.len(), 2);
+        assert_eq!(cfg["route"]["default_domain_resolver"]["server"], "local");
+    }
+
+    #[test]
+    fn strategy_round_trips_through_config() {
+        for s in OutboundStrategy::ALL {
+            let mut cfg = json!({ "outbounds": [] });
+            set_outbound_strategy(&mut cfg, s).unwrap();
+            assert_eq!(get_outbound_strategy(&cfg), s, "{:?} 没能读回来", s);
+        }
+    }
+
+    /// 切回 Auto 要把字段删干净，不能留个空 route 壳子。
+    #[test]
+    fn auto_removes_the_resolver_and_empty_route() {
+        let mut cfg = json!({ "outbounds": [] });
+        set_outbound_strategy(&mut cfg, OutboundStrategy::Ipv4Only).unwrap();
+        set_outbound_strategy(&mut cfg, OutboundStrategy::Auto).unwrap();
+
+        assert_eq!(get_outbound_strategy(&cfg), OutboundStrategy::Auto);
+        assert!(cfg.get("route").is_none(), "空 route 应该一起删掉");
+    }
+
+    /// route 里还有别的设置时只删 default_domain_resolver，别把 route 整段端走。
+    #[test]
+    fn auto_keeps_route_when_it_has_other_settings() {
+        let mut cfg = json!({
+            "route": { "final": "direct", "default_domain_resolver": { "server": "local", "strategy": "ipv4_only" } },
+            "outbounds": []
+        });
+        set_outbound_strategy(&mut cfg, OutboundStrategy::Auto).unwrap();
+
+        assert_eq!(cfg["route"]["final"], "direct");
+        assert!(cfg["route"].get("default_domain_resolver").is_none());
+    }
+
+    /// default_domain_resolver 也允许写成裸 tag 字符串，那种形式没带 strategy。
+    #[test]
+    fn bare_tag_resolver_reads_as_auto() {
+        let cfg = json!({ "route": { "default_domain_resolver": "local" } });
+        assert_eq!(get_outbound_strategy(&cfg), OutboundStrategy::Auto);
+    }
+
+    #[test]
+    fn parse_accepts_short_names_and_singbox_values() {
+        assert_eq!(
+            OutboundStrategy::parse("v4only"),
+            Some(OutboundStrategy::Ipv4Only)
+        );
+        assert_eq!(
+            OutboundStrategy::parse("IPv4_Only"),
+            Some(OutboundStrategy::Ipv4Only)
+        );
+        assert_eq!(
+            OutboundStrategy::parse("prefer-ipv6"),
+            Some(OutboundStrategy::PreferIpv6)
+        );
+        assert_eq!(
+            OutboundStrategy::parse("auto"),
+            Some(OutboundStrategy::Auto)
+        );
+        assert_eq!(OutboundStrategy::parse("v5only"), None);
+    }
+
+    #[test]
+    fn next_cycles_through_every_strategy_and_wraps() {
+        let mut seen = vec![OutboundStrategy::Auto];
+        let mut cur = OutboundStrategy::Auto;
+        for _ in 0..OutboundStrategy::ALL.len() {
+            cur = cur.next();
+            if cur != OutboundStrategy::Auto {
+                seen.push(cur);
+            }
+        }
+        assert_eq!(cur, OutboundStrategy::Auto, "循环应该回到起点");
+        assert_eq!(seen.len(), OutboundStrategy::ALL.len());
+    }
+
+    /// block / dns 特殊出站 1.13.0 已移除，留着会让 sing-box check 直接失败。
+    #[test]
+    fn strips_legacy_block_and_dns_outbounds() {
+        let mut cfg = json!({
+            "outbounds": [
+                { "type": "direct", "tag": "direct" },
+                { "type": "block", "tag": "block" },
+                { "type": "dns", "tag": "dns-out" }
+            ]
+        });
+        let removed = strip_legacy_special_outbounds(&mut cfg);
+
+        assert_eq!(removed, vec!["block", "dns-out"]);
+        let left = cfg["outbounds"].as_array().unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0]["tag"], "direct");
+    }
+
+    #[test]
+    fn stripping_is_a_noop_on_a_clean_config() {
+        let mut cfg = json!({ "outbounds": [ { "type": "direct", "tag": "direct" } ] });
+        assert!(strip_legacy_special_outbounds(&mut cfg).is_empty());
+        assert_eq!(cfg["outbounds"].as_array().unwrap().len(), 1);
     }
 }

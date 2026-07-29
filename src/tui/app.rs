@@ -90,6 +90,8 @@ pub struct AppState {
     pub modal: Option<Modal>,
     pub kernel: Option<crate::core::singbox::KernelStatus>,
     pub kernel_busy: Option<&'static str>,
+    /// 出站地址族策略，从 config.json 的 route.default_domain_resolver 读出来
+    pub outbound_strategy: crate::core::config::OutboundStrategy,
     pub nginx: Option<crate::core::nginx::NginxStatus>,
     pub nginx_busy: Option<&'static str>,
     pub nginx_public_base: Option<String>,
@@ -132,6 +134,7 @@ impl AppState {
             modal: None,
             kernel: None,
             kernel_busy: None,
+            outbound_strategy: crate::core::config::OutboundStrategy::default(),
             nginx: None,
             nginx_busy: None,
             nginx_public_base: None,

@@ -1,5 +1,54 @@
 # CHANGELOG
 
+## v0.7.0
+
+### Added
+
+- **出站地址族策略**：可以把出站限定成仅 IPv4 / 仅 IPv6，或设成优先某一族。
+  CLI `sb outbound` 查看、`sb outbound set <auto|prefer4|prefer6|v4only|v6only>` 设置；
+  TUI 内核页按 `[o]` 循环切换，页面上直接显示当前值。
+
+  用的是 sing-box 1.12.0 引入的 `route.default_domain_resolver`：
+
+  ```json
+  {
+    "dns": { "servers": [ { "type": "local", "tag": "local" } ] },
+    "route": {
+      "default_domain_resolver": { "server": "local", "strategy": "ipv4_only" }
+    }
+  }
+  ```
+
+  > **刻意没用 dial 字段 `domain_strategy`** ——它 1.12.0 起弃用、**1.14.0 已移除**，
+  > 上游迁移文档明确指向 `domain_resolver` 作为替代。有一个测试专门断言任何策略
+  > 都不会把 `domain_strategy` 写进配置。
+  >
+  > 内核低于 1.12.0 时命令会提前拒绝并提示升级，而不是让用户去看
+  > `sing-box check` 的 unknown field 报错。版本号读不出来时放行，交给 `check` 把关。
+
+  边界说明：这个策略只约束**域名解析**，客户端直接给 IP 字面量时不经过 DNS，
+  管不到；`v6only` 在没有 IPv6 出口的机器上会让所有域名目标全部连不上。
+  配置里已有 `dns.servers` 时只借用第一个带 `tag` 的 server，不改写已有上游。
+
+  和节点级的「订阅优先 IPv6」无关——后者只改订阅链接里导出的地址。
+
+### Fixed
+
+- **默认配置模板带着 1.13.0 已删除的 `block` 出站**：老式特殊出站 `block` / `dns`
+  在 1.11.0 弃用、**1.13.0 移除**（改由路由规则动作 `reject` / `hijack-dns` 承担）。
+  模板一直照写不误，于是在 1.13+ 内核上 `sing-box check` 会直接失败——而所有配置改写
+  都要过这一关，等于加节点、改用户全都写不进去。模板已去掉，并且每次写出站策略时
+  顺手清掉存量配置里残留的这两个出站。新增测试盯住模板不再含被移除的字段。
+
+### Changed
+
+- `sing-box version` 的输出现在会解析成可比较的 `(major, minor, patch)`
+  （`parse_semver`），之前只当整行字符串存着，没法按版本门控字段。
+  预发布/构建后缀（`1.13.0-beta.5`、`1.14.0+git`）会被正确剥掉。
+- 默认配置模板补上 `dns.servers`，用 1.12.0 起的新式写法（`type` + `tag`）；
+  旧的 `{ "address": ... }` 形式 1.14.0 已移除。
+- 测试 82 → 98。
+
 ## v0.6.2
 
 ### Fixed

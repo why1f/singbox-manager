@@ -121,6 +121,37 @@ fn read_version(bin: &str) -> Option<String> {
     s.lines().next().map(|l| l.trim().to_string())
 }
 
+/// 从 `read_version` 那种整行文本里抠出 (major, minor, patch)。
+/// 认不出来就返回 None——调用方一律按"不确定"处理，别拿它当拦路虎。
+pub fn parse_semver(line: &str) -> Option<(u32, u32, u32)> {
+    let token = line
+        .split_whitespace()
+        .find(|t| t.starts_with(|c: char| c.is_ascii_digit()) && t.contains('.'))?;
+    // 砍掉 "1.12.0-beta.3" / "1.12.0+git" 之类的后缀
+    let core = token
+        .split(['-', '+'])
+        .next()
+        .unwrap_or(token)
+        .trim_end_matches('.');
+    let mut it = core.split('.').map(|p| p.parse::<u32>());
+    let major = it.next()?.ok()?;
+    let minor = it.next().transpose().ok()?.unwrap_or(0);
+    let patch = it.next().transpose().ok()?.unwrap_or(0);
+    Some((major, minor, patch))
+}
+
+/// `route.default_domain_resolver` 是 1.12.0 引入的。低于这个版本要提前拦住，
+/// 否则只会收到 `sing-box check` 的 unknown field 报错，看不出所以然。
+///
+/// 版本读不出来时返回 true（放行），让 `sing-box check` 去把关——
+/// 拿不到版本号的场景（二进制路径没配对、权限不足）不该顺带禁用功能。
+pub fn supports_domain_resolver(bin: &str) -> bool {
+    match read_version(bin).as_deref().and_then(parse_semver) {
+        Some(v) => v >= (1, 12, 0),
+        None => true,
+    }
+}
+
 fn detect_running() -> Option<bool> {
     Command::new("pgrep")
         .args(["-x", "sing-box"])
@@ -614,12 +645,19 @@ fn set_executable(_: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+// outbounds 里不再有 `block`：老式特殊出站 block / dns 在 1.11.0 弃用、1.13.0 移除，
+// 现在拒绝连接用路由规则动作 `reject`。dns.servers 用 1.12.0 起的新式写法
+// （`type` + `tag`），给 route.default_domain_resolver 留个可引用的 tag。
 const DEFAULT_CONFIG_WITH_V2RAY_API: &str = r#"{
   "log": { "level": "info", "timestamp": true },
+  "dns": {
+    "servers": [
+      { "type": "local", "tag": "local" }
+    ]
+  },
   "inbounds": [],
   "outbounds": [
-    { "type": "direct", "tag": "direct" },
-    { "type": "block",  "tag": "block"  }
+    { "type": "direct", "tag": "direct" }
   ],
   "experimental": {
     "v2ray_api": {
@@ -633,6 +671,94 @@ const DEFAULT_CONFIG_WITH_V2RAY_API: &str = r#"{
 #[cfg(test)]
 mod tests {
     use super::{is_valid_sha256_hex, parse_dgst_sha256, parse_sha256_text};
+
+    #[test]
+    fn parse_semver_from_version_line() {
+        use super::parse_semver;
+        assert_eq!(parse_semver("sing-box version 1.10.0"), Some((1, 10, 0)));
+        assert_eq!(parse_semver("sing-box version 1.12.4"), Some((1, 12, 4)));
+        // 预发布/带构建元数据的后缀要砍掉
+        assert_eq!(
+            parse_semver("sing-box version 1.13.0-beta.5"),
+            Some((1, 13, 0))
+        );
+        assert_eq!(
+            parse_semver("sing-box version 1.14.0+git"),
+            Some((1, 14, 0))
+        );
+        // 补位
+        assert_eq!(parse_semver("sing-box version 2.0"), Some((2, 0, 0)));
+        // 认不出来就 None，别瞎猜
+        assert_eq!(parse_semver("sing-box"), None);
+        assert_eq!(parse_semver(""), None);
+    }
+
+    /// 1.12.0 是 route.default_domain_resolver 的引入版本，边界要卡准。
+    #[test]
+    fn semver_ordering_gates_at_1_12_0() {
+        use super::parse_semver;
+        let v = |s: &str| parse_semver(s).unwrap();
+        assert!(v("sing-box version 1.11.15") < (1, 12, 0));
+        assert!(v("sing-box version 1.12.0") >= (1, 12, 0));
+        assert!(v("sing-box version 1.13.2") >= (1, 12, 0));
+    }
+
+    /// 把模板 + 一次策略设置的最终产物整份钉住，对照官方迁移文档的示例形状：
+    /// dns.servers 里一个 `{type,tag}`，route 里 `{server,strategy}`。
+    /// 改动这里等于改动写进用户机器的 config.json，值得一眼看全。
+    #[test]
+    fn template_plus_strategy_matches_documented_shape() {
+        let mut cfg: serde_json::Value =
+            serde_json::from_str(super::DEFAULT_CONFIG_WITH_V2RAY_API).unwrap();
+        crate::core::config::set_outbound_strategy(
+            &mut cfg,
+            crate::core::config::OutboundStrategy::Ipv4Only,
+        )
+        .unwrap();
+
+        assert_eq!(
+            cfg,
+            serde_json::json!({
+                "log": { "level": "info", "timestamp": true },
+                "dns": { "servers": [ { "type": "local", "tag": "local" } ] },
+                "inbounds": [],
+                "outbounds": [ { "type": "direct", "tag": "direct" } ],
+                "route": {
+                    "default_domain_resolver": { "server": "local", "strategy": "ipv4_only" }
+                },
+                "experimental": {
+                    "v2ray_api": {
+                        "listen": "127.0.0.1:18080",
+                        "stats": { "enabled": true, "users": [] }
+                    }
+                }
+            })
+        );
+    }
+    /// 模板不能再带 1.13.0 已移除的 block 出站，否则新内核 check 直接失败，
+    /// 连带任何一次配置改写都写不进去。dns.servers 也必须是新式写法。
+    #[test]
+    fn default_template_has_no_removed_fields() {
+        let cfg: serde_json::Value = serde_json::from_str(super::DEFAULT_CONFIG_WITH_V2RAY_API)
+            .expect("模板必须是合法 JSON");
+
+        let outbounds = cfg["outbounds"].as_array().unwrap();
+        assert!(
+            !outbounds
+                .iter()
+                .any(|o| o["type"] == "block" || o["type"] == "dns"),
+            "block / dns 特殊出站 1.13.0 已移除"
+        );
+        assert!(outbounds.iter().any(|o| o["type"] == "direct"));
+
+        let servers = cfg["dns"]["servers"].as_array().unwrap();
+        assert_eq!(servers[0]["type"], "local");
+        assert_eq!(servers[0]["tag"], "local");
+        assert!(
+            servers[0].get("address").is_none(),
+            "旧式 address 写法 1.14.0 已移除"
+        );
+    }
 
     #[test]
     fn parse_sha256_simple_format() {

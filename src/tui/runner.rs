@@ -46,6 +46,7 @@ pub enum UiEvent {
     },
     KernelStatus(crate::core::singbox::KernelStatus),
     KernelBusy(Option<&'static str>),
+    OutboundStrategy(crate::core::config::OutboundStrategy),
     NginxStatus(crate::core::nginx::NginxStatus),
     NginxBusy(Option<&'static str>),
     SysMetrics {
@@ -101,7 +102,7 @@ async fn event_loop(
     cfg: Arc<AppConfig>,
 ) -> Result<()> {
     let (ui_tx, mut ui_rx) = mpsc::channel::<UiEvent>(64);
-    spawn_kernel_refresh(ui_tx.clone());
+    spawn_kernel_refresh(ui_tx.clone(), cfg.singbox.config_path.clone());
     spawn_nginx_refresh(ui_tx.clone(), cfg.clone());
     spawn_sys_sampler(ui_tx.clone());
 
@@ -350,6 +351,7 @@ fn apply_ui_event(s: &mut AppState, ev: UiEvent) {
             s.kernel = Some(k);
         }
         UiEvent::KernelBusy(op) => s.kernel_busy = op,
+        UiEvent::OutboundStrategy(v) => s.outbound_strategy = v,
         UiEvent::NginxStatus(n) => s.nginx = Some(n),
         UiEvent::NginxBusy(op) => s.nginx_busy = op,
         UiEvent::SysMetrics { cpu, rx, tx } => {
@@ -578,7 +580,7 @@ fn handle_page_key(
     match k.code {
         KeyCode::Tab => {
             s.next_page();
-            maybe_refresh_kernel(s, &ui_tx);
+            maybe_refresh_kernel(s, &ui_tx, &cfg);
         }
         KeyCode::Char('1') => s.page = Page::Dashboard,
         KeyCode::Char('2') => s.page = Page::Users,
@@ -586,7 +588,7 @@ fn handle_page_key(
         KeyCode::Char('4') => s.page = Page::Logs,
         KeyCode::Char('5') => {
             s.page = Page::Kernel;
-            maybe_refresh_kernel(s, &ui_tx);
+            maybe_refresh_kernel(s, &ui_tx, &cfg);
         }
         KeyCode::Char('6') => {
             s.page = Page::Nginx;
@@ -768,7 +770,7 @@ fn handle_kernel_key(
     match k.code {
         KeyCode::Tab => {
             s.next_page();
-            maybe_refresh_kernel(s, &ui_tx);
+            maybe_refresh_kernel(s, &ui_tx, &cfg);
         }
         KeyCode::Char('1') => s.page = Page::Dashboard,
         KeyCode::Char('2') => s.page = Page::Users,
@@ -780,9 +782,15 @@ fn handle_kernel_key(
             maybe_refresh_nginx(s, &ui_tx, cfg.clone());
         }
         KeyCode::Esc => s.status_msg = None,
-        KeyCode::Char('R') => spawn_kernel_refresh(ui_tx),
+        KeyCode::Char('R') => spawn_kernel_refresh(ui_tx, cfg.singbox.config_path.clone()),
         _ if s.kernel_busy.is_some() => {
             s.set_status("正在执行上一操作，请稍候", StatusLevel::Warn);
+        }
+        KeyCode::Char('o') => {
+            let next = s.outbound_strategy.next();
+            // 先本地翻一格，界面立刻有反馈；落盘失败时下面的刷新会把它纠回去
+            s.outbound_strategy = next;
+            spawn_set_outbound_strategy(pool, cfg, ui_tx, next);
         }
         KeyCode::Char('i') => spawn_kernel_install_latest(pool, cfg, ui_tx),
         KeyCode::Char('v') => {
@@ -817,9 +825,9 @@ fn handle_kernel_key(
     }
 }
 
-fn maybe_refresh_kernel(s: &AppState, ui_tx: &mpsc::Sender<UiEvent>) {
+fn maybe_refresh_kernel(s: &AppState, ui_tx: &mpsc::Sender<UiEvent>, cfg: &AppConfig) {
     if s.page == Page::Kernel {
-        spawn_kernel_refresh(ui_tx.clone());
+        spawn_kernel_refresh(ui_tx.clone(), cfg.singbox.config_path.clone());
     }
 }
 
@@ -838,7 +846,7 @@ fn handle_nginx_key(
     match k.code {
         KeyCode::Tab => {
             s.next_page();
-            maybe_refresh_kernel(s, &ui_tx);
+            maybe_refresh_kernel(s, &ui_tx, &cfg);
         }
         KeyCode::Char('1') => s.page = Page::Dashboard,
         KeyCode::Char('2') => s.page = Page::Users,
@@ -846,7 +854,7 @@ fn handle_nginx_key(
         KeyCode::Char('4') => s.page = Page::Logs,
         KeyCode::Char('5') => {
             s.page = Page::Kernel;
-            maybe_refresh_kernel(s, &ui_tx);
+            maybe_refresh_kernel(s, &ui_tx, &cfg);
         }
         KeyCode::Char('6') => { /* 已在本页 */ }
         KeyCode::Esc => s.status_msg = None,
@@ -969,7 +977,7 @@ fn spawn_nginx_genconf(tx: mpsc::Sender<UiEvent>, cfg: Arc<AppConfig>) {
     });
 }
 
-fn spawn_kernel_refresh(tx: mpsc::Sender<UiEvent>) {
+fn spawn_kernel_refresh(tx: mpsc::Sender<UiEvent>, config_path: String) {
     tokio::spawn(async move {
         let status = tokio::task::spawn_blocking(crate::core::singbox::status)
             .await
@@ -981,6 +989,15 @@ fn spawn_kernel_refresh(tx: mpsc::Sender<UiEvent>) {
                 binary_path: None,
             });
         let _ = tx.send(UiEvent::KernelStatus(status)).await;
+        // 出站策略存在 config.json 里，顺着内核页刷新一起读，省一个刷新入口
+        let strategy = tokio::task::spawn_blocking(move || {
+            crate::core::config::load(&config_path)
+                .map(|c| crate::core::config::get_outbound_strategy(&c))
+                .unwrap_or_default()
+        })
+        .await
+        .unwrap_or_default();
+        let _ = tx.send(UiEvent::OutboundStrategy(strategy)).await;
     });
 }
 
@@ -1016,6 +1033,76 @@ fn spawn_sys_sampler(tx: mpsc::Sender<UiEvent>) {
             }
             prev_cpu = cur_cpu;
             prev_net = cur_net;
+        }
+    });
+}
+
+/// 写出站地址族策略并热重载。失败时把界面上乐观翻过的那一格纠回真实值。
+fn spawn_set_outbound_strategy(
+    pool: Arc<sqlx::SqlitePool>,
+    cfg: Arc<AppConfig>,
+    tx: mpsc::Sender<UiEvent>,
+    target: crate::core::config::OutboundStrategy,
+) {
+    use crate::core::config::OutboundStrategy;
+    tokio::spawn(async move {
+        let _ = tx.send(UiEvent::KernelBusy(Some("切换出站策略"))).await;
+        let result = async {
+            let bin = cfg.singbox.binary_path.clone();
+            let supported = tokio::task::spawn_blocking(move || {
+                crate::core::singbox::supports_domain_resolver(&bin)
+            })
+            .await
+            .unwrap_or(true);
+            if target != OutboundStrategy::Auto && !supported {
+                anyhow::bail!("sing-box 需要 >= 1.12.0，按 [v] 或 [i] 升级内核");
+            }
+            crate::service::runtime_service::mutate_config_locked(
+                &pool,
+                &cfg.singbox.config_path,
+                Some(&cfg.singbox.binary_path),
+                false,
+                move |cfg_json, _ops| {
+                    crate::core::config::strip_legacy_special_outbounds(cfg_json);
+                    crate::core::config::set_outbound_strategy(cfg_json, target)
+                },
+            )
+            .await?;
+            crate::service::runtime_service::validate_and_reload(&pool, &cfg).await
+        }
+        .await;
+        let _ = tx.send(UiEvent::KernelBusy(None)).await;
+        match result {
+            Ok(()) => {
+                let mut msg = format!("出站策略已设为 {}", target.label());
+                if target == OutboundStrategy::Ipv6Only {
+                    msg.push_str("（本机无 IPv6 出口时域名目标会全部连不上）");
+                }
+                let _ = tx
+                    .send(UiEvent::Status {
+                        msg,
+                        level: StatusLevel::Warn,
+                    })
+                    .await;
+            }
+            Err(e) => {
+                let _ = tx
+                    .send(UiEvent::Status {
+                        msg: format!("切换出站策略失败: {}", e),
+                        level: StatusLevel::Error,
+                    })
+                    .await;
+                // 配置没写成，把乐观更新的那一格纠回盘上的真实值
+                let path = cfg.singbox.config_path.clone();
+                let actual = tokio::task::spawn_blocking(move || {
+                    crate::core::config::load(&path)
+                        .map(|c| crate::core::config::get_outbound_strategy(&c))
+                        .unwrap_or_default()
+                })
+                .await
+                .unwrap_or_default();
+                let _ = tx.send(UiEvent::OutboundStrategy(actual)).await;
+            }
         }
     });
 }

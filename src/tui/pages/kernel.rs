@@ -10,7 +10,7 @@ use ratatui::{
 pub fn render(f: &mut Frame, area: Rect, s: &AppState) {
     let c = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(9), Constraint::Min(0)])
+        .constraints([Constraint::Length(10), Constraint::Min(0)])
         .split(area);
 
     let status_lines = match &s.kernel {
@@ -61,6 +61,14 @@ pub fn render(f: &mut Frame, area: Rect, s: &AppState) {
                     "  路径: {}",
                     k.binary_path.as_deref().unwrap_or("—")
                 )),
+                Line::from(vec![
+                    Span::raw("  出站: "),
+                    Span::styled(
+                        s.outbound_strategy.label(),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::styled("   ([o] 切换)", Style::default().fg(Color::DarkGray)),
+                ]),
                 Line::from(""),
                 Line::from(Span::styled(
                     match s.kernel_busy {
@@ -99,6 +107,7 @@ pub fn render(f: &mut Frame, area: Rect, s: &AppState) {
         Line::from("  [u]  卸载 (停服务 + 删二进制/unit；保留 /etc/sing-box)"),
         Line::from("  [s]  启动        [S] 停止        [x] 重启"),
         Line::from("  [e]  开机自启    [d] 取消自启"),
+        Line::from("  [o]  切换出站地址族策略 (自动 / 优先 v4 / 优先 v6 / 仅 v4 / 仅 v6)"),
         Line::from("  [R]  刷新状态"),
         Line::from(""),
         Line::from(Span::styled(
@@ -107,6 +116,14 @@ pub fn render(f: &mut Frame, area: Rect, s: &AppState) {
         )),
         Line::from(Span::styled(
             "  v2ray_api 版由本仓库 workflow 基于上游源码 +with_v2ray_api 每日构建。",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            "  出站策略写的是 route.default_domain_resolver.strategy (需内核 >= 1.12.0)，",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            "  只约束域名解析；客户端直接给 IP 字面量时不受影响。",
             Style::default().fg(Color::DarkGray),
         )),
     ];

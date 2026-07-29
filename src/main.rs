@@ -126,6 +126,10 @@ async fn main() -> Result<()> {
             run_bind(a.command, &pool, &cfg).await
         }
         Commands::Nginx(a) => run_nginx(a.command, &cfg),
+        Commands::Outbound(a) => {
+            let pool = open_pool(&cfg).await?;
+            run_outbound(a.command, &pool, &cfg).await
+        }
         Commands::Daemon => {
             let pool = open_pool(&cfg).await?;
             run_daemon(pool, cfg).await
@@ -1158,6 +1162,81 @@ fn print_bind_status(u: &model::user::User) {
         println!("让该用户在 Telegram 里发送：");
         println!("  /bind {}", u.tg_bind_token);
     }
+}
+
+async fn run_outbound(
+    cmd: Option<cli::outbound::OutboundCommands>,
+    pool: &sqlx::SqlitePool,
+    cfg: &AppConfig,
+) -> Result<()> {
+    use cli::outbound::OutboundCommands as O;
+    use core::config::OutboundStrategy;
+
+    match cmd.unwrap_or(O::Show) {
+        O::Show => {
+            let current = core::config::load(&cfg.singbox.config_path)
+                .map(|c| core::config::get_outbound_strategy(&c))
+                .unwrap_or_default();
+            println!("出站地址族策略: {} ({})", current.label(), current.key());
+            println!();
+            // 两个对齐列都是纯 ASCII，`{:<N}` 按字符数补齐就是对的；
+            // 中文标签放最后一列不补齐，免得宽字符把列错开。
+            println!("  {:<8} {:<12} 说明", "MODE", "strategy");
+            for s in OutboundStrategy::ALL {
+                let mark = if s == current { "*" } else { " " };
+                println!(
+                    "{} {:<8} {:<12} {}",
+                    mark,
+                    s.key(),
+                    s.as_str().unwrap_or("-"),
+                    s.label()
+                );
+            }
+            println!();
+            println!("用 `sb outbound set <MODE>` 修改。");
+        }
+        O::Set { mode } => {
+            let target = OutboundStrategy::parse(&mode).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "未知策略 '{}'，可选: {}",
+                    mode,
+                    OutboundStrategy::ALL
+                        .iter()
+                        .map(|s| s.key())
+                        .collect::<Vec<_>>()
+                        .join(" / ")
+                )
+            })?;
+            if target != OutboundStrategy::Auto
+                && !core::singbox::supports_domain_resolver(&cfg.singbox.binary_path)
+            {
+                anyhow::bail!(
+                    "当前 sing-box 版本不支持 route.default_domain_resolver（需要 >= 1.12.0），\
+                     先跑 `sb kernel update` 升级内核"
+                );
+            }
+            service::runtime_service::mutate_config_locked(
+                pool,
+                &cfg.singbox.config_path,
+                Some(&cfg.singbox.binary_path),
+                false,
+                move |cfg_json, _ops| {
+                    for tag in core::config::strip_legacy_special_outbounds(cfg_json) {
+                        println!("· 已移除 1.13.0 中删掉的老式特殊出站 '{}'", tag);
+                    }
+                    core::config::set_outbound_strategy(cfg_json, target)
+                },
+            )
+            .await?;
+            service::runtime_service::validate_and_reload(pool, cfg).await?;
+            println!("✓ 出站地址族策略已设为: {}", target.label());
+            if target == OutboundStrategy::Ipv6Only {
+                println!("  注意: 本机若没有 IPv6 出口，所有域名目标都会连不上。");
+            }
+            println!("  仅影响域名解析；客户端直接给 IP 字面量时不受此策略约束。");
+        }
+    }
+    Ok(())
 }
 
 fn run_nginx(cmd: cli::nginx::NginxCommands, cfg: &AppConfig) -> Result<()> {
