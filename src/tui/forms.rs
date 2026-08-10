@@ -8,6 +8,8 @@ use ratatui::{
     Frame,
 };
 
+use super::theme::SELECT_BG;
+
 pub const PROTOCOLS: [&str; 8] = [
     // 常用在前：vless（reality + ws） → hysteria2 → vmess-ws，其余按偏好
     "vless-reality",
@@ -895,7 +897,10 @@ fn render_user(f: &mut Frame, area: Rect, form: &UserForm, title: &str) {
     lines.push(Line::from(""));
     for (i, (label, val)) in labels.iter().zip(vals).enumerate() {
         let style = if i == form.focus {
-            Style::default().fg(Color::Black).bg(Color::Cyan)
+            Style::default()
+                .fg(Color::White)
+                .bg(SELECT_BG)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::White)
         };
@@ -947,7 +952,10 @@ fn render_user_edit(f: &mut Frame, area: Rect, form: &UserEditForm) {
     lines.push(Line::from(""));
     for (i, (label, val)) in labels.iter().zip(vals).enumerate() {
         let style = if i == form.focus {
-            Style::default().fg(Color::Black).bg(Color::Cyan)
+            Style::default()
+                .fg(Color::White)
+                .bg(SELECT_BG)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::White)
         };
@@ -1001,7 +1009,10 @@ fn node_lines(form: &NodeForm) -> Vec<Line<'static>> {
             NodeField::RelayPort => (RELAY_PORT_LABEL, form.relay_port.clone()),
         };
         let style = if i == form.focus {
-            Style::default().fg(Color::Black).bg(Color::Cyan)
+            Style::default()
+                .fg(Color::White)
+                .bg(SELECT_BG)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::White)
         };
@@ -1103,7 +1114,10 @@ fn node_edit_lines(form: &NodeEditForm) -> Vec<Line<'static>> {
             NodeField::Tag | NodeField::Protocol => continue,
         };
         let style = if i == form.focus {
-            Style::default().fg(Color::Black).bg(Color::Cyan)
+            Style::default()
+                .fg(Color::White)
+                .bg(SELECT_BG)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::White)
         };
@@ -1312,7 +1326,10 @@ fn render_picker(f: &mut Frame, area: Rect, p: &NodePicker) {
                 "[ ]"
             };
             let style = if i == p.cursor {
-                Style::default().fg(Color::Black).bg(Color::Cyan)
+                Style::default()
+                    .fg(Color::White)
+                    .bg(SELECT_BG)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::White)
             };
@@ -1352,7 +1369,10 @@ fn render_select_restore(f: &mut Frame, area: Rect, files: &[String], cursor: us
     } else {
         for (i, file) in files.iter().enumerate() {
             let style = if i == cursor {
-                Style::default().fg(Color::Black).bg(Color::Cyan)
+                Style::default()
+                    .fg(Color::White)
+                    .bg(SELECT_BG)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::White)
             };

@@ -29,7 +29,7 @@ pub fn render(f: &mut Frame, area: Rect, s: &AppState) {
             let sel = i == s.node_table.selected;
             let style = if sel {
                 Style::default()
-                    .bg(Color::DarkGray)
+                    .bg(crate::tui::theme::ROW_BG)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
